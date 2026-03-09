@@ -135,15 +135,48 @@ func listZFSSnapshots(dataset string) ([]ZFSSnapshot, error) {
 }
 
 func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "left":
-		if m.zfsPanel.actionRunning {
-			return m, nil
-		}
-		if m.zfsPanel.inputMode {
+	if m.zfsPanel.inputMode {
+		switch msg.String() {
+		case "esc", "left":
+			if m.zfsPanel.actionRunning {
+				return m, nil
+			}
 			m.zfsPanel.inputMode = false
 			m.zfsPanel.inputValue = ""
 			m.zfsPanel.message = "Snapshot creation canceled."
+			return m, nil
+		case "enter":
+			if m.zfsPanel.actionRunning {
+				return m, nil
+			}
+			name := strings.TrimSpace(m.zfsPanel.inputValue)
+			if name == "" || strings.Contains(name, "@") || strings.ContainsAny(name, " \t") {
+				m.zfsPanel.message = "Invalid snapshot name."
+				return m, nil
+			}
+			m.zfsPanel.inputMode = false
+			m.zfsPanel.actionRunning = true
+			m.zfsPanel.logs = nil
+			m.zfsPanel.err = nil
+			m.zfsPanel.message = "Creating snapshot..."
+			return m, createZFSSnapshotCmd(m.zfsPanel.dataset, name)
+		case "backspace", "delete":
+			runes := []rune(m.zfsPanel.inputValue)
+			if len(runes) == 0 {
+				return m, nil
+			}
+			m.zfsPanel.inputValue = string(runes[:len(runes)-1])
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			m.zfsPanel.inputValue += string(msg.Runes)
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc", "left":
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		if m.zfsPanel.confirmRollback {
@@ -171,7 +204,7 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.zfsPanel.message = "Enter snapshot name and press enter."
 		return m, nil
 	case "r":
-		if m.zfsPanel.actionRunning || m.zfsPanel.inputMode {
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		snapshot, ok := m.zfsPanel.selectedSnapshot()
@@ -186,19 +219,6 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.zfsPanel.actionRunning {
 			return m, nil
-		}
-		if m.zfsPanel.inputMode {
-			name := strings.TrimSpace(m.zfsPanel.inputValue)
-			if name == "" || strings.Contains(name, "@") || strings.ContainsAny(name, " \t") {
-				m.zfsPanel.message = "Invalid snapshot name."
-				return m, nil
-			}
-			m.zfsPanel.inputMode = false
-			m.zfsPanel.actionRunning = true
-			m.zfsPanel.logs = nil
-			m.zfsPanel.err = nil
-			m.zfsPanel.message = "Creating snapshot..."
-			return m, createZFSSnapshotCmd(m.zfsPanel.dataset, name)
 		}
 		if m.zfsPanel.confirmRollback {
 			target := m.zfsPanel.rollbackTarget
@@ -215,50 +235,35 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, rollbackZFSSnapshotCmd(target)
 		}
 	case "j", "down":
-		if m.zfsPanel.actionRunning || m.zfsPanel.inputMode {
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		m.zfsPanel.cursor++
 	case "k", "up":
-		if m.zfsPanel.actionRunning || m.zfsPanel.inputMode {
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		m.zfsPanel.cursor--
 	case "g", "home":
-		if m.zfsPanel.actionRunning || m.zfsPanel.inputMode {
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		m.zfsPanel.cursor = 0
 	case "G", "end":
-		if m.zfsPanel.actionRunning || m.zfsPanel.inputMode {
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		m.zfsPanel.cursor = len(m.zfsPanel.snapshots) - 1
 	case "pgdown":
-		if m.zfsPanel.actionRunning || m.zfsPanel.inputMode {
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		m.zfsPanel.cursor += m.zfsListHeight()
 	case "pgup":
-		if m.zfsPanel.actionRunning || m.zfsPanel.inputMode {
+		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		m.zfsPanel.cursor -= m.zfsListHeight()
-	case "backspace", "delete":
-		if !m.zfsPanel.inputMode {
-			return m, nil
-		}
-		runes := []rune(m.zfsPanel.inputValue)
-		if len(runes) == 0 {
-			return m, nil
-		}
-		m.zfsPanel.inputValue = string(runes[:len(runes)-1])
-		return m, nil
-	}
-
-	if m.zfsPanel.inputMode && msg.Type == tea.KeyRunes {
-		m.zfsPanel.inputValue += string(msg.Runes)
-		return m, nil
 	}
 
 	m.zfsPanel.boundCursor(m.zfsListHeight())

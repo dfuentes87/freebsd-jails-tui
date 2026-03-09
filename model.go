@@ -184,13 +184,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, pollCmd()
 	case tea.KeyMsg:
 		key := msg.String()
-		if key == "q" || key == "ctrl+c" {
+		if key == "ctrl+c" {
+			return m, tea.Quit
+		}
+		if key == "q" && !m.isTextEntryMode() {
 			return m, tea.Quit
 		}
 		if m.mode == screenHelp {
 			return m.updateHelpKeys(msg)
 		}
-		if key == "?" || (key == "h" && !m.helpHotkeyConflicts()) {
+		if (key == "?" || key == "h") && !m.isTextEntryMode() {
 			m.helpReturnMode = m.mode
 			m.helpScroll = 0
 			m.mode = screenHelp
@@ -210,14 +213,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) helpHotkeyConflicts() bool {
-	if m.mode == screenCreateWizard {
-		return true
+func (m model) isTextEntryMode() bool {
+	switch m.mode {
+	case screenCreateWizard:
+		if m.wizardApplying {
+			return false
+		}
+		if m.wizard.templateMode == wizardTemplateModeSave {
+			return true
+		}
+		if m.wizard.templateMode == wizardTemplateModeLoad {
+			return false
+		}
+		return !m.wizard.isConfirmationStep()
+	case screenZFSPanel:
+		return m.zfsPanel.inputMode
+	default:
+		return false
 	}
-	if m.mode == screenZFSPanel && m.zfsPanel.inputMode {
-		return true
-	}
-	return false
 }
 
 func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -372,6 +385,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if !m.wizardApplying && !m.wizard.isConfirmationStep() && msg.Type == tea.KeyRunes {
+		m.wizard.appendToActive(string(msg.Runes))
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc":
 		if m.wizardApplying {
@@ -406,13 +424,13 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.wizard.prevField()
 		return m, nil
-	case "s", "S":
+	case "s", "S", "ctrl+s":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.beginTemplateSave()
 		return m, nil
-	case "l", "L":
+	case "l", "L", "ctrl+l":
 		if m.wizardApplying {
 			return m, nil
 		}
@@ -448,12 +466,6 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.wizardApplying {
-		return m, nil
-	}
-	if msg.Type == tea.KeyRunes {
-		m.wizard.appendToActive(string(msg.Runes))
-	}
 	return m, nil
 }
 
@@ -528,7 +540,7 @@ func (m model) renderHelpView() string {
 func (m model) helpLines(width int) []string {
 	lines := []string{
 		sectionStyle.Render("Global"),
-		truncate("h or ?: open help page", width),
+		truncate("?: open help page (h works outside text input)", width),
 		truncate("q: quit the application", width),
 		"",
 		sectionStyle.Render("Dashboard"),
@@ -554,8 +566,7 @@ func (m model) helpLines(width int) []string {
 		truncate("tab/shift+tab: move field", width),
 		truncate("enter/right: next step", width),
 		truncate("left: previous step", width),
-		truncate("s: save current values as template", width),
-		truncate("l: load saved template", width),
+		truncate("s/l on step 6: save/load templates", width),
 		truncate("?: open help page", width),
 		truncate("step 6 enter: execute create actions", width),
 	}
@@ -669,7 +680,7 @@ func (m model) renderWizardView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "type to edit | tab/shift+tab: fields | enter/right: next | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit"
+	hint := "type to edit | tab/shift+tab: fields | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
 	if m.wizard.isConfirmationStep() {
 		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit"
 	}
@@ -987,7 +998,7 @@ func (m model) renderJailList(width, height int) string {
 
 func (m model) renderRows(maxRows, width int) string {
 	if len(m.snapshot.Jails) == 0 {
-		return "No jails discovered. Add jails in /etc/jail.conf or /etc/jail.conf.d/*.conf and run service jail start <name>."
+		return "No jails discovered yet. Create one manually in jail.conf/jail.conf.d or press c to open the jail creation wizard."
 	}
 	start := m.offset
 	end := min(len(m.snapshot.Jails), start+maxRows)

@@ -71,8 +71,8 @@ go run .
 - `tab` / `shift+tab`: move active field
 - `enter` / `right`: next step
 - `left`: previous step
-- `s`: save current wizard values as a template
-- `l`: load a saved template
+- `s` (step 6/confirmation): save current wizard values as a template
+- `l` (step 6/confirmation): load a saved template
 - `backspace`: delete character in active field
 - `esc`: cancel wizard and return to dashboard
 
