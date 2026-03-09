@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -85,11 +86,18 @@ type jailWizardValues struct {
 	MountPoints     string
 }
 
+type mountPointSpec struct {
+	Source string
+	Target string
+}
+
 type jailCreationWizard struct {
-	step    int
-	field   int
-	values  jailWizardValues
-	message string
+	step           int
+	field          int
+	values         jailWizardValues
+	message        string
+	executionLogs  []string
+	executionError string
 }
 
 func newJailCreationWizard() jailCreationWizard {
@@ -142,6 +150,8 @@ func (w *jailCreationWizard) nextStep() error {
 		w.step++
 		w.field = 0
 		w.message = ""
+		w.executionLogs = nil
+		w.executionError = ""
 	}
 	return nil
 }
@@ -151,6 +161,8 @@ func (w *jailCreationWizard) prevStep() {
 		w.step--
 		w.field = 0
 		w.message = ""
+		w.executionLogs = nil
+		w.executionError = ""
 	}
 }
 
@@ -334,20 +346,15 @@ func (w jailCreationWizard) summaryLines() []string {
 }
 
 func (w jailCreationWizard) jailConfPreviewLines() []string {
-	jailPath := "/usr/jails/" + strings.TrimSpace(w.values.Name)
-	lines := []string{
-		fmt.Sprintf("%s {", w.values.Name),
-		fmt.Sprintf("  host.hostname = %q;", w.values.Name),
-		fmt.Sprintf("  path = %q;", jailPath),
-		"  vnet;",
-		fmt.Sprintf("  vnet.interface = %q;", w.values.Interface),
-		fmt.Sprintf("  ip4.addr = %q;", w.values.IP4),
-		"  exec.start = \"/bin/sh /etc/rc\";",
-		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
-		"  persist;",
-		"}",
+	jailPath := defaultJailPathForValues(w.values)
+	fstabPath := ""
+	for _, spec := range parseMountPointSpecs(w.values.MountPoints) {
+		if spec.Source != "" {
+			fstabPath = jailFstabPathForName(w.values.Name)
+			break
+		}
 	}
-	return lines
+	return buildJailConfBlock(w.values, jailPath, fstabPath)
 }
 
 func (w jailCreationWizard) commandPlanLines() []string {
@@ -356,7 +363,7 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		fmt.Sprintf("   zfs create %s", w.values.Dataset),
 		"2. Provision jail root from selected template/release:",
 		fmt.Sprintf("   # source: %s", w.values.TemplateRelease),
-		"3. Add generated block to /etc/jail.conf",
+		fmt.Sprintf("3. Write jail config: %s", jailConfigPathForName(w.values.Name)),
 		fmt.Sprintf("4. Start jail: service jail start %s", w.values.Name),
 	}
 
@@ -386,19 +393,126 @@ func (w jailCreationWizard) commandPlanLines() []string {
 }
 
 func (w jailCreationWizard) mountPointList() []string {
-	if strings.TrimSpace(w.values.MountPoints) == "" {
+	specs := parseMountPointSpecs(w.values.MountPoints)
+	var mounts []string
+	for _, spec := range specs {
+		if spec.Source == "" {
+			if spec.Target == "" {
+				continue
+			}
+			mounts = append(mounts, spec.Target)
+			continue
+		}
+		mounts = append(mounts, spec.Source+":"+spec.Target)
+	}
+	return mounts
+}
+
+func (w *jailCreationWizard) clearExecutionResult() {
+	w.executionLogs = nil
+	w.executionError = ""
+}
+
+func (w *jailCreationWizard) setExecutionResult(result JailCreationResult) {
+	w.executionLogs = append([]string(nil), result.Logs...)
+	if result.Err != nil {
+		w.executionError = result.Err.Error()
+		w.message = "Creation failed. Review execution output and adjust values."
+		return
+	}
+	w.executionError = ""
+	w.message = "Creation completed successfully."
+}
+
+func parseMountPointSpecs(raw string) []mountPointSpec {
+	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
 	splitter := strings.NewReplacer("\n", ",", ";", ",")
-	raw := splitter.Replace(w.values.MountPoints)
-	chunks := strings.Split(raw, ",")
-	var mounts []string
+	chunks := strings.Split(splitter.Replace(raw), ",")
+	specs := make([]mountPointSpec, 0, len(chunks))
 	for _, chunk := range chunks {
 		item := strings.TrimSpace(chunk)
 		if item == "" {
 			continue
 		}
-		mounts = append(mounts, item)
+		source, target, hasSeparator := strings.Cut(item, ":")
+		if hasSeparator {
+			source = strings.TrimSpace(source)
+			target = normalizeMountTarget(target)
+			if source == "" || target == "" {
+				continue
+			}
+			specs = append(specs, mountPointSpec{Source: source, Target: target})
+			continue
+		}
+		target = normalizeMountTarget(item)
+		if target == "" {
+			continue
+		}
+		specs = append(specs, mountPointSpec{Target: target})
 	}
-	return mounts
+	return specs
+}
+
+func normalizeMountTarget(target string) string {
+	target = "/" + strings.Trim(strings.TrimSpace(target), "/")
+	if target == "/" {
+		return ""
+	}
+	return target
+}
+
+func jailConfigPathForName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "/etc/jail.conf.d/new-jail.conf"
+	}
+	return filepath.Join("/etc/jail.conf.d", name+".conf")
+}
+
+func jailFstabPathForName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "/etc/fstab.new-jail"
+	}
+	return filepath.Join("/etc", "fstab."+name)
+}
+
+func defaultJailPathForValues(values jailWizardValues) string {
+	dataset := strings.Trim(strings.TrimSpace(values.Dataset), "/")
+	if dataset != "" {
+		return "/" + dataset
+	}
+	name := strings.TrimSpace(values.Name)
+	if name == "" {
+		name = "new-jail"
+	}
+	return filepath.Join("/usr/jails", name)
+}
+
+func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []string {
+	name := strings.TrimSpace(values.Name)
+	if name == "" {
+		name = "new-jail"
+	}
+	lines := []string{
+		fmt.Sprintf("%s {", name),
+		fmt.Sprintf("  host.hostname = %q;", name),
+		fmt.Sprintf("  path = %q;", jailPath),
+		"  vnet;",
+		fmt.Sprintf("  vnet.interface = %q;", strings.TrimSpace(values.Interface)),
+		fmt.Sprintf("  ip4.addr = %q;", strings.TrimSpace(values.IP4)),
+		"  exec.start = \"/bin/sh /etc/rc\";",
+		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
+		"  persist;",
+	}
+	if strings.TrimSpace(values.DefaultRouter) != "" {
+		lines = append(lines, fmt.Sprintf("  defaultrouter = %q;", strings.TrimSpace(values.DefaultRouter)))
+	}
+	if strings.TrimSpace(fstabPath) != "" {
+		lines = append(lines, fmt.Sprintf("  mount.fstab = %q;", fstabPath))
+	}
+	lines = append(lines, "}")
+	return lines
 }

@@ -210,10 +210,9 @@ func CollectJailDetail(name string, jid int, pathHint string, now time.Time) (Ja
 }
 
 func discoverConfiguredJails() []string {
-	paths := []string{"/etc/jail.conf", "/usr/local/etc/jail.conf"}
 	found := map[string]struct{}{}
 	re := regexp.MustCompile(`^\s*([a-zA-Z0-9_.-]+)\s*\{`)
-	for _, path := range paths {
+	for _, path := range discoverJailConfigFiles() {
 		file, err := os.Open(path)
 		if err != nil {
 			continue
@@ -240,13 +239,12 @@ func discoverConfiguredJails() []string {
 }
 
 func discoverJailConf(name string) (jailConfData, error) {
-	paths := []string{"/etc/jail.conf", "/usr/local/etc/jail.conf"}
 	var (
 		firstReadablePath string
 		foundAnyPath      bool
 	)
 
-	for _, path := range paths {
+	for _, path := range discoverJailConfigFiles() {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -269,9 +267,58 @@ func discoverJailConf(name string) (jailConfData, error) {
 	}
 
 	if !foundAnyPath {
-		return jailConfData{}, fmt.Errorf("no readable jail.conf found")
+		return jailConfData{}, fmt.Errorf("no readable jail config found in /etc/jail.conf, /usr/local/etc/jail.conf, or /etc/jail.conf.d")
 	}
-	return jailConfData{}, fmt.Errorf("jail %q not found in %s", name, firstReadablePath)
+	return jailConfData{}, fmt.Errorf("jail %q not found in discovered jail config files (first readable: %s)", name, firstReadablePath)
+}
+
+func discoverJailConfigFiles() []string {
+	primaryFiles := []string{
+		"/etc/jail.conf",
+		"/usr/local/etc/jail.conf",
+	}
+	configDirs := []string{
+		"/etc/jail.conf.d",
+		"/usr/local/etc/jail.conf.d",
+	}
+
+	seen := map[string]struct{}{}
+	files := make([]string, 0, 16)
+	appendFile := func(path string) {
+		if _, exists := seen[path]; exists {
+			return
+		}
+		seen[path] = struct{}{}
+		files = append(files, path)
+	}
+
+	for _, path := range primaryFiles {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		appendFile(path)
+	}
+
+	for _, dir := range configDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			full := filepath.Join(dir, name)
+			appendFile(full)
+		}
+	}
+	sort.Strings(files)
+	return files
 }
 
 func discoverRunningJails() ([]runningJail, error) {

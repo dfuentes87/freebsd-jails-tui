@@ -27,6 +27,7 @@ go run .
 ## Data sources
 
 - `/etc/jail.conf` and `/usr/local/etc/jail.conf` for configured jail names
+- `/etc/jail.conf.d/*` and `/usr/local/etc/jail.conf.d/*` for additional jail definitions
 - `jls -n` for running jail/JID metadata
 - `ps -axo jid=,pcpu=,rss=` for per-jail CPU and memory metrics
 - `zfs list` for mapped jail dataset usage/quota details in detail view
@@ -57,6 +58,12 @@ go run .
 - `left`: previous step
 - `backspace`: delete character in active field
 - `esc`: cancel wizard and return to dashboard
+
+### Wizard execution behavior
+
+- On step 6, `enter` executes jail creation commands (destructive operations)
+- The wizard now creates/uses ZFS dataset paths, writes `/etc/jail.conf.d/<name>.conf`, optionally writes `/etc/fstab.<name>`, starts the jail, and applies `rctl` limits
+- Run the TUI as root (or with equivalent privileges) for these operations
 
 ## Next milestones
 

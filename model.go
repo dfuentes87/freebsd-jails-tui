@@ -53,6 +53,10 @@ type jailDetailMsg struct {
 	err    error
 }
 
+type wizardApplyMsg struct {
+	result JailCreationResult
+}
+
 type tickMsg time.Time
 
 type screenMode int
@@ -73,13 +77,14 @@ type model struct {
 	snapshot DashboardSnapshot
 	err      error
 
-	mode          screenMode
-	detail        JailDetail
-	detailErr     error
-	detailLoading bool
-	detailScroll  int
-	wizard        jailCreationWizard
-	notice        string
+	mode           screenMode
+	detail         JailDetail
+	detailErr      error
+	detailLoading  bool
+	detailScroll   int
+	wizard         jailCreationWizard
+	wizardApplying bool
+	notice         string
 }
 
 func newModel() model {
@@ -100,6 +105,13 @@ func detailCmd(jail Jail) tea.Cmd {
 	return func() tea.Msg {
 		detail, err := CollectJailDetail(jail.Name, jail.JID, jail.Path, time.Now())
 		return jailDetailMsg{detail: detail, err: err}
+	}
+}
+
+func createJailCmd(values jailWizardValues) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteJailCreation(values)
+		return wizardApplyMsg{result: result}
 	}
 }
 
@@ -132,6 +144,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailErr = msg.err
 		m.detailLoading = false
 		m.boundDetailScroll()
+		return m, nil
+	case wizardApplyMsg:
+		m.wizardApplying = false
+		m.wizard.setExecutionResult(msg.result)
+		if msg.result.Err == nil {
+			m.mode = screenDashboard
+			m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
+			m.wizard = newJailCreationWizard()
+			return m, pollCmd()
+		}
 		return m, nil
 	case tickMsg:
 		return m, pollCmd()
@@ -229,41 +251,68 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		if m.wizardApplying {
+			return m, nil
+		}
 		m.mode = screenDashboard
 		m.notice = "Jail creation canceled."
 		return m, nil
 	case "left":
+		if m.wizardApplying {
+			return m, nil
+		}
 		m.wizard.prevStep()
 		return m, nil
 	case "right":
+		if m.wizardApplying {
+			return m, nil
+		}
 		if err := m.wizard.nextStep(); err != nil {
 			return m, nil
 		}
 		return m, nil
 	case "tab", "down":
+		if m.wizardApplying {
+			return m, nil
+		}
 		m.wizard.nextField()
 		return m, nil
 	case "shift+tab", "up":
+		if m.wizardApplying {
+			return m, nil
+		}
 		m.wizard.prevField()
 		return m, nil
 	case "enter":
 		if m.wizard.isConfirmationStep() {
+			if m.wizardApplying {
+				return m, nil
+			}
 			if err := m.wizard.validateAll(); err != nil {
 				m.wizard.message = err.Error()
 				return m, nil
 			}
-			m.mode = screenDashboard
-			m.notice = fmt.Sprintf("Creation plan prepared for jail %s.", m.wizard.values.Name)
-			m.wizard = newJailCreationWizard()
+			m.wizard.clearExecutionResult()
+			m.wizard.message = "Applying creation plan..."
+			m.wizardApplying = true
+			return m, createJailCmd(m.wizard.values)
+		}
+		if m.wizardApplying {
 			return m, nil
 		}
 		_ = m.wizard.nextStep()
 		return m, nil
 	case "backspace", "delete":
+		if m.wizardApplying {
+			return m, nil
+		}
 		m.wizard.backspaceActive()
 		return m, nil
 	}
 
+	if m.wizardApplying {
+		return m, nil
+	}
 	if msg.Type == tea.KeyRunes {
 		m.wizard.appendToActive(string(msg.Runes))
 	}
@@ -374,7 +423,10 @@ func (m model) renderWizardView() string {
 
 	hint := "type to edit | tab/shift+tab: fields | enter/right: next | left: back | esc: cancel | q: quit"
 	if m.wizard.isConfirmationStep() {
-		hint = "enter: finish wizard | left: back | esc: cancel | q: quit"
+		hint = "enter: create jail now | left: back | esc: cancel | q: quit"
+	}
+	if m.wizardApplying {
+		hint = "Applying changes... please wait | q: quit"
 	}
 	if m.wizard.message != "" {
 		hint += " | " + m.wizard.message
@@ -406,6 +458,18 @@ func (m model) wizardLines(width int) []string {
 		lines = append(lines, sectionStyle.Render("Creation plan"))
 		for _, line := range m.wizard.commandPlanLines() {
 			lines = append(lines, truncate(line, width))
+		}
+		if len(m.wizard.executionLogs) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Execution output"))
+			for _, line := range m.wizard.executionLogs {
+				lines = append(lines, truncate(line, width))
+			}
+		}
+		if m.wizard.executionError != "" {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Execution error"))
+			lines = append(lines, truncate(m.wizard.executionError, width))
 		}
 		return lines
 	}
@@ -633,7 +697,7 @@ func (m model) renderJailList(width, height int) string {
 
 func (m model) renderRows(maxRows, width int) string {
 	if len(m.snapshot.Jails) == 0 {
-		return "No jails discovered. Add jails in /etc/jail.conf and run them with service jail start <name>."
+		return "No jails discovered. Add jails in /etc/jail.conf or /etc/jail.conf.d/*.conf and run service jail start <name>."
 	}
 	start := m.offset
 	end := min(len(m.snapshot.Jails), start+maxRows)
