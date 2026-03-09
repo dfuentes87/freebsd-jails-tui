@@ -15,7 +15,7 @@ This initial milestone implements the **main dashboard**:
 ## Requirements
 
 - FreeBSD host with jails configured/running
-- Go 1.26+
+- Go 1.25+
 
 ## Run
 
