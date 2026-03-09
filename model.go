@@ -41,6 +41,9 @@ var (
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("45"))
+	wizardErrorStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("196"))
 )
 
 type snapshotMsg struct {
@@ -707,6 +710,9 @@ func (m model) wizardLines(width int) []string {
 	if step.Description != "" {
 		lines = append(lines, truncate(step.Description, width))
 	}
+	if m.wizard.message != "" {
+		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.wizard.message, width)))
+	}
 	lines = append(lines, "")
 
 	if m.wizard.templateMode == wizardTemplateModeSave {
@@ -1108,6 +1114,17 @@ func statusBadge(running bool) string {
 		return runningBadgeStyle.Render("[+]")
 	}
 	return stoppedBadgeStyle.Render("[-]")
+}
+
+func styleWizardMessage(message string) string {
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "failed") ||
+		strings.Contains(lower, "required") ||
+		strings.Contains(lower, "invalid") ||
+		strings.Contains(lower, "error") {
+		return wizardErrorStyle.Render(message)
+	}
+	return summaryStyle.Render(message)
 }
 
 func valueOrDash(value string) string {

@@ -42,10 +42,10 @@ type wizardTemplate struct {
 var wizardSteps = []wizardStep{
 	{
 		Title:       "1. Name / dataset",
-		Description: "Set the jail name and destination ZFS dataset.",
+		Description: "Set the jail name and destination ZFS dataset (full dataset path).",
 		Fields: []wizardField{
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
-			{ID: "dataset", Label: "Dataset", Placeholder: "zroot/jails/web01", Help: "Existing or new ZFS dataset for this jail"},
+			{ID: "dataset", Label: "Dataset (required)", Placeholder: "zroot/jails/web01", Help: "Use full path, e.g. zroot/jails/web01 (not just web01)"},
 		},
 	},
 	{
@@ -357,7 +357,7 @@ func (w jailCreationWizard) validateCurrentStep() error {
 			return fmt.Errorf("invalid jail name")
 		}
 		if strings.TrimSpace(w.values.Dataset) == "" {
-			return fmt.Errorf("dataset is required")
+			return fmt.Errorf("dataset is required: enter full path like zroot/jails/%s", strings.TrimSpace(w.values.Name))
 		}
 	case 1:
 		if strings.TrimSpace(w.values.TemplateRelease) == "" {

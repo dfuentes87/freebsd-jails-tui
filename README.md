@@ -75,6 +75,7 @@ go run .
 - `l` (step 6/confirmation): load a saved template
 - `backspace`: delete character in active field
 - `esc`: cancel wizard and return to dashboard
+- On step 1, `Dataset` expects a full ZFS dataset path (example: `zroot/jails/web01`)
 
 ### Templates
 
