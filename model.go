@@ -65,7 +65,8 @@ type tickMsg time.Time
 type screenMode int
 
 const (
-	screenDashboard screenMode = iota
+	screenInitialCheck screenMode = iota
+	screenDashboard
 	screenJailDetail
 	screenCreateWizard
 	screenZFSPanel
@@ -90,6 +91,7 @@ type model struct {
 	zfsPanel       zfsPanelState
 	wizard         jailCreationWizard
 	wizardApplying bool
+	initCheck      initialCheckState
 	helpReturnMode screenMode
 	helpScroll     int
 	notice         string
@@ -97,8 +99,9 @@ type model struct {
 
 func newModel() model {
 	return model{
-		mode:   screenDashboard,
-		wizard: newJailCreationWizard(),
+		mode:      screenInitialCheck,
+		wizard:    newJailCreationWizard(),
+		initCheck: newInitialCheckState(),
 	}
 }
 
@@ -130,7 +133,7 @@ func tickerCmd() tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return pollCmd()
+	return collectInitialConfigCmd()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -142,12 +145,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boundHelpScroll()
 		return m, nil
 	case snapshotMsg:
+		if m.mode == screenInitialCheck {
+			return m, nil
+		}
 		m.snapshot = msg.snapshot
 		m.err = msg.err
 		m.boundCursor()
 		m.ensureCursorVisible(m.listHeight())
 		m.boundDetailScroll()
 		return m, tickerCmd()
+	case initialConfigMsg:
+		m.initCheck.loading = false
+		m.initCheck.status = msg.status
+		m.initCheck.err = msg.err
+		m.initCheck.setPhaseFromStatus()
+		return m, nil
+	case initialActionMsg:
+		if m.mode != screenInitialCheck {
+			return m, nil
+		}
+		m.initCheck.applying = false
+		m.initCheck.logs = msg.logs
+		m.initCheck.err = msg.err
+		if msg.err != nil {
+			if msg.message != "" {
+				m.initCheck.message = msg.message
+			} else {
+				m.initCheck.message = "Action failed."
+			}
+			return m, nil
+		}
+		if msg.message != "" {
+			m.initCheck.message = msg.message
+		}
+		if msg.refresh {
+			m.initCheck.loading = true
+			return m, collectInitialConfigCmd()
+		}
+		m.initCheck.setPhaseFromStatus()
+		return m, nil
 	case jailDetailMsg:
 		m.detail = msg.detail
 		m.detailErr = msg.err
@@ -202,6 +238,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = screenHelp
 			return m, nil
 		}
+		if m.mode == screenInitialCheck {
+			return m.updateInitialCheckKeys(msg)
+		}
 		if m.mode == screenZFSPanel {
 			return m.updateZFSPanelKeys(msg)
 		}
@@ -218,6 +257,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) isTextEntryMode() bool {
 	switch m.mode {
+	case screenInitialCheck:
+		return m.initCheck.phase == initialPhaseDirsCustomInput || m.initCheck.phase == initialPhaseDatasetsCustomInput
 	case screenCreateWizard:
 		if m.wizardApplying {
 			return false
@@ -498,6 +539,9 @@ func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading dashboard..."
 	}
+	if m.mode == screenInitialCheck {
+		return m.renderInitialCheckView()
+	}
 	if m.mode == screenCreateWizard {
 		return m.renderWizardView()
 	}
@@ -545,6 +589,11 @@ func (m model) helpLines(width int) []string {
 		sectionStyle.Render("Global"),
 		truncate("?: open help page (h works outside text input)", width),
 		truncate("q: quit the application", width),
+		"",
+		sectionStyle.Render("Initial Config Check"),
+		truncate("runs at startup before dashboard", width),
+		truncate("y/n or d/c/n prompts apply or skip setup actions", width),
+		truncate("enter continues to dashboard when complete", width),
 		"",
 		sectionStyle.Render("Dashboard"),
 		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
