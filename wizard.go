@@ -26,6 +26,19 @@ type wizardStep struct {
 	Fields      []wizardField
 }
 
+type wizardTemplateMode int
+
+const (
+	wizardTemplateModeNone wizardTemplateMode = iota
+	wizardTemplateModeSave
+	wizardTemplateModeLoad
+)
+
+type wizardTemplate struct {
+	Name   string           `json:"name"`
+	Values jailWizardValues `json:"values"`
+}
+
 var wizardSteps = []wizardStep{
 	{
 		Title:       "1. Name / dataset",
@@ -95,6 +108,10 @@ type jailCreationWizard struct {
 	step           int
 	field          int
 	values         jailWizardValues
+	templateMode   wizardTemplateMode
+	templateInput  string
+	templates      []wizardTemplate
+	templateCursor int
 	message        string
 	executionLogs  []string
 	executionError string
@@ -164,6 +181,71 @@ func (w *jailCreationWizard) prevStep() {
 		w.executionLogs = nil
 		w.executionError = ""
 	}
+}
+
+func (w *jailCreationWizard) beginTemplateSave() {
+	w.templateMode = wizardTemplateModeSave
+	if strings.TrimSpace(w.templateInput) == "" {
+		w.templateInput = strings.TrimSpace(w.values.Name)
+	}
+	w.message = ""
+}
+
+func (w *jailCreationWizard) beginTemplateLoad() error {
+	templates, err := loadWizardTemplates()
+	if err != nil {
+		return err
+	}
+	w.templates = templates
+	w.templateCursor = 0
+	w.templateMode = wizardTemplateModeLoad
+	w.templateInput = ""
+	w.message = ""
+	return nil
+}
+
+func (w *jailCreationWizard) endTemplateMode() {
+	w.templateMode = wizardTemplateModeNone
+	w.templateInput = ""
+	w.boundTemplateCursor()
+}
+
+func (w *jailCreationWizard) selectedTemplate() (wizardTemplate, bool) {
+	if len(w.templates) == 0 {
+		return wizardTemplate{}, false
+	}
+	w.boundTemplateCursor()
+	return w.templates[w.templateCursor], true
+}
+
+func (w *jailCreationWizard) boundTemplateCursor() {
+	if len(w.templates) == 0 {
+		w.templateCursor = 0
+		return
+	}
+	if w.templateCursor < 0 {
+		w.templateCursor = 0
+	}
+	if w.templateCursor >= len(w.templates) {
+		w.templateCursor = len(w.templates) - 1
+	}
+}
+
+func (w *jailCreationWizard) appendTemplateInput(input string) {
+	if input == "" {
+		return
+	}
+	w.templateInput += input
+	w.message = ""
+}
+
+func (w *jailCreationWizard) backspaceTemplateInput() {
+	runes := []rune(w.templateInput)
+	if len(runes) == 0 {
+		return
+	}
+	w.templateInput = string(runes[:len(runes)-1])
+	w.message = ""
 }
 
 func (w *jailCreationWizard) appendToActive(input string) {

@@ -11,7 +11,9 @@ This initial milestone implements the **main dashboard**:
 - Quick detail panel for the selected jail
 - Dedicated jail detail view that consolidates `jls`, `jail.conf`, `zfs`, and `rctl`
 - Jail creation wizard with 6 guided steps
+- Save/load wizard templates for repeated jail setups
 - ZFS integration panel for snapshot and rollback actions
+- Help/shortcuts screen (`h` or `?`)
 
 ## Requirements
 
@@ -41,6 +43,8 @@ go run .
 - `g` / `G`: first/last jail
 - `enter` / `d`: open full jail detail view
 - `c`: open jail creation wizard
+- `?`: open help/shortcuts page from any screen
+- `h`: open help/shortcuts page from non-edit screens
 - `r`: immediate refresh
 - `q`: quit
 
@@ -67,8 +71,24 @@ go run .
 - `tab` / `shift+tab`: move active field
 - `enter` / `right`: next step
 - `left`: previous step
+- `s`: save current wizard values as a template
+- `l`: load a saved template
 - `backspace`: delete character in active field
 - `esc`: cancel wizard and return to dashboard
+
+### Templates
+
+- Templates are persisted in `templates.json` under your user config directory:
+  - `$XDG_CONFIG_HOME/freebsd-jails-tui/templates.json` when `XDG_CONFIG_HOME` is set
+  - otherwise `~/.config/freebsd-jails-tui/templates.json`
+- Loading a template populates all wizard steps (name, dataset, release/template, networking, limits, mounts)
+
+### Help/shortcuts page
+
+- `?`: open from any screen
+- `h`: open from non-edit screens (dashboard/detail/ZFS list)
+- `j` / `k` or `pgup` / `pgdown`: scroll
+- `esc` or `enter`: close help and return to previous screen
 
 ### Wizard execution behavior
 
