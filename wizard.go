@@ -41,42 +41,18 @@ type wizardTemplate struct {
 
 var wizardSteps = []wizardStep{
 	{
-		Title:       "1. Name / dataset",
-		Description: "Set the jail name and destination ZFS dataset (full dataset path).",
+		Title:       "1-5. Configuration",
+		Description: "Fill in name, destination, release/template, networking, limits, and mounts on this page.",
 		Fields: []wizardField{
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
-			{ID: "dataset", Label: "Dataset (required)", Placeholder: "zroot/jails/web01", Help: "Use full path, e.g. zroot/jails/web01 (not just web01)"},
-		},
-	},
-	{
-		Title:       "2. Template or release",
-		Description: "Choose a FreeBSD release or template to provision the jail root.",
-		Fields: []wizardField{
-			{ID: "template_release", Label: "Template/Release", Placeholder: "14.2-RELEASE", Help: "Example: 14.2-RELEASE or custom template tag"},
-		},
-	},
-	{
-		Title:       "3. Networking",
-		Description: "Configure interface, IPv4 assignment, and optional default route.",
-		Fields: []wizardField{
+			{ID: "dataset", Label: "Destination (required)", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
+			{ID: "template_release", Label: "Template/Release", Placeholder: "14.2-RELEASE", Help: "Local dir/archive path or release tag; releases are not auto-downloaded"},
 			{ID: "interface", Label: "Interface", Placeholder: "vnet0", Help: "Bridge or jail interface name"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR recommended"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
-		},
-	},
-	{
-		Title:       "4. Resource limits",
-		Description: "Optional rctl limits for CPU, memory, and process count.",
-		Fields: []wizardField{
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: "Optional integer percentage"},
 			{ID: "memory_limit", Label: "Memory", Placeholder: "2G", Help: "Optional, examples: 512M, 2G"},
 			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: "Optional integer"},
-		},
-	},
-	{
-		Title:       "5. Mount points",
-		Description: "Optional mounts (comma-separated or one per line).",
-		Fields: []wizardField{
 			{ID: "mount_points", Label: "Mount points", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
 		},
 	},
@@ -348,45 +324,45 @@ func (w jailCreationWizard) valueByID(id string) string {
 }
 
 func (w jailCreationWizard) validateCurrentStep() error {
-	switch w.step {
-	case 0:
-		if strings.TrimSpace(w.values.Name) == "" {
-			return fmt.Errorf("jail name is required")
+	if w.isConfirmationStep() {
+		return nil
+	}
+	if strings.TrimSpace(w.values.Name) == "" {
+		return fmt.Errorf("jail name is required")
+	}
+	if !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
+		return fmt.Errorf("invalid jail name")
+	}
+	if strings.TrimSpace(w.values.Dataset) == "" {
+		return fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+	}
+	if !strings.HasPrefix(strings.TrimSpace(w.values.Dataset), "/") {
+		return fmt.Errorf("destination must be an absolute path, e.g. /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+	}
+	if strings.TrimSpace(w.values.TemplateRelease) == "" {
+		return fmt.Errorf("template/release is required (local path or release tag)")
+	}
+	if strings.TrimSpace(w.values.Interface) == "" {
+		return fmt.Errorf("interface is required")
+	}
+	if strings.TrimSpace(w.values.IP4) == "" {
+		return fmt.Errorf("IPv4 is required")
+	}
+	if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
+		cpu, err := strconv.Atoi(value)
+		if err != nil || cpu <= 0 || cpu > 100 {
+			return fmt.Errorf("CPU %% must be between 1 and 100")
 		}
-		if !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
-			return fmt.Errorf("invalid jail name")
+	}
+	if value := strings.TrimSpace(w.values.MemoryLimit); value != "" {
+		if !memoryLimitPattern.MatchString(strings.ToUpper(value)) {
+			return fmt.Errorf("memory must look like 512M or 2G")
 		}
-		if strings.TrimSpace(w.values.Dataset) == "" {
-			return fmt.Errorf("dataset is required: enter full path like zroot/jails/%s", strings.TrimSpace(w.values.Name))
-		}
-	case 1:
-		if strings.TrimSpace(w.values.TemplateRelease) == "" {
-			return fmt.Errorf("template/release is required")
-		}
-	case 2:
-		if strings.TrimSpace(w.values.Interface) == "" {
-			return fmt.Errorf("interface is required")
-		}
-		if strings.TrimSpace(w.values.IP4) == "" {
-			return fmt.Errorf("IPv4 is required")
-		}
-	case 3:
-		if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
-			cpu, err := strconv.Atoi(value)
-			if err != nil || cpu <= 0 || cpu > 100 {
-				return fmt.Errorf("CPU %% must be between 1 and 100")
-			}
-		}
-		if value := strings.TrimSpace(w.values.MemoryLimit); value != "" {
-			if !memoryLimitPattern.MatchString(strings.ToUpper(value)) {
-				return fmt.Errorf("memory must look like 512M or 2G")
-			}
-		}
-		if value := strings.TrimSpace(w.values.ProcessLimit); value != "" {
-			procs, err := strconv.Atoi(value)
-			if err != nil || procs <= 0 {
-				return fmt.Errorf("max processes must be a positive integer")
-			}
+	}
+	if value := strings.TrimSpace(w.values.ProcessLimit); value != "" {
+		procs, err := strconv.Atoi(value)
+		if err != nil || procs <= 0 {
+			return fmt.Errorf("max processes must be a positive integer")
 		}
 	}
 	return nil
@@ -406,7 +382,7 @@ func (w jailCreationWizard) validateAll() error {
 func (w jailCreationWizard) summaryLines() []string {
 	lines := []string{
 		fmt.Sprintf("Name: %s", w.values.Name),
-		fmt.Sprintf("Dataset: %s", w.values.Dataset),
+		fmt.Sprintf("Destination: %s", w.values.Dataset),
 		fmt.Sprintf("Template/Release: %s", w.values.TemplateRelease),
 		fmt.Sprintf("Interface: %s", w.values.Interface),
 		fmt.Sprintf("IPv4: %s", w.values.IP4),
@@ -440,9 +416,10 @@ func (w jailCreationWizard) jailConfPreviewLines() []string {
 }
 
 func (w jailCreationWizard) commandPlanLines() []string {
+	destination := strings.TrimSpace(w.values.Dataset)
 	lines := []string{
-		"1. Ensure dataset exists:",
-		fmt.Sprintf("   zfs create %s", w.values.Dataset),
+		"1. Ensure destination path exists:",
+		fmt.Sprintf("   mkdir -p %s", destination),
 		"2. Provision jail root from selected template/release:",
 		fmt.Sprintf("   # source: %s", w.values.TemplateRelease),
 		fmt.Sprintf("3. Write jail config: %s", jailConfigPathForName(w.values.Name)),
@@ -562,7 +539,11 @@ func jailFstabPathForName(name string) string {
 }
 
 func defaultJailPathForValues(values jailWizardValues) string {
-	dataset := strings.Trim(strings.TrimSpace(values.Dataset), "/")
+	destination := strings.TrimSpace(values.Dataset)
+	if strings.HasPrefix(destination, "/") {
+		return filepath.Clean(destination)
+	}
+	dataset := strings.Trim(destination, "/")
 	if dataset != "" {
 		return "/" + dataset
 	}
@@ -597,4 +578,21 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	}
 	lines = append(lines, "}")
 	return lines
+}
+
+func wizardSectionForField(id string) string {
+	switch id {
+	case "name", "dataset":
+		return "1. Name / destination"
+	case "template_release":
+		return "2. Template or release"
+	case "interface", "ip4", "default_router":
+		return "3. Networking"
+	case "cpu_percent", "memory_limit", "process_limit":
+		return "4. Resource limits"
+	case "mount_points":
+		return "5. Mount points"
+	default:
+		return ""
+	}
 }

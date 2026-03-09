@@ -10,7 +10,7 @@ This initial milestone implements the **main dashboard**:
 - JID-based running detection (a jail with a JID is treated as running)
 - Quick detail panel for the selected jail
 - Dedicated jail detail view that consolidates `jls`, `jail.conf`, `zfs`, and `rctl`
-- Jail creation wizard with 6 guided steps
+- Jail creation wizard with one configuration page (steps 1-5) plus separate confirmation page (step 6)
 - Save/load wizard templates for repeated jail setups
 - ZFS integration panel for snapshot and rollback actions
 - Help/shortcuts screen (`h` or `?`)
@@ -75,14 +75,18 @@ go run .
 - `l` (step 6/confirmation): load a saved template
 - `backspace`: delete character in active field
 - `esc`: cancel wizard and return to dashboard
-- On step 1, `Dataset` expects a full ZFS dataset path (example: `zroot/jails/web01`)
+- `Destination` expects a full path (example: `/usr/local/jails/containers/web01`)
+- `Template/Release` uses local resources:
+  - release tags (for example `14.2-RELEASE`) require `/usr/freebsd-dist/base.txz` already present
+  - template directory/archive paths must already exist on the system
+  - the wizard does not download releases automatically
 
 ### Templates
 
 - Templates are persisted in `templates.json` under your user config directory:
   - `$XDG_CONFIG_HOME/freebsd-jails-tui/templates.json` when `XDG_CONFIG_HOME` is set
   - otherwise `~/.config/freebsd-jails-tui/templates.json`
-- Loading a template populates all wizard steps (name, dataset, release/template, networking, limits, mounts)
+- Loading a template populates all wizard fields (name, destination, release/template, networking, limits, mounts)
 
 ### Help/shortcuts page
 
@@ -94,7 +98,7 @@ go run .
 ### Wizard execution behavior
 
 - On step 6, `enter` executes jail creation commands (destructive operations)
-- The wizard now creates/uses ZFS dataset paths, writes `/etc/jail.conf.d/<name>.conf`, optionally writes `/etc/fstab.<name>`, starts the jail, and applies `rctl` limits
+- The wizard now creates/uses destination jail paths, writes `/etc/jail.conf.d/<name>.conf`, optionally writes `/etc/fstab.<name>`, starts the jail, and applies `rctl` limits
 - Run the TUI as root (or with equivalent privileges) for these operations
 
 ## Next milestones

@@ -566,6 +566,7 @@ func (m model) helpLines(width int) []string {
 		truncate("esc: cancel prompt or return to detail", width),
 		"",
 		sectionStyle.Render("Creation Wizard"),
+		truncate("steps 1-5 are shown together on one page", width),
 		truncate("tab/shift+tab: move field", width),
 		truncate("enter/right: next step", width),
 		truncate("left: previous step", width),
@@ -744,7 +745,7 @@ func (m model) wizardLines(width int) []string {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Selected Template Preview"))
 			lines = append(lines, truncate("Name: "+template.Name, width))
-			lines = append(lines, truncate("Dataset: "+template.Values.Dataset, width))
+			lines = append(lines, truncate("Destination: "+template.Values.Dataset, width))
 			lines = append(lines, truncate("Template/Release: "+template.Values.TemplateRelease, width))
 			lines = append(lines, truncate("IPv4: "+template.Values.IP4, width))
 		}
@@ -781,7 +782,17 @@ func (m model) wizardLines(width int) []string {
 		return lines
 	}
 
+	currentSection := ""
 	for idx, field := range step.Fields {
+		section := wizardSectionForField(field.ID)
+		if section != "" && section != currentSection {
+			if len(lines) > 0 && lines[len(lines)-1] != "" {
+				lines = append(lines, "")
+			}
+			lines = append(lines, sectionStyle.Render(section))
+			currentSection = section
+		}
+
 		value := m.wizard.valueByID(field.ID)
 		display := value
 		if strings.TrimSpace(display) == "" {
@@ -799,6 +810,9 @@ func (m model) wizardLines(width int) []string {
 		lines = append(lines, line)
 		if field.Help != "" {
 			lines = append(lines, truncate("  "+field.Help, width))
+		}
+		if field.ID == "name" {
+			lines = append(lines, "")
 		}
 	}
 

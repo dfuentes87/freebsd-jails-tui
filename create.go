@@ -48,15 +48,15 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		}
 	}
 
-	dataset := strings.TrimSpace(values.Dataset)
-	if dataset == "" {
-		return fail(fmt.Errorf("dataset is required"))
+	destination := strings.TrimSpace(values.Dataset)
+	if destination == "" {
+		return fail(fmt.Errorf("destination is required"))
 	}
 
 	result.ConfigPath = jailConfigPathForName(result.Name)
 	logf("Starting jail creation for %s", result.Name)
 
-	jailPath, err := ensureDatasetAndJailPath(dataset, &logs)
+	jailPath, err := ensureDestinationJailPath(destination, &logs)
 	if err != nil {
 		return fail(err)
 	}
@@ -90,20 +90,31 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	return result
 }
 
-func ensureDatasetAndJailPath(dataset string, logs *[]string) (string, error) {
-	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "name", dataset); err != nil {
-		if _, createErr := runLoggedCommand(logs, "zfs", "create", "-p", dataset); createErr != nil {
-			return "", fmt.Errorf("failed to ensure dataset %q: %w", dataset, createErr)
+func ensureDestinationJailPath(destination string, logs *[]string) (string, error) {
+	destination = strings.TrimSpace(destination)
+	if strings.HasPrefix(destination, "/") {
+		jailPath := filepath.Clean(destination)
+		*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", jailPath))
+		if err := os.MkdirAll(jailPath, 0o755); err != nil {
+			return "", fmt.Errorf("failed to create destination path %q: %w", jailPath, err)
+		}
+		return jailPath, nil
+	}
+
+	// Backward compatibility: treat non-absolute values as ZFS dataset names.
+	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "name", destination); err != nil {
+		if _, createErr := runLoggedCommand(logs, "zfs", "create", "-p", destination); createErr != nil {
+			return "", fmt.Errorf("failed to ensure dataset %q: %w", destination, createErr)
 		}
 	}
 
-	mountpointOut, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "mountpoint", dataset)
+	mountpointOut, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "mountpoint", destination)
 	if err != nil {
-		return "", fmt.Errorf("failed to discover mountpoint for %q: %w", dataset, err)
+		return "", fmt.Errorf("failed to discover mountpoint for %q: %w", destination, err)
 	}
 	mountpoint := strings.TrimSpace(strings.Split(mountpointOut, "\n")[0])
 	if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
-		mountpoint = "/" + strings.Trim(dataset, "/")
+		mountpoint = "/" + strings.Trim(destination, "/")
 	}
 
 	*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", mountpoint))
