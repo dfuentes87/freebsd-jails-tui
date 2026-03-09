@@ -65,6 +65,7 @@ const (
 	screenDashboard screenMode = iota
 	screenJailDetail
 	screenCreateWizard
+	screenZFSPanel
 )
 
 type model struct {
@@ -82,6 +83,7 @@ type model struct {
 	detailErr      error
 	detailLoading  bool
 	detailScroll   int
+	zfsPanel       zfsPanelState
 	wizard         jailCreationWizard
 	wizardApplying bool
 	notice         string
@@ -145,6 +147,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailLoading = false
 		m.boundDetailScroll()
 		return m, nil
+	case zfsSnapshotListMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		m.zfsPanel.loading = false
+		m.zfsPanel.snapshots = msg.snapshots
+		m.zfsPanel.err = msg.err
+		m.zfsPanel.message = msg.message
+		m.zfsPanel.boundCursor(m.zfsListHeight())
+		return m, nil
+	case zfsActionMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		m.zfsPanel.actionRunning = false
+		m.zfsPanel.logs = msg.logs
+		m.zfsPanel.err = msg.err
+		m.zfsPanel.message = msg.message
+		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	case wizardApplyMsg:
 		m.wizardApplying = false
 		m.wizard.setExecutionResult(msg.result)
@@ -160,6 +181,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if m.mode == screenZFSPanel {
+			return m.updateZFSPanelKeys(msg)
 		}
 		if m.mode == screenCreateWizard {
 			return m.updateWizardKeys(msg)
@@ -243,6 +267,14 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailLoading = true
 		m.detailErr = nil
 		return m, detailCmd(jail)
+	case "z":
+		if m.detail.ZFS == nil || strings.TrimSpace(m.detail.ZFS.Name) == "" {
+			m.detailErr = fmt.Errorf("no ZFS dataset detected for this jail")
+			return m, nil
+		}
+		m.mode = screenZFSPanel
+		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name)
+		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	}
 	m.boundDetailScroll()
 	return m, nil
@@ -326,6 +358,9 @@ func (m model) View() string {
 	if m.mode == screenCreateWizard {
 		return m.renderWizardView()
 	}
+	if m.mode == screenZFSPanel {
+		return m.renderZFSPanelView()
+	}
 	if m.mode == screenJailDetail {
 		return m.renderJailDetailView()
 	}
@@ -395,7 +430,7 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail | esc: back | q: quit"
+	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail | z: ZFS panel | esc: back | q: quit"
 	if m.detailLoading {
 		hint += " | loading detail..."
 	}
@@ -754,6 +789,7 @@ func (m model) renderDetailPanel(width, height int) string {
 			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
 			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
 			"Press enter for full detail view.",
+			"Inside detail view, press z for ZFS panel.",
 		)
 	}
 

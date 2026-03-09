@@ -11,6 +11,7 @@ This initial milestone implements the **main dashboard**:
 - Quick detail panel for the selected jail
 - Dedicated jail detail view that consolidates `jls`, `jail.conf`, `zfs`, and `rctl`
 - Jail creation wizard with 6 guided steps
+- ZFS integration panel for snapshot and rollback actions
 
 ## Requirements
 
@@ -49,7 +50,17 @@ go run .
 - `pgdown` / `pgup`: scroll a page
 - `g` / `G`: top/bottom
 - `r`: refresh detail data
+- `z`: open ZFS integration panel
 - `esc` / `backspace`: return to dashboard
+
+### ZFS integration panel
+
+- `j` / `k` or `up` / `down`: select snapshot
+- `n`: create snapshot (prompts for snapshot name)
+- `r`: begin rollback to selected snapshot (with confirmation)
+- `enter`: confirm create/rollback action
+- `R`: refresh snapshot list
+- `esc`: cancel prompt/confirmation or return to detail view
 
 ### Jail creation wizard
 
