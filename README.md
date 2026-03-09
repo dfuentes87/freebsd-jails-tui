@@ -10,6 +10,7 @@ This initial milestone implements the **main dashboard**:
 - JID-based running detection (a jail with a JID is treated as running)
 - Quick detail panel for the selected jail
 - Dedicated jail detail view that consolidates `jls`, `jail.conf`, `zfs`, and `rctl`
+- Jail creation wizard with 6 guided steps
 
 ## Requirements
 
@@ -37,6 +38,7 @@ go run .
 - `pgdown` / `pgup`: scroll page
 - `g` / `G`: first/last jail
 - `enter` / `d`: open full jail detail view
+- `c`: open jail creation wizard
 - `r`: immediate refresh
 - `q`: quit
 
@@ -47,6 +49,14 @@ go run .
 - `g` / `G`: top/bottom
 - `r`: refresh detail data
 - `esc` / `backspace`: return to dashboard
+
+### Jail creation wizard
+
+- `tab` / `shift+tab`: move active field
+- `enter` / `right`: next step
+- `left`: previous step
+- `backspace`: delete character in active field
+- `esc`: cancel wizard and return to dashboard
 
 ## Next milestones
 

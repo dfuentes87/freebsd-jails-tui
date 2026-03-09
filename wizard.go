@@ -1,0 +1,404 @@
+package main
+
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+var (
+	jailNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	memoryLimitPattern = regexp.MustCompile(`^[0-9]+[KMGTP]?$`)
+)
+
+type wizardField struct {
+	ID          string
+	Label       string
+	Placeholder string
+	Help        string
+}
+
+type wizardStep struct {
+	Title       string
+	Description string
+	Fields      []wizardField
+}
+
+var wizardSteps = []wizardStep{
+	{
+		Title:       "1. Name / dataset",
+		Description: "Set the jail name and destination ZFS dataset.",
+		Fields: []wizardField{
+			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
+			{ID: "dataset", Label: "Dataset", Placeholder: "zroot/jails/web01", Help: "Existing or new ZFS dataset for this jail"},
+		},
+	},
+	{
+		Title:       "2. Template or release",
+		Description: "Choose a FreeBSD release or template to provision the jail root.",
+		Fields: []wizardField{
+			{ID: "template_release", Label: "Template/Release", Placeholder: "14.2-RELEASE", Help: "Example: 14.2-RELEASE or custom template tag"},
+		},
+	},
+	{
+		Title:       "3. Networking",
+		Description: "Configure interface, IPv4 assignment, and optional default route.",
+		Fields: []wizardField{
+			{ID: "interface", Label: "Interface", Placeholder: "vnet0", Help: "Bridge or jail interface name"},
+			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR recommended"},
+			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
+		},
+	},
+	{
+		Title:       "4. Resource limits",
+		Description: "Optional rctl limits for CPU, memory, and process count.",
+		Fields: []wizardField{
+			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: "Optional integer percentage"},
+			{ID: "memory_limit", Label: "Memory", Placeholder: "2G", Help: "Optional, examples: 512M, 2G"},
+			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: "Optional integer"},
+		},
+	},
+	{
+		Title:       "5. Mount points",
+		Description: "Optional mounts (comma-separated or one per line).",
+		Fields: []wizardField{
+			{ID: "mount_points", Label: "Mount points", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
+		},
+	},
+	{
+		Title:       "6. Confirmation",
+		Description: "Review the generated jail.conf and creation plan.",
+	},
+}
+
+type jailWizardValues struct {
+	Name            string
+	Dataset         string
+	TemplateRelease string
+	Interface       string
+	IP4             string
+	DefaultRouter   string
+	CPUPercent      string
+	MemoryLimit     string
+	ProcessLimit    string
+	MountPoints     string
+}
+
+type jailCreationWizard struct {
+	step    int
+	field   int
+	values  jailWizardValues
+	message string
+}
+
+func newJailCreationWizard() jailCreationWizard {
+	return jailCreationWizard{
+		values: jailWizardValues{
+			Interface: "vnet0",
+		},
+	}
+}
+
+func (w jailCreationWizard) currentStep() wizardStep {
+	if w.step < 0 || w.step >= len(wizardSteps) {
+		return wizardSteps[0]
+	}
+	return wizardSteps[w.step]
+}
+
+func (w jailCreationWizard) isConfirmationStep() bool {
+	return w.step == len(wizardSteps)-1
+}
+
+func (w *jailCreationWizard) nextField() {
+	step := w.currentStep()
+	if len(step.Fields) == 0 {
+		return
+	}
+	w.field++
+	if w.field >= len(step.Fields) {
+		w.field = 0
+	}
+}
+
+func (w *jailCreationWizard) prevField() {
+	step := w.currentStep()
+	if len(step.Fields) == 0 {
+		return
+	}
+	w.field--
+	if w.field < 0 {
+		w.field = len(step.Fields) - 1
+	}
+}
+
+func (w *jailCreationWizard) nextStep() error {
+	if err := w.validateCurrentStep(); err != nil {
+		w.message = err.Error()
+		return err
+	}
+	if w.step < len(wizardSteps)-1 {
+		w.step++
+		w.field = 0
+		w.message = ""
+	}
+	return nil
+}
+
+func (w *jailCreationWizard) prevStep() {
+	if w.step > 0 {
+		w.step--
+		w.field = 0
+		w.message = ""
+	}
+}
+
+func (w *jailCreationWizard) appendToActive(input string) {
+	field, ok := w.activeField()
+	if !ok {
+		return
+	}
+	ref := w.valueRef(field.ID)
+	if ref == nil {
+		return
+	}
+	*ref += input
+	w.message = ""
+}
+
+func (w *jailCreationWizard) backspaceActive() {
+	field, ok := w.activeField()
+	if !ok {
+		return
+	}
+	ref := w.valueRef(field.ID)
+	if ref == nil {
+		return
+	}
+	runes := []rune(*ref)
+	if len(runes) == 0 {
+		return
+	}
+	*ref = string(runes[:len(runes)-1])
+	w.message = ""
+}
+
+func (w jailCreationWizard) activeField() (wizardField, bool) {
+	step := w.currentStep()
+	if len(step.Fields) == 0 {
+		return wizardField{}, false
+	}
+	idx := w.field
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(step.Fields) {
+		idx = len(step.Fields) - 1
+	}
+	return step.Fields[idx], true
+}
+
+func (w *jailCreationWizard) valueRef(id string) *string {
+	switch id {
+	case "name":
+		return &w.values.Name
+	case "dataset":
+		return &w.values.Dataset
+	case "template_release":
+		return &w.values.TemplateRelease
+	case "interface":
+		return &w.values.Interface
+	case "ip4":
+		return &w.values.IP4
+	case "default_router":
+		return &w.values.DefaultRouter
+	case "cpu_percent":
+		return &w.values.CPUPercent
+	case "memory_limit":
+		return &w.values.MemoryLimit
+	case "process_limit":
+		return &w.values.ProcessLimit
+	case "mount_points":
+		return &w.values.MountPoints
+	default:
+		return nil
+	}
+}
+
+func (w jailCreationWizard) valueByID(id string) string {
+	switch id {
+	case "name":
+		return w.values.Name
+	case "dataset":
+		return w.values.Dataset
+	case "template_release":
+		return w.values.TemplateRelease
+	case "interface":
+		return w.values.Interface
+	case "ip4":
+		return w.values.IP4
+	case "default_router":
+		return w.values.DefaultRouter
+	case "cpu_percent":
+		return w.values.CPUPercent
+	case "memory_limit":
+		return w.values.MemoryLimit
+	case "process_limit":
+		return w.values.ProcessLimit
+	case "mount_points":
+		return w.values.MountPoints
+	default:
+		return ""
+	}
+}
+
+func (w jailCreationWizard) validateCurrentStep() error {
+	switch w.step {
+	case 0:
+		if strings.TrimSpace(w.values.Name) == "" {
+			return fmt.Errorf("jail name is required")
+		}
+		if !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
+			return fmt.Errorf("invalid jail name")
+		}
+		if strings.TrimSpace(w.values.Dataset) == "" {
+			return fmt.Errorf("dataset is required")
+		}
+	case 1:
+		if strings.TrimSpace(w.values.TemplateRelease) == "" {
+			return fmt.Errorf("template/release is required")
+		}
+	case 2:
+		if strings.TrimSpace(w.values.Interface) == "" {
+			return fmt.Errorf("interface is required")
+		}
+		if strings.TrimSpace(w.values.IP4) == "" {
+			return fmt.Errorf("IPv4 is required")
+		}
+	case 3:
+		if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
+			cpu, err := strconv.Atoi(value)
+			if err != nil || cpu <= 0 || cpu > 100 {
+				return fmt.Errorf("CPU %% must be between 1 and 100")
+			}
+		}
+		if value := strings.TrimSpace(w.values.MemoryLimit); value != "" {
+			if !memoryLimitPattern.MatchString(strings.ToUpper(value)) {
+				return fmt.Errorf("memory must look like 512M or 2G")
+			}
+		}
+		if value := strings.TrimSpace(w.values.ProcessLimit); value != "" {
+			procs, err := strconv.Atoi(value)
+			if err != nil || procs <= 0 {
+				return fmt.Errorf("max processes must be a positive integer")
+			}
+		}
+	}
+	return nil
+}
+
+func (w jailCreationWizard) validateAll() error {
+	for idx := 0; idx < len(wizardSteps)-1; idx++ {
+		test := w
+		test.step = idx
+		if err := test.validateCurrentStep(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w jailCreationWizard) summaryLines() []string {
+	lines := []string{
+		fmt.Sprintf("Name: %s", w.values.Name),
+		fmt.Sprintf("Dataset: %s", w.values.Dataset),
+		fmt.Sprintf("Template/Release: %s", w.values.TemplateRelease),
+		fmt.Sprintf("Interface: %s", w.values.Interface),
+		fmt.Sprintf("IPv4: %s", w.values.IP4),
+		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
+		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
+		fmt.Sprintf("Memory limit: %s", valueOrDash(w.values.MemoryLimit)),
+		fmt.Sprintf("Process limit: %s", valueOrDash(w.values.ProcessLimit)),
+	}
+	mounts := w.mountPointList()
+	if len(mounts) == 0 {
+		lines = append(lines, "Mount points: -")
+	} else {
+		lines = append(lines, "Mount points:")
+		for _, mount := range mounts {
+			lines = append(lines, "  - "+mount)
+		}
+	}
+	return lines
+}
+
+func (w jailCreationWizard) jailConfPreviewLines() []string {
+	jailPath := "/usr/jails/" + strings.TrimSpace(w.values.Name)
+	lines := []string{
+		fmt.Sprintf("%s {", w.values.Name),
+		fmt.Sprintf("  host.hostname = %q;", w.values.Name),
+		fmt.Sprintf("  path = %q;", jailPath),
+		"  vnet;",
+		fmt.Sprintf("  vnet.interface = %q;", w.values.Interface),
+		fmt.Sprintf("  ip4.addr = %q;", w.values.IP4),
+		"  exec.start = \"/bin/sh /etc/rc\";",
+		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
+		"  persist;",
+		"}",
+	}
+	return lines
+}
+
+func (w jailCreationWizard) commandPlanLines() []string {
+	lines := []string{
+		"1. Ensure dataset exists:",
+		fmt.Sprintf("   zfs create %s", w.values.Dataset),
+		"2. Provision jail root from selected template/release:",
+		fmt.Sprintf("   # source: %s", w.values.TemplateRelease),
+		"3. Add generated block to /etc/jail.conf",
+		fmt.Sprintf("4. Start jail: service jail start %s", w.values.Name),
+	}
+
+	if strings.TrimSpace(w.values.CPUPercent) != "" ||
+		strings.TrimSpace(w.values.MemoryLimit) != "" ||
+		strings.TrimSpace(w.values.ProcessLimit) != "" {
+		lines = append(lines, "5. Apply rctl limits:")
+		if strings.TrimSpace(w.values.CPUPercent) != "" {
+			lines = append(lines, fmt.Sprintf("   rctl -a jail:%s:pcpu:deny=%s", w.values.Name, w.values.CPUPercent))
+		}
+		if strings.TrimSpace(w.values.MemoryLimit) != "" {
+			lines = append(lines, fmt.Sprintf("   rctl -a jail:%s:memoryuse:deny=%s", w.values.Name, strings.ToUpper(w.values.MemoryLimit)))
+		}
+		if strings.TrimSpace(w.values.ProcessLimit) != "" {
+			lines = append(lines, fmt.Sprintf("   rctl -a jail:%s:maxproc:deny=%s", w.values.Name, w.values.ProcessLimit))
+		}
+	}
+
+	mounts := w.mountPointList()
+	if len(mounts) > 0 {
+		lines = append(lines, "6. Configure mount points:")
+		for _, mount := range mounts {
+			lines = append(lines, "   mountpoint: "+mount)
+		}
+	}
+	return lines
+}
+
+func (w jailCreationWizard) mountPointList() []string {
+	if strings.TrimSpace(w.values.MountPoints) == "" {
+		return nil
+	}
+	splitter := strings.NewReplacer("\n", ",", ";", ",")
+	raw := splitter.Replace(w.values.MountPoints)
+	chunks := strings.Split(raw, ",")
+	var mounts []string
+	for _, chunk := range chunks {
+		item := strings.TrimSpace(chunk)
+		if item == "" {
+			continue
+		}
+		mounts = append(mounts, item)
+	}
+	return mounts
+}

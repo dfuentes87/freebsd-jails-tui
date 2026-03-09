@@ -60,6 +60,7 @@ type screenMode int
 const (
 	screenDashboard screenMode = iota
 	screenJailDetail
+	screenCreateWizard
 )
 
 type model struct {
@@ -77,11 +78,14 @@ type model struct {
 	detailErr     error
 	detailLoading bool
 	detailScroll  int
+	wizard        jailCreationWizard
+	notice        string
 }
 
 func newModel() model {
 	return model{
-		mode: screenDashboard,
+		mode:   screenDashboard,
+		wizard: newJailCreationWizard(),
 	}
 }
 
@@ -135,6 +139,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
+		if m.mode == screenCreateWizard {
+			return m.updateWizardKeys(msg)
+		}
 		if m.mode == screenJailDetail {
 			return m.updateDetailKeys(msg)
 		}
@@ -159,6 +166,11 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor -= m.listHeight()
 	case "r":
 		return m, pollCmd()
+	case "c", "n":
+		m.mode = screenCreateWizard
+		m.wizard = newJailCreationWizard()
+		m.notice = ""
+		return m, nil
 	case "enter", "d", "right":
 		jail, ok := m.selectedJail()
 		if !ok {
@@ -214,9 +226,56 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = screenDashboard
+		m.notice = "Jail creation canceled."
+		return m, nil
+	case "left":
+		m.wizard.prevStep()
+		return m, nil
+	case "right":
+		if err := m.wizard.nextStep(); err != nil {
+			return m, nil
+		}
+		return m, nil
+	case "tab", "down":
+		m.wizard.nextField()
+		return m, nil
+	case "shift+tab", "up":
+		m.wizard.prevField()
+		return m, nil
+	case "enter":
+		if m.wizard.isConfirmationStep() {
+			if err := m.wizard.validateAll(); err != nil {
+				m.wizard.message = err.Error()
+				return m, nil
+			}
+			m.mode = screenDashboard
+			m.notice = fmt.Sprintf("Creation plan prepared for jail %s.", m.wizard.values.Name)
+			m.wizard = newJailCreationWizard()
+			return m, nil
+		}
+		_ = m.wizard.nextStep()
+		return m, nil
+	case "backspace", "delete":
+		m.wizard.backspaceActive()
+		return m, nil
+	}
+
+	if msg.Type == tea.KeyRunes {
+		m.wizard.appendToActive(string(msg.Runes))
+	}
+	return m, nil
+}
+
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading dashboard..."
+	}
+	if m.mode == screenCreateWizard {
+		return m.renderWizardView()
 	}
 	if m.mode == screenJailDetail {
 		return m.renderJailDetailView()
@@ -297,6 +356,82 @@ func (m model) renderJailDetailView() string {
 	footer := footerStyle.Width(m.width).Render(hint)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m model) renderWizardView() string {
+	step := m.wizard.currentStep()
+	title := titleStyle.Render("Jail Creation Wizard")
+	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(wizardSteps), step.Title))
+	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+
+	bodyHeight := max(4, m.height-3)
+	lines := m.wizardLines(max(12, m.width-2))
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+
+	hint := "type to edit | tab/shift+tab: fields | enter/right: next | left: back | esc: cancel | q: quit"
+	if m.wizard.isConfirmationStep() {
+		hint = "enter: finish wizard | left: back | esc: cancel | q: quit"
+	}
+	if m.wizard.message != "" {
+		hint += " | " + m.wizard.message
+	}
+	footer := footerStyle.Width(m.width).Render(hint)
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m model) wizardLines(width int) []string {
+	step := m.wizard.currentStep()
+	lines := []string{sectionStyle.Render(step.Title)}
+	if step.Description != "" {
+		lines = append(lines, truncate(step.Description, width))
+	}
+	lines = append(lines, "")
+
+	if m.wizard.isConfirmationStep() {
+		lines = append(lines, sectionStyle.Render("Summary"))
+		for _, line := range m.wizard.summaryLines() {
+			lines = append(lines, truncate(line, width))
+		}
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("jail.conf preview"))
+		for _, line := range m.wizard.jailConfPreviewLines() {
+			lines = append(lines, truncate(line, width))
+		}
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Creation plan"))
+		for _, line := range m.wizard.commandPlanLines() {
+			lines = append(lines, truncate(line, width))
+		}
+		return lines
+	}
+
+	for idx, field := range step.Fields {
+		value := m.wizard.valueByID(field.ID)
+		display := value
+		if strings.TrimSpace(display) == "" {
+			display = "(" + field.Placeholder + ")"
+		}
+		prefix := " "
+		if idx == m.wizard.field {
+			prefix = ">"
+		}
+		line := fmt.Sprintf("%s %s: %s", prefix, field.Label, display)
+		line = truncate(line, width)
+		if idx == m.wizard.field {
+			line = selectedRowStyle.Width(max(1, width)).Render(line)
+		}
+		lines = append(lines, line)
+		if field.Help != "" {
+			lines = append(lines, truncate("  "+field.Help, width))
+		}
+	}
+
+	return lines
 }
 
 func (m model) detailLines(width int) []string {
@@ -464,7 +599,10 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | r: refresh | q: quit"
+	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | r: refresh | q: quit"
+	if m.notice != "" {
+		hint += " | " + m.notice
+	}
 	if m.err != nil {
 		hint += " | warning: " + m.err.Error()
 	}
