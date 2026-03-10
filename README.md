@@ -90,6 +90,7 @@ go run .
   - release tags (for example `14.2-RELEASE`) first use local `/usr/freebsd-dist/base.txz` if present
   - template directory/archive paths must already exist on the system
   - if local userland is missing, release tags can be downloaded from `https://download.freebsd.org`
+  - release download pattern is `https://download.freebsd.org/ftp/releases/<arch>/<arch>/<RELEASE>/base.txz`
   - custom `https://...` URL downloads are supported
 
 ### Templates

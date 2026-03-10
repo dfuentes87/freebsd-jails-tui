@@ -210,11 +210,7 @@ func resolveTemplateSource(input string, logs *[]string) (string, func(), error)
 			return source, nil, nil
 		}
 
-		releaseURL, err := defaultReleaseBaseURL(input)
-		if err != nil {
-			return "", nil, err
-		}
-		return downloadArchiveToTemp(releaseURL, logs)
+		return downloadReleaseArchiveToTemp(input, logs)
 	}
 
 	return "", nil, fmt.Errorf(
@@ -224,17 +220,42 @@ func resolveTemplateSource(input string, logs *[]string) (string, func(), error)
 	)
 }
 
-func defaultReleaseBaseURL(release string) (string, error) {
+func defaultReleaseBaseURLs(release string) ([]string, error) {
 	archOut, err := exec.Command("uname", "-m").Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to detect system arch for release download: %w", err)
+		return nil, fmt.Errorf("failed to detect system arch for release download: %w", err)
 	}
 	arch := strings.TrimSpace(string(archOut))
 	if arch == "" {
 		arch = "amd64"
 	}
 	release = strings.ToUpper(strings.TrimSpace(release))
-	return fmt.Sprintf("%s/ftp/releases/%s/%s/base.txz", defaultDownloadHost, arch, release), nil
+	urls := []string{
+		// FreeBSD release directory layout commonly uses arch/arch/<release>/base.txz.
+		fmt.Sprintf("%s/ftp/releases/%s/%s/%s/base.txz", defaultDownloadHost, arch, arch, release),
+		// Compatibility fallback.
+		fmt.Sprintf("%s/ftp/releases/%s/%s/base.txz", defaultDownloadHost, arch, release),
+	}
+	return urls, nil
+}
+
+func downloadReleaseArchiveToTemp(release string, logs *[]string) (string, func(), error) {
+	urls, err := defaultReleaseBaseURLs(release)
+	if err != nil {
+		return "", nil, err
+	}
+	var lastErr error
+	for _, url := range urls {
+		path, cleanup, err := downloadArchiveToTemp(url, logs)
+		if err == nil {
+			return path, cleanup, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("release download failed")
+	}
+	return "", nil, fmt.Errorf("unable to download release %s: %w", release, lastErr)
 }
 
 func downloadArchiveToTemp(url string, logs *[]string) (string, func(), error) {

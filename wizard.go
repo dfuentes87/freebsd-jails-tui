@@ -681,7 +681,7 @@ func discoverWizardUserlandOptions() ([]userlandOption, error) {
 		})
 	}
 	// Download options from the official mirror.
-	for _, release := range []string{"14.2-RELEASE", "13.4-RELEASE"} {
+	for _, release := range []string{"15.0-RELEASE", "14.2-RELEASE", "13.4-RELEASE"} {
 		options = append(options, userlandOption{
 			Label: "download: " + release + " (from " + defaultDownloadHost + ")",
 			Value: release,
