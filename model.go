@@ -263,6 +263,9 @@ func (m model) isTextEntryMode() bool {
 		if m.wizardApplying {
 			return false
 		}
+		if m.wizard.userlandMode {
+			return false
+		}
 		if m.wizard.templateMode == wizardTemplateModeSave {
 			return true
 		}
@@ -362,6 +365,41 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.wizard.userlandMode {
+		switch msg.String() {
+		case "esc", "left":
+			m.wizard.endUserlandSelect()
+			m.wizard.message = "Userland selection canceled."
+			return m, nil
+		case "j", "down", "tab":
+			m.wizard.userlandCursor++
+		case "k", "up", "shift+tab":
+			m.wizard.userlandCursor--
+		case "g", "home":
+			m.wizard.userlandCursor = 0
+		case "G", "end":
+			m.wizard.userlandCursor = len(m.wizard.userlandOpts) - 1
+		case "r", "R":
+			if err := m.wizard.beginUserlandSelect(); err != nil {
+				m.wizard.message = err.Error()
+				return m, nil
+			}
+			return m, nil
+		case "enter":
+			option, ok := m.wizard.selectedUserlandOption()
+			if !ok {
+				m.wizard.message = "No userland option selected."
+				return m, nil
+			}
+			m.wizard.values.TemplateRelease = option.Value
+			m.wizard.endUserlandSelect()
+			m.wizard.message = fmt.Sprintf("Selected userland: %s", option.Label)
+			return m, nil
+		}
+		m.wizard.boundUserlandCursor()
+		return m, nil
+	}
+
 	if m.wizard.templateMode == wizardTemplateModeSave {
 		switch msg.String() {
 		case "esc", "left":
@@ -479,6 +517,15 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if err := m.wizard.beginTemplateLoad(); err != nil {
+			m.wizard.message = err.Error()
+			return m, nil
+		}
+		return m, nil
+	case "ctrl+u":
+		if m.wizardApplying {
+			return m, nil
+		}
+		if err := m.wizard.beginUserlandSelect(); err != nil {
 			m.wizard.message = err.Error()
 			return m, nil
 		}
@@ -620,6 +667,7 @@ func (m model) helpLines(width int) []string {
 		truncate("enter/right: next step", width),
 		truncate("left: previous step", width),
 		truncate("s/l on step 6: save/load templates", width),
+		truncate("ctrl+u: open userland selector", width),
 		truncate("?: open help page", width),
 		truncate("step 6 enter: execute create actions", width),
 	}
@@ -733,7 +781,7 @@ func (m model) renderWizardView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "type to edit | tab/shift+tab: fields | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
+	hint := "type to edit | tab/shift+tab: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
 	if m.wizard.isConfirmationStep() {
 		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit"
 	}
@@ -742,6 +790,9 @@ func (m model) renderWizardView() string {
 	}
 	if m.wizard.templateMode == wizardTemplateModeLoad {
 		hint = "Template load: j/k select | enter: load | r: refresh list | esc: cancel"
+	}
+	if m.wizard.userlandMode {
+		hint = "Userland select: j/k choose | enter: apply | r: refresh options | esc: cancel"
 	}
 	if m.wizardApplying {
 		hint = "Applying changes... please wait | q: quit"
@@ -797,6 +848,28 @@ func (m model) wizardLines(width int) []string {
 			lines = append(lines, truncate("Destination: "+template.Values.Dataset, width))
 			lines = append(lines, truncate("Template/Release: "+template.Values.TemplateRelease, width))
 			lines = append(lines, truncate("IPv4: "+template.Values.IP4, width))
+		}
+		return lines
+	}
+
+	if m.wizard.userlandMode {
+		lines = append(lines, sectionStyle.Render("Select Userland Source"))
+		if len(m.wizard.userlandOpts) == 0 {
+			lines = append(lines, "No userland options found.")
+			return lines
+		}
+		for idx, option := range m.wizard.userlandOpts {
+			row := "  " + option.Label
+			if idx == m.wizard.userlandCursor {
+				row = selectedRowStyle.Width(max(1, width)).Render("> " + option.Label)
+			}
+			lines = append(lines, truncate(row, width))
+		}
+		if option, ok := m.wizard.selectedUserlandOption(); ok {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Selected Value"))
+			lines = append(lines, truncate(option.Value, width))
+			lines = append(lines, truncate("Tip: type a custom https URL directly in Template/Release for custom download.", width))
 		}
 		return lines
 	}
@@ -859,6 +932,10 @@ func (m model) wizardLines(width int) []string {
 		lines = append(lines, line)
 		if field.Help != "" {
 			lines = append(lines, truncate("  "+field.Help, width))
+		}
+		if field.ID == "template_release" {
+			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
+			lines = append(lines, truncate("  custom https URL is supported and will be downloaded", width))
 		}
 		if field.ID == "name" {
 			lines = append(lines, "")

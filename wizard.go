@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -39,6 +41,11 @@ type wizardTemplate struct {
 	Values jailWizardValues `json:"values"`
 }
 
+type userlandOption struct {
+	Label string
+	Value string
+}
+
 var wizardSteps = []wizardStep{
 	{
 		Title:       "1-5. Configuration",
@@ -46,7 +53,7 @@ var wizardSteps = []wizardStep{
 		Fields: []wizardField{
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
 			{ID: "dataset", Label: "Destination (required)", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
-			{ID: "template_release", Label: "Template/Release", Placeholder: "14.2-RELEASE", Help: "Local dir/archive path or release tag; releases are not auto-downloaded"},
+			{ID: "template_release", Label: "Template/Release", Placeholder: "14.2-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
 			{ID: "interface", Label: "Interface", Placeholder: "vnet0", Help: "Bridge or jail interface name"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR recommended"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
@@ -88,6 +95,9 @@ type jailCreationWizard struct {
 	templateInput  string
 	templates      []wizardTemplate
 	templateCursor int
+	userlandMode   bool
+	userlandOpts   []userlandOption
+	userlandCursor int
 	message        string
 	executionLogs  []string
 	executionError string
@@ -161,6 +171,7 @@ func (w *jailCreationWizard) prevStep() {
 
 func (w *jailCreationWizard) beginTemplateSave() {
 	w.templateMode = wizardTemplateModeSave
+	w.userlandMode = false
 	if strings.TrimSpace(w.templateInput) == "" {
 		w.templateInput = strings.TrimSpace(w.values.Name)
 	}
@@ -172,6 +183,7 @@ func (w *jailCreationWizard) beginTemplateLoad() error {
 	if err != nil {
 		return err
 	}
+	w.userlandMode = false
 	w.templates = templates
 	w.templateCursor = 0
 	w.templateMode = wizardTemplateModeLoad
@@ -184,6 +196,49 @@ func (w *jailCreationWizard) endTemplateMode() {
 	w.templateMode = wizardTemplateModeNone
 	w.templateInput = ""
 	w.boundTemplateCursor()
+}
+
+func (w *jailCreationWizard) beginUserlandSelect() error {
+	options, err := discoverWizardUserlandOptions()
+	if err != nil {
+		return err
+	}
+	if len(options) == 0 {
+		return fmt.Errorf("no userland entries found in %s", defaultUserlandDir)
+	}
+	w.templateMode = wizardTemplateModeNone
+	w.userlandMode = true
+	w.userlandOpts = options
+	w.userlandCursor = 0
+	w.message = ""
+	return nil
+}
+
+func (w *jailCreationWizard) endUserlandSelect() {
+	w.userlandMode = false
+	w.userlandOpts = nil
+	w.userlandCursor = 0
+}
+
+func (w *jailCreationWizard) boundUserlandCursor() {
+	if len(w.userlandOpts) == 0 {
+		w.userlandCursor = 0
+		return
+	}
+	if w.userlandCursor < 0 {
+		w.userlandCursor = 0
+	}
+	if w.userlandCursor >= len(w.userlandOpts) {
+		w.userlandCursor = len(w.userlandOpts) - 1
+	}
+}
+
+func (w *jailCreationWizard) selectedUserlandOption() (userlandOption, bool) {
+	if len(w.userlandOpts) == 0 {
+		return userlandOption{}, false
+	}
+	w.boundUserlandCursor()
+	return w.userlandOpts[w.userlandCursor], true
 }
 
 func (w *jailCreationWizard) selectedTemplate() (wizardTemplate, bool) {
@@ -340,7 +395,10 @@ func (w jailCreationWizard) validateCurrentStep() error {
 		return fmt.Errorf("destination must be an absolute path, e.g. /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 	}
 	if strings.TrimSpace(w.values.TemplateRelease) == "" {
-		return fmt.Errorf("template/release is required (local path or release tag)")
+		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
+	}
+	if hasConflictingJailConfig(w.values.Name) {
+		return fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
 	}
 	if strings.TrimSpace(w.values.Interface) == "" {
 		return fmt.Errorf("interface is required")
@@ -595,4 +653,42 @@ func wizardSectionForField(id string) string {
 	default:
 		return ""
 	}
+}
+
+func hasConflictingJailConfig(name string) bool {
+	configPath := jailConfigPathForName(strings.TrimSpace(name))
+	if _, err := os.Stat(configPath); err == nil {
+		return true
+	}
+	return false
+}
+
+func discoverWizardUserlandOptions() ([]userlandOption, error) {
+	sources, err := discoverUserlandSources(defaultUserlandDir)
+	if err != nil {
+		return nil, err
+	}
+	options := make([]userlandOption, 0, len(sources)+4)
+	for _, source := range sources {
+		label := filepath.Base(source)
+		parent := filepath.Base(filepath.Dir(source))
+		if strings.EqualFold(label, "base.txz") {
+			label = parent + "/base.txz"
+		}
+		options = append(options, userlandOption{
+			Label: "local: " + label,
+			Value: source,
+		})
+	}
+	// Download options from the official mirror.
+	for _, release := range []string{"14.2-RELEASE", "13.4-RELEASE"} {
+		options = append(options, userlandOption{
+			Label: "download: " + release + " (from " + defaultDownloadHost + ")",
+			Value: release,
+		})
+	}
+	sort.Slice(options, func(i, j int) bool {
+		return strings.ToLower(options[i].Label) < strings.ToLower(options[j].Label)
+	})
+	return options, nil
 }

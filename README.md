@@ -82,13 +82,15 @@ go run .
 - `left`: previous step
 - `s` (step 6/confirmation): save current wizard values as a template
 - `l` (step 6/confirmation): load a saved template
+- `ctrl+u`: open userland selector (local media entries + official release options)
 - `backspace`: delete character in active field
 - `esc`: cancel wizard and return to dashboard
 - `Destination` expects a full path (example: `/usr/local/jails/containers/web01`)
 - `Template/Release` uses local resources:
-  - release tags (for example `14.2-RELEASE`) require `/usr/freebsd-dist/base.txz` already present
+  - release tags (for example `14.2-RELEASE`) first use local `/usr/freebsd-dist/base.txz` if present
   - template directory/archive paths must already exist on the system
-  - the wizard does not download releases automatically
+  - if local userland is missing, release tags can be downloaded from `https://download.freebsd.org`
+  - custom `https://...` URL downloads are supported
 
 ### Templates
 
@@ -108,6 +110,7 @@ go run .
 
 - On step 6, `enter` executes jail creation commands (destructive operations)
 - The wizard now creates/uses destination jail paths, writes `/etc/jail.conf.d/<name>.conf`, optionally writes `/etc/fstab.<name>`, starts the jail, and applies `rctl` limits
+- The wizard checks for existing `/etc/jail.conf.d/<name>.conf` and refuses to overwrite it
 - Run the TUI as root (or with equivalent privileges) for these operations
 
 ## Next milestones
