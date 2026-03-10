@@ -98,11 +98,12 @@ type model struct {
 }
 
 func newModel() model {
-	return model{
+	m := model{
 		mode:      screenInitialCheck,
-		wizard:    newJailCreationWizard(),
 		initCheck: newInitialCheckState(),
 	}
+	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
+	return m
 }
 
 func pollCmd() tea.Cmd {
@@ -215,7 +216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
 			m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
-			m.wizard = newJailCreationWizard()
+			m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 			return m, pollCmd()
 		}
 		return m, nil
@@ -298,7 +299,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, pollCmd()
 	case "c", "n":
 		m.mode = screenCreateWizard
-		m.wizard = newJailCreationWizard()
+		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.notice = ""
 		return m, nil
 	case "enter", "d", "right":
@@ -456,8 +457,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.wizard.values = template.Values
+			if strings.TrimSpace(m.wizard.values.JailType) == "" {
+				m.wizard.values.JailType = "vnet"
+			}
 			if strings.TrimSpace(m.wizard.values.Interface) == "" {
-				m.wizard.values.Interface = "vnet0"
+				m.wizard.values.Interface = "em0"
 			}
 			m.wizard.endTemplateMode()
 			m.wizard.message = fmt.Sprintf("Template %q loaded.", template.Name)

@@ -29,6 +29,13 @@ type JailCreationResult struct {
 }
 
 func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
+	if strings.TrimSpace(values.JailType) == "" {
+		values.JailType = "vnet"
+	}
+	if strings.TrimSpace(values.Interface) == "" {
+		values.Interface = "em0"
+	}
+
 	result := JailCreationResult{
 		Name: strings.TrimSpace(values.Name),
 	}
@@ -42,7 +49,7 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return result
 	}
 
-	validator := newJailCreationWizard()
+	validator := newJailCreationWizard("")
 	validator.values = values
 	if err := validator.validateAll(); err != nil {
 		return fail(err)

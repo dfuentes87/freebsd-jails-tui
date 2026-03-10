@@ -48,19 +48,27 @@ type userlandOption struct {
 
 var wizardSteps = []wizardStep{
 	{
+		Title:       "0. Jail Type",
+		Description: "Select the jail type to create.",
+		Fields: []wizardField{
+			{ID: "jail_type", Label: "Type", Placeholder: "vnet", Help: "Options: thick, thin, vnet, linux"},
+		},
+	},
+	{
 		Title:       "1-5. Configuration",
 		Description: "Fill in name, destination, release/template, networking, limits, and mounts on this page.",
 		Fields: []wizardField{
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
-			{ID: "dataset", Label: "Destination (required)", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
+			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "14.2-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
-			{ID: "interface", Label: "Interface", Placeholder: "vnet0", Help: "Bridge or jail interface name"},
-			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR recommended"},
+			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Bridge or jail interface name"},
+			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit'"},
+			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit'"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
-			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: "Optional integer percentage"},
-			{ID: "memory_limit", Label: "Memory", Placeholder: "2G", Help: "Optional, examples: 512M, 2G"},
-			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: "Optional integer"},
-			{ID: "mount_points", Label: "Mount points", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
+			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
+			{ID: "memory_limit", Label: "Memory", Placeholder: "2G", Help: "Examples: 512M, 2G"},
+			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: ""},
+			{ID: "mount_points", Label: "Mount points (optional)", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
 		},
 	},
 	{
@@ -70,11 +78,13 @@ var wizardSteps = []wizardStep{
 }
 
 type jailWizardValues struct {
+	JailType        string
 	Name            string
 	Dataset         string
 	TemplateRelease string
 	Interface       string
 	IP4             string
+	IP6             string
 	DefaultRouter   string
 	CPUPercent      string
 	MemoryLimit     string
@@ -103,10 +113,12 @@ type jailCreationWizard struct {
 	executionError string
 }
 
-func newJailCreationWizard() jailCreationWizard {
+func newJailCreationWizard(defaultDestination string) jailCreationWizard {
 	return jailCreationWizard{
 		values: jailWizardValues{
-			Interface: "vnet0",
+			JailType:  "vnet",
+			Dataset:   strings.TrimSpace(defaultDestination),
+			Interface: "em0",
 		},
 	}
 }
@@ -326,6 +338,8 @@ func (w jailCreationWizard) activeField() (wizardField, bool) {
 
 func (w *jailCreationWizard) valueRef(id string) *string {
 	switch id {
+	case "jail_type":
+		return &w.values.JailType
 	case "name":
 		return &w.values.Name
 	case "dataset":
@@ -336,6 +350,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.Interface
 	case "ip4":
 		return &w.values.IP4
+	case "ip6":
+		return &w.values.IP6
 	case "default_router":
 		return &w.values.DefaultRouter
 	case "cpu_percent":
@@ -353,6 +369,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 
 func (w jailCreationWizard) valueByID(id string) string {
 	switch id {
+	case "jail_type":
+		return w.values.JailType
 	case "name":
 		return w.values.Name
 	case "dataset":
@@ -363,6 +381,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.Interface
 	case "ip4":
 		return w.values.IP4
+	case "ip6":
+		return w.values.IP6
 	case "default_router":
 		return w.values.DefaultRouter
 	case "cpu_percent":
@@ -380,6 +400,20 @@ func (w jailCreationWizard) valueByID(id string) string {
 
 func (w jailCreationWizard) validateCurrentStep() error {
 	if w.isConfirmationStep() {
+		return nil
+	}
+	jailType := strings.ToLower(strings.TrimSpace(w.values.JailType))
+	if jailType == "" {
+		return fmt.Errorf("jail type is required (thick, thin, vnet, linux)")
+	}
+	switch jailType {
+	case "thick", "thin", "vnet", "linux":
+	default:
+		return fmt.Errorf("jail type must be one of: thick, thin, vnet, linux")
+	}
+	w.values.JailType = jailType
+
+	if w.step == 0 {
 		return nil
 	}
 	if strings.TrimSpace(w.values.Name) == "" {
@@ -439,11 +473,13 @@ func (w jailCreationWizard) validateAll() error {
 
 func (w jailCreationWizard) summaryLines() []string {
 	lines := []string{
+		fmt.Sprintf("Type: %s", valueOrDash(w.values.JailType)),
 		fmt.Sprintf("Name: %s", w.values.Name),
 		fmt.Sprintf("Destination: %s", w.values.Dataset),
 		fmt.Sprintf("Template/Release: %s", w.values.TemplateRelease),
 		fmt.Sprintf("Interface: %s", w.values.Interface),
 		fmt.Sprintf("IPv4: %s", w.values.IP4),
+		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
 		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
 		fmt.Sprintf("Memory limit: %s", valueOrDash(w.values.MemoryLimit)),
@@ -624,10 +660,15 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 		"  vnet;",
 		fmt.Sprintf("  vnet.interface = %q;", strings.TrimSpace(values.Interface)),
 		fmt.Sprintf("  ip4.addr = %q;", strings.TrimSpace(values.IP4)),
+	}
+	if strings.TrimSpace(values.IP6) != "" {
+		lines = append(lines, fmt.Sprintf("  ip6.addr = %q;", strings.TrimSpace(values.IP6)))
+	}
+	lines = append(lines,
 		"  exec.start = \"/bin/sh /etc/rc\";",
 		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
 		"  persist;",
-	}
+	)
 	if strings.TrimSpace(values.DefaultRouter) != "" {
 		lines = append(lines, fmt.Sprintf("  defaultrouter = %q;", strings.TrimSpace(values.DefaultRouter)))
 	}
@@ -640,14 +681,16 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 
 func wizardSectionForField(id string) string {
 	switch id {
+	case "jail_type":
+		return "0. Jail Type"
 	case "name", "dataset":
-		return "1. Name / destination"
+		return "1. Name & Destination"
 	case "template_release":
 		return "2. Template or release"
-	case "interface", "ip4", "default_router":
+	case "interface", "ip4", "ip6", "default_router":
 		return "3. Networking"
 	case "cpu_percent", "memory_limit", "process_limit":
-		return "4. Resource limits"
+		return "4. Resource Limits (optional)"
 	case "mount_points":
 		return "5. Mount points"
 	default:

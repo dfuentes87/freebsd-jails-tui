@@ -77,6 +77,7 @@ go run .
 
 ### Jail creation wizard
 
+- first page asks jail type: `thick`, `thin`, `vnet`, or `linux` (additional type-specific options not implemented yet)
 - `tab` / `shift+tab`: move active field
 - `enter` / `right`: next step
 - `left`: previous step
@@ -86,6 +87,8 @@ go run .
 - `backspace`: delete character in active field
 - `esc`: cancel wizard and return to dashboard
 - `Destination` expects a full path (example: `/usr/local/jails/containers/web01`)
+- `Destination` is prefilled from the initial config check path
+- `Network` includes optional IPv6 (`CIDR or 'inherit'`)
 - `Template/Release` uses local resources:
   - release tags (for example `14.2-RELEASE`) first use local `/usr/freebsd-dist/base.txz` if present
   - template directory/archive paths must already exist on the system

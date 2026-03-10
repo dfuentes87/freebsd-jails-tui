@@ -133,6 +133,25 @@ func (state *initialCheckState) preferredJailsPath() string {
 	return docJailsPath
 }
 
+func initialWizardDestination(status initialConfigStatus) string {
+	base := docJailsPath
+	for _, path := range status.ExistingJailPaths {
+		if path == docJailsPath {
+			base = path
+			break
+		}
+		if base == docJailsPath {
+			base = path
+		}
+	}
+	base = filepath.Clean(base)
+	containers := filepath.Join(base, "containers")
+	if info, err := os.Stat(containers); err == nil && info.IsDir() {
+		return filepath.Join(containers, "new-jail")
+	}
+	return filepath.Join(base, "new-jail")
+}
+
 func (state *initialCheckState) beginCustomDirInput() {
 	state.phase = initialPhaseDirsCustomInput
 	if strings.TrimSpace(state.customDirPath) == "" {
