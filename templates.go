@@ -122,12 +122,20 @@ func loadWizardTemplates() ([]wizardTemplate, error) {
 }
 
 func wizardTemplateFilePath() (string, error) {
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		return filepath.Join(xdg, "freebsd-jails-tui", "templates.json"), nil
+	configDir, err := appConfigDir()
+	if err != nil {
+		return "", err
 	}
-	configDir, err := os.UserConfigDir()
+	return filepath.Join(configDir, "templates.json"), nil
+}
+
+func appConfigDir() (string, error) {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(xdg, "freebsd-jails-tui"), nil
+	}
+	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to locate user config directory: %w", err)
 	}
-	return filepath.Join(configDir, "freebsd-jails-tui", "templates.json"), nil
+	return filepath.Join(dir, "freebsd-jails-tui"), nil
 }

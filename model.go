@@ -98,8 +98,12 @@ type model struct {
 }
 
 func newModel() model {
+	mode := screenInitialCheck
+	if completed, err := initialCheckCompleted(); err == nil && completed {
+		mode = screenDashboard
+	}
 	m := model{
-		mode:      screenInitialCheck,
+		mode:      mode,
 		initCheck: newInitialCheckState(),
 	}
 	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
@@ -134,7 +138,10 @@ func tickerCmd() tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return collectInitialConfigCmd()
+	if m.mode == screenInitialCheck {
+		return collectInitialConfigCmd()
+	}
+	return pollCmd()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -841,7 +848,10 @@ func (m model) wizardLines(width int) []string {
 		for idx, template := range m.wizard.templates {
 			row := "  " + template.Name
 			if idx == m.wizard.templateCursor {
-				row = selectedRowStyle.Width(max(1, width)).Render("> " + template.Name)
+				row = truncate("> "+template.Name, width)
+				row = selectedRowStyle.Width(max(1, width)).Render(row)
+				lines = append(lines, row)
+				continue
 			}
 			lines = append(lines, truncate(row, width))
 		}
@@ -865,7 +875,10 @@ func (m model) wizardLines(width int) []string {
 		for idx, option := range m.wizard.userlandOpts {
 			row := "  " + option.Label
 			if idx == m.wizard.userlandCursor {
-				row = selectedRowStyle.Width(max(1, width)).Render("> " + option.Label)
+				row = truncate("> "+option.Label, width)
+				row = selectedRowStyle.Width(max(1, width)).Render(row)
+				lines = append(lines, row)
+				continue
 			}
 			lines = append(lines, truncate(row, width))
 		}
@@ -941,7 +954,7 @@ func (m model) wizardLines(width int) []string {
 			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
 			lines = append(lines, truncate("  custom https URL is supported and will be downloaded", width))
 		}
-		if field.ID == "name" {
+		if field.ID == "name" || field.ID == "interface" || field.ID == "ip6" {
 			lines = append(lines, "")
 		}
 	}
