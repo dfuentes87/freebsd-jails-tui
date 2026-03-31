@@ -30,7 +30,7 @@ type JailCreationResult struct {
 
 func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	if strings.TrimSpace(values.JailType) == "" {
-		values.JailType = "vnet"
+		values.JailType = "thick"
 	}
 	if strings.TrimSpace(values.Interface) == "" {
 		values.Interface = "em0"

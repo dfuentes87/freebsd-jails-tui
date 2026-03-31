@@ -549,7 +549,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.wizard.values = template.Values
 			if strings.TrimSpace(m.wizard.values.JailType) == "" {
-				m.wizard.values.JailType = "vnet"
+				m.wizard.values.JailType = "thick"
 			}
 			if strings.TrimSpace(m.wizard.values.Interface) == "" {
 				m.wizard.values.Interface = "em0"

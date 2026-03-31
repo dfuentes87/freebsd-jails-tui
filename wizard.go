@@ -51,7 +51,7 @@ var wizardSteps = []wizardStep{
 		Title:       "0. Jail Type",
 		Description: "Select the jail type to create.",
 		Fields: []wizardField{
-			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux"},
+			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux. IP inherit is for non-vnet jails only"},
 		},
 	},
 	{
@@ -62,8 +62,8 @@ var wizardSteps = []wizardStep{
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Bridge or jail interface name"},
-			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit'"},
-			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit'"},
+			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
+			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
@@ -445,6 +445,14 @@ func (w jailCreationWizard) validateCurrentStep() error {
 	if strings.TrimSpace(w.values.IP4) == "" {
 		return fmt.Errorf("IPv4 is required")
 	}
+	if jailType == "vnet" {
+		if strings.EqualFold(strings.TrimSpace(w.values.IP4), "inherit") {
+			return fmt.Errorf("vnet jails cannot use IPv4 inherit; switch jail type or enter an explicit IPv4 address")
+		}
+		if strings.EqualFold(strings.TrimSpace(w.values.IP6), "inherit") {
+			return fmt.Errorf("vnet jails cannot use IPv6 inherit; switch jail type or enter an explicit IPv6 address")
+		}
+	}
 	if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
 		cpu, err := strconv.Atoi(value)
 		if err != nil || cpu <= 0 || cpu > 100 {
@@ -659,17 +667,25 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	if name == "" {
 		name = "new-jail"
 	}
+	jailType := normalizedJailType(values.JailType)
 	lines := []string{
 		fmt.Sprintf("%s {", name),
 		fmt.Sprintf("  host.hostname = %q;", effectiveJailHostname(values)),
 		fmt.Sprintf("  path = %q;", jailPath),
-		"  vnet;",
-		fmt.Sprintf("  vnet.interface = %q;", strings.TrimSpace(values.Interface)),
-		fmt.Sprintf("  ip4.addr = %q;", strings.TrimSpace(values.IP4)),
 	}
-	if strings.TrimSpace(values.IP6) != "" {
-		lines = append(lines, fmt.Sprintf("  ip6.addr = %q;", strings.TrimSpace(values.IP6)))
+
+	if jailType == "vnet" {
+		lines = append(lines,
+			"  vnet;",
+			fmt.Sprintf("  vnet.interface = %q;", strings.TrimSpace(values.Interface)),
+		)
+	} else {
+		lines = append(lines, fmt.Sprintf("  interface = %q;", strings.TrimSpace(values.Interface)))
 	}
+
+	appendJailIPConfig(&lines, "ip4", strings.TrimSpace(values.IP4))
+	appendJailIPConfig(&lines, "ip6", strings.TrimSpace(values.IP6))
+
 	lines = append(lines,
 		"  exec.start = \"/bin/sh /etc/rc\";",
 		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
@@ -695,6 +711,26 @@ func effectiveJailHostname(values jailWizardValues) string {
 		return name
 	}
 	return "new-jail"
+}
+
+func normalizedJailType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "thick"
+	}
+	return value
+}
+
+func appendJailIPConfig(lines *[]string, family, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if strings.EqualFold(value, "inherit") {
+		*lines = append(*lines, fmt.Sprintf("  %s = %q;", family, "inherit"))
+		return
+	}
+	*lines = append(*lines, fmt.Sprintf("  %s.addr = %q;", family, value))
 }
 
 func wizardSectionForField(id string) string {

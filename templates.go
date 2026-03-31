@@ -30,7 +30,7 @@ func saveWizardTemplate(name string, values jailWizardValues) error {
 		Values: values,
 	}
 	if strings.TrimSpace(entry.Values.JailType) == "" {
-		entry.Values.JailType = "vnet"
+		entry.Values.JailType = "thick"
 	}
 	if strings.TrimSpace(entry.Values.Interface) == "" {
 		entry.Values.Interface = "em0"
@@ -108,7 +108,7 @@ func loadWizardTemplates() ([]wizardTemplate, error) {
 			continue
 		}
 		if strings.TrimSpace(t.Values.JailType) == "" {
-			t.Values.JailType = "vnet"
+			t.Values.JailType = "thick"
 		}
 		if strings.TrimSpace(t.Values.Interface) == "" {
 			t.Values.Interface = "em0"

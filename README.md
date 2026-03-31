@@ -103,6 +103,8 @@ go run .
 - `Destination` is prefilled from the initial config check path
 - `Network` includes optional IPv6 (`CIDR or 'inherit'`)
 - `Network` includes optional hostname (defaults to the jail name if left empty)
+- When IPv4/IPv6 is `inherit`, the generated jail config uses `ip4 = inherit` / `ip6 = inherit`
+- `inherit` is rejected for `vnet` jails; use an explicit address or choose a non-`vnet` jail type
 - `Template/Release` uses local resources:
   - release tags (for example `14.2-RELEASE`) first use local `/usr/freebsd-dist/base.txz` if present
   - template directory/archive paths must already exist on the system
