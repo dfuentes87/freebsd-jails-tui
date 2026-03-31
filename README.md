@@ -197,7 +197,7 @@ Type-specific notes:
 - `linux`
   - enables `linux_enable=YES` and starts the host `linux` service during creation
   - has a dedicated Linux bootstrap step for distro and release selection
-  - preflights route, DNS, and mirror fetch access before bootstrapping
+  - preflights IPv4/IPv6 default routing, family-specific DNS answers, and mirror fetch access before bootstrapping
   - can skip bootstrap during creation and retry later from detail view with `b`
   - prepares compatibility mount targets under `$path/compat/<distro>`
   - bootstraps the selected Linux userspace with `debootstrap` after the jail starts

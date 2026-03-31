@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -401,20 +402,94 @@ func maybeBootstrapLinuxUserland(values jailWizardValues, jailName string, logs 
 }
 
 func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]string) error {
-	if _, err := runLoggedCommand(logs, "jexec", jailName, "route", "-n", "get", "default"); err != nil {
-		return fmt.Errorf("linux bootstrap preflight failed: no default route inside the jail")
+	hasIPv4Route := checkLinuxRouteFamily(jailName, "inet", logs)
+	hasIPv6Route := checkLinuxRouteFamily(jailName, "inet6", logs)
+	if !hasIPv4Route && !hasIPv6Route {
+		return fmt.Errorf("linux bootstrap preflight failed: no IPv4 or IPv6 default route inside the jail")
 	}
 	host := linuxMirrorHost(values)
 	if host == "" {
 		return fmt.Errorf("linux bootstrap preflight failed: could not determine mirror host")
 	}
-	if _, err := runLoggedCommand(logs, "jexec", jailName, "getent", "hosts", host); err != nil {
-		return fmt.Errorf("linux bootstrap preflight failed: DNS lookup failed for %s", host)
+	hasIPv4DNS, hasIPv6DNS, err := checkLinuxDNSFamilies(jailName, host, logs)
+	if err != nil {
+		return err
 	}
-	if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-qo", "/dev/null", linuxPreflightURL(values)); err != nil {
-		return fmt.Errorf("linux bootstrap preflight failed: could not fetch %s", linuxPreflightURL(values))
+	if hasIPv4Route && !hasIPv4DNS && hasIPv6Route && !hasIPv6DNS {
+		return fmt.Errorf("linux bootstrap preflight failed: DNS returned no IPv4 or IPv6 answers for %s", host)
+	}
+	if hasIPv4Route && !hasIPv4DNS && !hasIPv6Route {
+		return fmt.Errorf("linux bootstrap preflight failed: DNS returned no IPv4 answers for %s", host)
+	}
+	if hasIPv6Route && !hasIPv6DNS && !hasIPv4Route {
+		return fmt.Errorf("linux bootstrap preflight failed: DNS returned no IPv6 answers for %s", host)
+	}
+	if err := checkLinuxFetchReachability(values, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
+		return err
 	}
 	return nil
+}
+
+func checkLinuxRouteFamily(jailName, family string, logs *[]string) bool {
+	args := []string{"jexec", jailName, "route", "-n", "get"}
+	switch family {
+	case "inet6":
+		args = append(args, "-inet6")
+	default:
+		args = append(args, "-inet")
+	}
+	args = append(args, "default")
+	_, err := runLoggedCommand(logs, args[0], args[1:]...)
+	return err == nil
+}
+
+func checkLinuxFetchReachability(values jailWizardValues, jailName string, hasIPv4Route, hasIPv6Route bool, logs *[]string) error {
+	preflightURL := linuxPreflightURL(values)
+	var failures []string
+	if hasIPv4Route {
+		if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-4", "-qo", "/dev/null", preflightURL); err == nil {
+			return nil
+		} else {
+			failures = append(failures, "IPv4 fetch failed")
+		}
+	}
+	if hasIPv6Route {
+		if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-6", "-qo", "/dev/null", preflightURL); err == nil {
+			return nil
+		} else {
+			failures = append(failures, "IPv6 fetch failed")
+		}
+	}
+	if len(failures) == 0 {
+		failures = append(failures, "no usable IP family available for fetch")
+	}
+	return fmt.Errorf("linux bootstrap preflight failed: could not fetch %s (%s)", preflightURL, strings.Join(failures, ", "))
+}
+
+func checkLinuxDNSFamilies(jailName, host string, logs *[]string) (bool, bool, error) {
+	out, err := runLoggedCommand(logs, "jexec", jailName, "getent", "hosts", host)
+	if err != nil {
+		return false, false, fmt.Errorf("linux bootstrap preflight failed: DNS lookup failed for %s", host)
+	}
+	var hasIPv4, hasIPv6 bool
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 0 {
+			continue
+		}
+		ip := net.ParseIP(fields[0])
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			hasIPv4 = true
+			continue
+		}
+		if ip.To16() != nil {
+			hasIPv6 = true
+		}
+	}
+	return hasIPv4, hasIPv6, nil
 }
 
 func hostArch() string {

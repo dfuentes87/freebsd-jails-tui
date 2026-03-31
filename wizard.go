@@ -773,9 +773,9 @@ func (w jailCreationWizard) commandPlanLines() []string {
 			addDetail("   # use detail view action 'b' later after networking is ready")
 		} else {
 			addStep("Preflight Linux bootstrap networking inside the jail:")
-			addDetail("   jexec <jail> route -n get default")
-			addDetail(fmt.Sprintf("   jexec <jail> getent hosts %s", linuxMirrorHost(w.values)))
-			addDetail(fmt.Sprintf("   jexec <jail> fetch -qo /dev/null %s", linuxPreflightURL(w.values)))
+			addDetail("   jexec <jail> route -n get -inet default || route -n get -inet6 default")
+			addDetail(fmt.Sprintf("   jexec <jail> getent hosts %s  # confirm A/AAAA answers for usable route families", linuxMirrorHost(w.values)))
+			addDetail(fmt.Sprintf("   jexec <jail> fetch -4/-6 -qo /dev/null %s", linuxPreflightURL(w.values)))
 			addStep("Bootstrap Linux userland inside the jail:")
 			addDetail("   jexec <jail> pkg bootstrap -f")
 			addDetail("   jexec <jail> pkg install -y debootstrap")
