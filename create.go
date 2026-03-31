@@ -2,14 +2,22 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
 var releaseValuePattern = regexp.MustCompile(`^[0-9]+\.[0-9]+-RELEASE`)
+
+const (
+	defaultUserlandDir  = "/usr/local/jails/media"
+	defaultDownloadHost = "https://download.freebsd.org"
+)
 
 type JailCreationResult struct {
 	Name       string
@@ -21,6 +29,13 @@ type JailCreationResult struct {
 }
 
 func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
+	if strings.TrimSpace(values.JailType) == "" {
+		values.JailType = "vnet"
+	}
+	if strings.TrimSpace(values.Interface) == "" {
+		values.Interface = "em0"
+	}
+
 	result := JailCreationResult{
 		Name: strings.TrimSpace(values.Name),
 	}
@@ -34,7 +49,7 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return result
 	}
 
-	validator := newJailCreationWizard()
+	validator := newJailCreationWizard("")
 	validator.values = values
 	if err := validator.validateAll(); err != nil {
 		return fail(err)
@@ -48,15 +63,18 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		}
 	}
 
-	dataset := strings.TrimSpace(values.Dataset)
-	if dataset == "" {
-		return fail(fmt.Errorf("dataset is required"))
+	destination := strings.TrimSpace(values.Dataset)
+	if destination == "" {
+		return fail(fmt.Errorf("destination is required"))
 	}
 
 	result.ConfigPath = jailConfigPathForName(result.Name)
+	if err := ensureJailConfigDoesNotExist(result.ConfigPath); err != nil {
+		return fail(err)
+	}
 	logf("Starting jail creation for %s", result.Name)
 
-	jailPath, err := ensureDatasetAndJailPath(dataset, &logs)
+	jailPath, err := ensureDestinationJailPath(destination, &logs)
 	if err != nil {
 		return fail(err)
 	}
@@ -90,20 +108,31 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	return result
 }
 
-func ensureDatasetAndJailPath(dataset string, logs *[]string) (string, error) {
-	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "name", dataset); err != nil {
-		if _, createErr := runLoggedCommand(logs, "zfs", "create", "-p", dataset); createErr != nil {
-			return "", fmt.Errorf("failed to ensure dataset %q: %w", dataset, createErr)
+func ensureDestinationJailPath(destination string, logs *[]string) (string, error) {
+	destination = strings.TrimSpace(destination)
+	if strings.HasPrefix(destination, "/") {
+		jailPath := filepath.Clean(destination)
+		*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", jailPath))
+		if err := os.MkdirAll(jailPath, 0o755); err != nil {
+			return "", fmt.Errorf("failed to create destination path %q: %w", jailPath, err)
+		}
+		return jailPath, nil
+	}
+
+	// Backward compatibility: treat non-absolute values as ZFS dataset names.
+	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "name", destination); err != nil {
+		if _, createErr := runLoggedCommand(logs, "zfs", "create", "-p", destination); createErr != nil {
+			return "", fmt.Errorf("failed to ensure dataset %q: %w", destination, createErr)
 		}
 	}
 
-	mountpointOut, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "mountpoint", dataset)
+	mountpointOut, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "mountpoint", destination)
 	if err != nil {
-		return "", fmt.Errorf("failed to discover mountpoint for %q: %w", dataset, err)
+		return "", fmt.Errorf("failed to discover mountpoint for %q: %w", destination, err)
 	}
 	mountpoint := strings.TrimSpace(strings.Split(mountpointOut, "\n")[0])
 	if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
-		mountpoint = "/" + strings.Trim(dataset, "/")
+		mountpoint = "/" + strings.Trim(destination, "/")
 	}
 
 	*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", mountpoint))
@@ -126,36 +155,216 @@ func provisionJailRoot(jailPath, templateRelease string, logs *[]string) error {
 		return fmt.Errorf("template/release is required")
 	}
 
-	if info, err := os.Stat(templateRelease); err == nil {
+	sourcePath, cleanup, err := resolveTemplateSource(strings.TrimSpace(templateRelease), logs)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	if info, err := os.Stat(sourcePath); err == nil {
 		if info.IsDir() {
-			_, cpErr := runLoggedCommand(logs, "cp", "-a", templateRelease+"/.", jailPath+"/")
+			_, cpErr := runLoggedCommand(logs, "cp", "-a", sourcePath+"/.", jailPath+"/")
 			if cpErr != nil {
-				return fmt.Errorf("failed to copy template directory %q: %w", templateRelease, cpErr)
+				return fmt.Errorf("failed to copy template directory %q: %w", sourcePath, cpErr)
 			}
 			return nil
 		}
-		_, tarErr := runLoggedCommand(logs, "tar", "-xf", templateRelease, "-C", jailPath)
+		_, tarErr := runLoggedCommand(logs, "tar", "-xf", sourcePath, "-C", jailPath)
 		if tarErr != nil {
-			return fmt.Errorf("failed to extract template archive %q: %w", templateRelease, tarErr)
+			return fmt.Errorf("failed to extract template archive %q: %w", sourcePath, tarErr)
 		}
 		return nil
 	}
+	return fmt.Errorf("resolved template/release %q is not accessible", sourcePath)
+}
 
-	localBaseArchive := "/usr/freebsd-dist/base.txz"
-	if releaseValuePattern.MatchString(strings.ToUpper(templateRelease)) {
-		if _, err := os.Stat(localBaseArchive); err == nil {
-			_, tarErr := runLoggedCommand(logs, "tar", "-xf", localBaseArchive, "-C", jailPath)
-			if tarErr != nil {
-				return fmt.Errorf("failed to extract %s: %w", localBaseArchive, tarErr)
-			}
-			return nil
-		}
+func ensureJailConfigDoesNotExist(configPath string) error {
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("config file %q already exists", configPath)
+	}
+	return nil
+}
+
+func resolveTemplateSource(input string, logs *[]string) (string, func(), error) {
+	if input == "" {
+		return "", nil, fmt.Errorf("template/release is required")
 	}
 
-	return fmt.Errorf(
-		"template/release %q not found; provide a template directory, archive path, or install /usr/freebsd-dist/base.txz for release-based bootstrap",
-		templateRelease,
+	// Explicit filesystem path wins.
+	if _, err := os.Stat(input); err == nil {
+		return input, nil, nil
+	}
+
+	// Shortcut: entry name from userland media directory.
+	if source, ok := findNamedUserlandSource(defaultUserlandDir, input); ok {
+		return source, nil, nil
+	}
+
+	// Full URL: download and extract.
+	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
+		return downloadArchiveToTemp(input, logs)
+	}
+
+	// Release tag: local archive, then media dir, then download.freebsd.org.
+	if releaseValuePattern.MatchString(strings.ToUpper(input)) {
+		localBaseArchive := "/usr/freebsd-dist/base.txz"
+		if _, err := os.Stat(localBaseArchive); err == nil {
+			return localBaseArchive, nil, nil
+		}
+		if source, ok := findReleaseArchiveInUserland(defaultUserlandDir, input); ok {
+			return source, nil, nil
+		}
+
+		return downloadReleaseArchiveToTemp(input, logs)
+	}
+
+	return "", nil, fmt.Errorf(
+		"template/release %q not found; use a local path, an entry from %s, a release tag, or a custom URL",
+		input,
+		defaultUserlandDir,
 	)
+}
+
+func defaultReleaseBaseURLs(release string) ([]string, error) {
+	archOut, err := exec.Command("uname", "-m").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect system arch for release download: %w", err)
+	}
+	arch := strings.TrimSpace(string(archOut))
+	if arch == "" {
+		arch = "amd64"
+	}
+	release = strings.ToUpper(strings.TrimSpace(release))
+	urls := []string{
+		// FreeBSD release directory layout commonly uses arch/arch/<release>/base.txz.
+		fmt.Sprintf("%s/ftp/releases/%s/%s/%s/base.txz", defaultDownloadHost, arch, arch, release),
+		// Compatibility fallback.
+		fmt.Sprintf("%s/ftp/releases/%s/%s/base.txz", defaultDownloadHost, arch, release),
+	}
+	return urls, nil
+}
+
+func downloadReleaseArchiveToTemp(release string, logs *[]string) (string, func(), error) {
+	urls, err := defaultReleaseBaseURLs(release)
+	if err != nil {
+		return "", nil, err
+	}
+	var lastErr error
+	for _, url := range urls {
+		path, cleanup, err := downloadArchiveToTemp(url, logs)
+		if err == nil {
+			return path, cleanup, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("release download failed")
+	}
+	return "", nil, fmt.Errorf("unable to download release %s: %w", release, lastErr)
+}
+
+func downloadArchiveToTemp(url string, logs *[]string) (string, func(), error) {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return "", nil, fmt.Errorf("download URL is empty")
+	}
+	*logs = append(*logs, "$ fetch "+url)
+	resp, err := http.Get(url) // #nosec G107 user-provided URL is intentional
+	if err != nil {
+		return "", nil, fmt.Errorf("failed downloading %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", nil, fmt.Errorf("download failed from %s: http %d", url, resp.StatusCode)
+	}
+	tmp, err := os.CreateTemp("", "freebsd-jail-userland-*.txz")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed creating temp archive: %w", err)
+	}
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", nil, fmt.Errorf("failed writing temp archive: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return "", nil, fmt.Errorf("failed closing temp archive: %w", err)
+	}
+	*logs = append(*logs, "  downloaded to "+tmp.Name())
+	cleanup := func() {
+		_ = os.Remove(tmp.Name())
+	}
+	return tmp.Name(), cleanup, nil
+}
+
+func discoverUserlandSources(userlandDir string) ([]string, error) {
+	entries, err := os.ReadDir(userlandDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed reading userland directory %q: %w", userlandDir, err)
+	}
+	var sources []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		fullPath := filepath.Join(userlandDir, entry.Name())
+		if entry.IsDir() {
+			baseArchive := filepath.Join(fullPath, "base.txz")
+			if _, err := os.Stat(baseArchive); err == nil {
+				sources = append(sources, baseArchive)
+				continue
+			}
+			sources = append(sources, fullPath)
+			continue
+		}
+		sources = append(sources, fullPath)
+	}
+	sort.Strings(sources)
+	return sources, nil
+}
+
+func findNamedUserlandSource(userlandDir, input string) (string, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", false
+	}
+	sources, err := discoverUserlandSources(userlandDir)
+	if err != nil {
+		return "", false
+	}
+	lowerInput := strings.ToLower(input)
+	for _, source := range sources {
+		base := strings.ToLower(filepath.Base(source))
+		noExt := strings.TrimSuffix(base, filepath.Ext(base))
+		if base == lowerInput || noExt == lowerInput {
+			return source, true
+		}
+		parent := strings.ToLower(filepath.Base(filepath.Dir(source)))
+		if parent == lowerInput {
+			return source, true
+		}
+	}
+	return "", false
+}
+
+func findReleaseArchiveInUserland(userlandDir, release string) (string, bool) {
+	sources, err := discoverUserlandSources(userlandDir)
+	if err != nil {
+		return "", false
+	}
+	release = strings.ToLower(strings.TrimSpace(release))
+	for _, source := range sources {
+		text := strings.ToLower(source)
+		if strings.Contains(text, release) {
+			return source, true
+		}
+	}
+	return "", false
 }
 
 func configureMountPoints(name, jailPath string, specs []mountPointSpec, logs *[]string) (string, error) {

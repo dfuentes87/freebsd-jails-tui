@@ -41,6 +41,9 @@ var (
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("45"))
+	wizardErrorStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("196"))
 )
 
 type snapshotMsg struct {
@@ -62,9 +65,12 @@ type tickMsg time.Time
 type screenMode int
 
 const (
-	screenDashboard screenMode = iota
+	screenInitialCheck screenMode = iota
+	screenDashboard
 	screenJailDetail
 	screenCreateWizard
+	screenZFSPanel
+	screenHelp
 )
 
 type model struct {
@@ -82,16 +88,22 @@ type model struct {
 	detailErr      error
 	detailLoading  bool
 	detailScroll   int
+	zfsPanel       zfsPanelState
 	wizard         jailCreationWizard
 	wizardApplying bool
+	initCheck      initialCheckState
+	helpReturnMode screenMode
+	helpScroll     int
 	notice         string
 }
 
 func newModel() model {
-	return model{
-		mode:   screenDashboard,
-		wizard: newJailCreationWizard(),
+	m := model{
+		mode:      screenInitialCheck,
+		initCheck: newInitialCheckState(),
 	}
+	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
+	return m
 }
 
 func pollCmd() tea.Cmd {
@@ -122,7 +134,7 @@ func tickerCmd() tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return pollCmd()
+	return collectInitialConfigCmd()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -131,35 +143,107 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.boundDetailScroll()
+		m.boundHelpScroll()
 		return m, nil
 	case snapshotMsg:
+		if m.mode == screenInitialCheck {
+			return m, nil
+		}
 		m.snapshot = msg.snapshot
 		m.err = msg.err
 		m.boundCursor()
 		m.ensureCursorVisible(m.listHeight())
 		m.boundDetailScroll()
 		return m, tickerCmd()
+	case initialConfigMsg:
+		m.initCheck.loading = false
+		m.initCheck.status = msg.status
+		m.initCheck.err = msg.err
+		m.initCheck.setPhaseFromStatus()
+		return m, nil
+	case initialActionMsg:
+		if m.mode != screenInitialCheck {
+			return m, nil
+		}
+		m.initCheck.applying = false
+		m.initCheck.logs = msg.logs
+		m.initCheck.err = msg.err
+		if msg.err != nil {
+			if msg.message != "" {
+				m.initCheck.message = msg.message
+			} else {
+				m.initCheck.message = "Action failed."
+			}
+			return m, nil
+		}
+		if msg.message != "" {
+			m.initCheck.message = msg.message
+		}
+		if msg.refresh {
+			m.initCheck.loading = true
+			return m, collectInitialConfigCmd()
+		}
+		m.initCheck.setPhaseFromStatus()
+		return m, nil
 	case jailDetailMsg:
 		m.detail = msg.detail
 		m.detailErr = msg.err
 		m.detailLoading = false
 		m.boundDetailScroll()
 		return m, nil
+	case zfsSnapshotListMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		m.zfsPanel.loading = false
+		m.zfsPanel.snapshots = msg.snapshots
+		m.zfsPanel.err = msg.err
+		m.zfsPanel.message = msg.message
+		m.zfsPanel.boundCursor(m.zfsListHeight())
+		return m, nil
+	case zfsActionMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		m.zfsPanel.actionRunning = false
+		m.zfsPanel.logs = msg.logs
+		m.zfsPanel.err = msg.err
+		m.zfsPanel.message = msg.message
+		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	case wizardApplyMsg:
 		m.wizardApplying = false
 		m.wizard.setExecutionResult(msg.result)
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
 			m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
-			m.wizard = newJailCreationWizard()
+			m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 			return m, pollCmd()
 		}
 		return m, nil
 	case tickMsg:
 		return m, pollCmd()
 	case tea.KeyMsg:
-		if msg.String() == "q" || msg.String() == "ctrl+c" {
+		key := msg.String()
+		if key == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if key == "q" && !m.isTextEntryMode() {
+			return m, tea.Quit
+		}
+		if m.mode == screenHelp {
+			return m.updateHelpKeys(msg)
+		}
+		if (key == "?" || key == "h") && !m.isTextEntryMode() {
+			m.helpReturnMode = m.mode
+			m.helpScroll = 0
+			m.mode = screenHelp
+			return m, nil
+		}
+		if m.mode == screenInitialCheck {
+			return m.updateInitialCheckKeys(msg)
+		}
+		if m.mode == screenZFSPanel {
+			return m.updateZFSPanelKeys(msg)
 		}
 		if m.mode == screenCreateWizard {
 			return m.updateWizardKeys(msg)
@@ -170,6 +254,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDashboardKeys(msg)
 	}
 	return m, nil
+}
+
+func (m model) isTextEntryMode() bool {
+	switch m.mode {
+	case screenInitialCheck:
+		return m.initCheck.phase == initialPhaseDirsCustomInput || m.initCheck.phase == initialPhaseDatasetsCustomInput
+	case screenCreateWizard:
+		if m.wizardApplying {
+			return false
+		}
+		if m.wizard.userlandMode {
+			return false
+		}
+		if m.wizard.templateMode == wizardTemplateModeSave {
+			return true
+		}
+		if m.wizard.templateMode == wizardTemplateModeLoad {
+			return false
+		}
+		return !m.wizard.isConfirmationStep()
+	case screenZFSPanel:
+		return m.zfsPanel.inputMode
+	default:
+		return false
+	}
 }
 
 func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -190,7 +299,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, pollCmd()
 	case "c", "n":
 		m.mode = screenCreateWizard
-		m.wizard = newJailCreationWizard()
+		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.notice = ""
 		return m, nil
 	case "enter", "d", "right":
@@ -243,12 +352,130 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailLoading = true
 		m.detailErr = nil
 		return m, detailCmd(jail)
+	case "z":
+		if m.detail.ZFS == nil || strings.TrimSpace(m.detail.ZFS.Name) == "" {
+			m.detailErr = fmt.Errorf("no ZFS dataset detected for this jail")
+			return m, nil
+		}
+		m.mode = screenZFSPanel
+		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name)
+		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	}
 	m.boundDetailScroll()
 	return m, nil
 }
 
 func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.wizard.userlandMode {
+		switch msg.String() {
+		case "esc", "left":
+			m.wizard.endUserlandSelect()
+			m.wizard.message = "Userland selection canceled."
+			return m, nil
+		case "j", "down", "tab":
+			m.wizard.userlandCursor++
+		case "k", "up", "shift+tab":
+			m.wizard.userlandCursor--
+		case "g", "home":
+			m.wizard.userlandCursor = 0
+		case "G", "end":
+			m.wizard.userlandCursor = len(m.wizard.userlandOpts) - 1
+		case "r", "R":
+			if err := m.wizard.beginUserlandSelect(); err != nil {
+				m.wizard.message = err.Error()
+				return m, nil
+			}
+			return m, nil
+		case "enter":
+			option, ok := m.wizard.selectedUserlandOption()
+			if !ok {
+				m.wizard.message = "No userland option selected."
+				return m, nil
+			}
+			m.wizard.values.TemplateRelease = option.Value
+			m.wizard.endUserlandSelect()
+			m.wizard.message = fmt.Sprintf("Selected userland: %s", option.Label)
+			return m, nil
+		}
+		m.wizard.boundUserlandCursor()
+		return m, nil
+	}
+
+	if m.wizard.templateMode == wizardTemplateModeSave {
+		switch msg.String() {
+		case "esc", "left":
+			m.wizard.endTemplateMode()
+			m.wizard.message = "Template save canceled."
+			return m, nil
+		case "enter":
+			name := strings.TrimSpace(m.wizard.templateInput)
+			if name == "" {
+				m.wizard.message = "Template name is required."
+				return m, nil
+			}
+			if err := saveWizardTemplate(name, m.wizard.values); err != nil {
+				m.wizard.message = "Template save failed: " + err.Error()
+				return m, nil
+			}
+			m.wizard.endTemplateMode()
+			m.wizard.message = fmt.Sprintf("Template %q saved.", name)
+			return m, nil
+		case "backspace", "delete":
+			m.wizard.backspaceTemplateInput()
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			m.wizard.appendTemplateInput(string(msg.Runes))
+		}
+		return m, nil
+	}
+
+	if m.wizard.templateMode == wizardTemplateModeLoad {
+		switch msg.String() {
+		case "esc", "left":
+			m.wizard.endTemplateMode()
+			m.wizard.message = "Template load canceled."
+			return m, nil
+		case "j", "down", "tab":
+			m.wizard.templateCursor++
+		case "k", "up", "shift+tab":
+			m.wizard.templateCursor--
+		case "g", "home":
+			m.wizard.templateCursor = 0
+		case "G", "end":
+			m.wizard.templateCursor = len(m.wizard.templates) - 1
+		case "r", "R":
+			if err := m.wizard.beginTemplateLoad(); err != nil {
+				m.wizard.message = err.Error()
+				return m, nil
+			}
+			return m, nil
+		case "enter":
+			template, ok := m.wizard.selectedTemplate()
+			if !ok {
+				m.wizard.message = "No template selected."
+				return m, nil
+			}
+			m.wizard.values = template.Values
+			if strings.TrimSpace(m.wizard.values.JailType) == "" {
+				m.wizard.values.JailType = "vnet"
+			}
+			if strings.TrimSpace(m.wizard.values.Interface) == "" {
+				m.wizard.values.Interface = "em0"
+			}
+			m.wizard.endTemplateMode()
+			m.wizard.message = fmt.Sprintf("Template %q loaded.", template.Name)
+			return m, nil
+		}
+		m.wizard.boundTemplateCursor()
+		return m, nil
+	}
+
+	if !m.wizardApplying && !m.wizard.isConfirmationStep() && msg.Type == tea.KeyRunes {
+		m.wizard.appendToActive(string(msg.Runes))
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc":
 		if m.wizardApplying {
@@ -283,6 +510,30 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.wizard.prevField()
 		return m, nil
+	case "s", "S", "ctrl+s":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizard.beginTemplateSave()
+		return m, nil
+	case "l", "L", "ctrl+l":
+		if m.wizardApplying {
+			return m, nil
+		}
+		if err := m.wizard.beginTemplateLoad(); err != nil {
+			m.wizard.message = err.Error()
+			return m, nil
+		}
+		return m, nil
+	case "ctrl+u":
+		if m.wizardApplying {
+			return m, nil
+		}
+		if err := m.wizard.beginUserlandSelect(); err != nil {
+			m.wizard.message = err.Error()
+			return m, nil
+		}
+		return m, nil
 	case "enter":
 		if m.wizard.isConfirmationStep() {
 			if m.wizardApplying {
@@ -310,12 +561,28 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.wizardApplying {
+	return m, nil
+}
+
+func (m model) updateHelpKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "left", "backspace", "enter", "h", "?":
+		m.mode = m.helpReturnMode
 		return m, nil
+	case "j", "down":
+		m.helpScroll++
+	case "k", "up":
+		m.helpScroll--
+	case "g", "home":
+		m.helpScroll = 0
+	case "G", "end":
+		m.helpScroll = 1 << 30
+	case "pgdown":
+		m.helpScroll += m.helpBodyHeight()
+	case "pgup":
+		m.helpScroll -= m.helpBodyHeight()
 	}
-	if msg.Type == tea.KeyRunes {
-		m.wizard.appendToActive(string(msg.Runes))
-	}
+	m.boundHelpScroll()
 	return m, nil
 }
 
@@ -323,13 +590,110 @@ func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading dashboard..."
 	}
+	if m.mode == screenInitialCheck {
+		return m.renderInitialCheckView()
+	}
 	if m.mode == screenCreateWizard {
 		return m.renderWizardView()
+	}
+	if m.mode == screenZFSPanel {
+		return m.renderZFSPanelView()
+	}
+	if m.mode == screenHelp {
+		return m.renderHelpView()
 	}
 	if m.mode == screenJailDetail {
 		return m.renderJailDetailView()
 	}
 	return m.renderDashboard()
+}
+
+func (m model) renderHelpView() string {
+	title := titleStyle.Render("Help / Shortcuts")
+	meta := summaryStyle.Render("Press esc to return")
+	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+
+	bodyHeight := m.helpBodyHeight()
+	lines := m.helpLines(max(12, m.width-2))
+	maxOffset := max(0, len(lines)-bodyHeight)
+	offset := m.helpScroll
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	end := min(len(lines), offset+bodyHeight)
+
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines[offset:end], "\n"))
+
+	footer := footerStyle.Width(m.width).Render("j/k or pgup/pgdown scroll | esc/enter: close help | q: quit")
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m model) helpLines(width int) []string {
+	lines := []string{
+		sectionStyle.Render("Global"),
+		truncate("?: open help page (h works outside text input)", width),
+		truncate("q: quit the application", width),
+		"",
+		sectionStyle.Render("Initial Config Check"),
+		truncate("runs at startup before dashboard", width),
+		truncate("y/n or d/c/n prompts apply or skip setup actions", width),
+		truncate("enter continues to dashboard when complete", width),
+		"",
+		sectionStyle.Render("Dashboard"),
+		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
+		truncate("enter or d: open jail detail view", width),
+		truncate("c: open jail creation wizard", width),
+		truncate("r: refresh dashboard data", width),
+		"",
+		sectionStyle.Render("Jail Detail"),
+		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
+		truncate("r: refresh selected jail details", width),
+		truncate("z: open ZFS integration panel", width),
+		truncate("esc: return to dashboard", width),
+		"",
+		sectionStyle.Render("ZFS Panel"),
+		truncate("j/k: select snapshot", width),
+		truncate("n: new snapshot", width),
+		truncate("r: rollback selected snapshot (confirmation required)", width),
+		truncate("R: refresh snapshot list", width),
+		truncate("esc: cancel prompt or return to detail", width),
+		"",
+		sectionStyle.Render("Creation Wizard"),
+		truncate("steps 1-5 are shown together on one page", width),
+		truncate("tab/shift+tab: move field", width),
+		truncate("enter/right: next step", width),
+		truncate("left: previous step", width),
+		truncate("s/l on step 6: save/load templates", width),
+		truncate("ctrl+u: open userland selector", width),
+		truncate("?: open help page", width),
+		truncate("step 6 enter: execute create actions", width),
+	}
+	return lines
+}
+
+func (m model) helpBodyHeight() int {
+	return max(5, m.height-3)
+}
+
+func (m *model) boundHelpScroll() {
+	if m.mode != screenHelp {
+		return
+	}
+	lines := m.helpLines(max(12, m.width-2))
+	maxOffset := max(0, len(lines)-m.helpBodyHeight())
+	if m.helpScroll < 0 {
+		m.helpScroll = 0
+	}
+	if m.helpScroll > maxOffset {
+		m.helpScroll = maxOffset
+	}
 }
 
 func (m model) renderDashboard() string {
@@ -395,7 +759,7 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail | esc: back | q: quit"
+	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail | z: ZFS panel | h: help | esc: back | q: quit"
 	if m.detailLoading {
 		hint += " | loading detail..."
 	}
@@ -421,9 +785,18 @@ func (m model) renderWizardView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "type to edit | tab/shift+tab: fields | enter/right: next | left: back | esc: cancel | q: quit"
+	hint := "type to edit | tab/shift+tab: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
 	if m.wizard.isConfirmationStep() {
-		hint = "enter: create jail now | left: back | esc: cancel | q: quit"
+		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit"
+	}
+	if m.wizard.templateMode == wizardTemplateModeSave {
+		hint = "Template save: type name | enter: save | backspace: edit | esc: cancel"
+	}
+	if m.wizard.templateMode == wizardTemplateModeLoad {
+		hint = "Template load: j/k select | enter: load | r: refresh list | esc: cancel"
+	}
+	if m.wizard.userlandMode {
+		hint = "Userland select: j/k choose | enter: apply | r: refresh options | esc: cancel"
 	}
 	if m.wizardApplying {
 		hint = "Applying changes... please wait | q: quit"
@@ -442,7 +815,68 @@ func (m model) wizardLines(width int) []string {
 	if step.Description != "" {
 		lines = append(lines, truncate(step.Description, width))
 	}
+	if m.wizard.message != "" {
+		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.wizard.message, width)))
+	}
 	lines = append(lines, "")
+
+	if m.wizard.templateMode == wizardTemplateModeSave {
+		lines = append(lines, sectionStyle.Render("Save Template"))
+		lines = append(lines, truncate("Template name: "+m.wizard.templateInput, width))
+		lines = append(lines, "Press enter to save current wizard values as a template.")
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Current Values Preview"))
+		for _, line := range m.wizard.summaryLines() {
+			lines = append(lines, truncate(line, width))
+		}
+		return lines
+	}
+
+	if m.wizard.templateMode == wizardTemplateModeLoad {
+		lines = append(lines, sectionStyle.Render("Load Template"))
+		if len(m.wizard.templates) == 0 {
+			lines = append(lines, "No templates available.")
+			return lines
+		}
+		for idx, template := range m.wizard.templates {
+			row := "  " + template.Name
+			if idx == m.wizard.templateCursor {
+				row = selectedRowStyle.Width(max(1, width)).Render("> " + template.Name)
+			}
+			lines = append(lines, truncate(row, width))
+		}
+		if template, ok := m.wizard.selectedTemplate(); ok {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Selected Template Preview"))
+			lines = append(lines, truncate("Name: "+template.Name, width))
+			lines = append(lines, truncate("Destination: "+template.Values.Dataset, width))
+			lines = append(lines, truncate("Template/Release: "+template.Values.TemplateRelease, width))
+			lines = append(lines, truncate("IPv4: "+template.Values.IP4, width))
+		}
+		return lines
+	}
+
+	if m.wizard.userlandMode {
+		lines = append(lines, sectionStyle.Render("Select Userland Source"))
+		if len(m.wizard.userlandOpts) == 0 {
+			lines = append(lines, "No userland options found.")
+			return lines
+		}
+		for idx, option := range m.wizard.userlandOpts {
+			row := "  " + option.Label
+			if idx == m.wizard.userlandCursor {
+				row = selectedRowStyle.Width(max(1, width)).Render("> " + option.Label)
+			}
+			lines = append(lines, truncate(row, width))
+		}
+		if option, ok := m.wizard.selectedUserlandOption(); ok {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Selected Value"))
+			lines = append(lines, truncate(option.Value, width))
+			lines = append(lines, truncate("Tip: type a custom https URL directly in Template/Release for custom download.", width))
+		}
+		return lines
+	}
 
 	if m.wizard.isConfirmationStep() {
 		lines = append(lines, sectionStyle.Render("Summary"))
@@ -474,7 +908,17 @@ func (m model) wizardLines(width int) []string {
 		return lines
 	}
 
+	currentSection := ""
 	for idx, field := range step.Fields {
+		section := wizardSectionForField(field.ID)
+		if section != "" && section != currentSection {
+			if len(lines) > 0 && lines[len(lines)-1] != "" {
+				lines = append(lines, "")
+			}
+			lines = append(lines, sectionStyle.Render(section))
+			currentSection = section
+		}
+
 		value := m.wizard.valueByID(field.ID)
 		display := value
 		if strings.TrimSpace(display) == "" {
@@ -492,6 +936,13 @@ func (m model) wizardLines(width int) []string {
 		lines = append(lines, line)
 		if field.Help != "" {
 			lines = append(lines, truncate("  "+field.Help, width))
+		}
+		if field.ID == "template_release" {
+			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
+			lines = append(lines, truncate("  custom https URL is supported and will be downloaded", width))
+		}
+		if field.ID == "name" {
+			lines = append(lines, "")
 		}
 	}
 
@@ -663,7 +1114,7 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | r: refresh | q: quit"
+	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | h: help | r: refresh | q: quit"
 	if m.notice != "" {
 		hint += " | " + m.notice
 	}
@@ -697,7 +1148,7 @@ func (m model) renderJailList(width, height int) string {
 
 func (m model) renderRows(maxRows, width int) string {
 	if len(m.snapshot.Jails) == 0 {
-		return "No jails discovered. Add jails in /etc/jail.conf or /etc/jail.conf.d/*.conf and run service jail start <name>."
+		return "No jails discovered yet. Create one manually in jail.conf/jail.conf.d or press c to open the jail creation wizard."
 	}
 	start := m.offset
 	end := min(len(m.snapshot.Jails), start+maxRows)
@@ -754,6 +1205,7 @@ func (m model) renderDetailPanel(width, height int) string {
 			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
 			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
 			"Press enter for full detail view.",
+			"Inside detail view, press z for ZFS panel.",
 		)
 	}
 
@@ -806,6 +1258,17 @@ func statusBadge(running bool) string {
 		return runningBadgeStyle.Render("[+]")
 	}
 	return stoppedBadgeStyle.Render("[-]")
+}
+
+func styleWizardMessage(message string) string {
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "failed") ||
+		strings.Contains(lower, "required") ||
+		strings.Contains(lower, "invalid") ||
+		strings.Contains(lower, "error") {
+		return wizardErrorStyle.Render(message)
+	}
+	return summaryStyle.Render(message)
 }
 
 func valueOrDash(value string) string {
