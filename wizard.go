@@ -51,7 +51,7 @@ var wizardSteps = []wizardStep{
 		Title:       "0. Jail Type",
 		Description: "Select the jail type to create.",
 		Fields: []wizardField{
-			{ID: "jail_type", Label: "Type", Placeholder: "vnet", Help: "Options: thick, thin, vnet, linux"},
+			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux"},
 		},
 	},
 	{
@@ -60,7 +60,7 @@ var wizardSteps = []wizardStep{
 		Fields: []wizardField{
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
-			{ID: "template_release", Label: "Template/Release", Placeholder: "14.2-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
+			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Bridge or jail interface name"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit'"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit'"},
@@ -116,7 +116,6 @@ type jailCreationWizard struct {
 func newJailCreationWizard(defaultDestination string) jailCreationWizard {
 	return jailCreationWizard{
 		values: jailWizardValues{
-			JailType:  "vnet",
 			Dataset:   strings.TrimSpace(defaultDestination),
 			Interface: "em0",
 		},
