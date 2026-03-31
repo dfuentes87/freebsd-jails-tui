@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -47,7 +48,12 @@ type userlandOption struct {
 	Value string
 }
 
-var wizardSteps = []wizardStep{
+type templateDatasetOption struct {
+	Label string
+	Value string
+}
+
+var wizardBaseSteps = []wizardStep{
 	{
 		Title:       "0. Jail Type",
 		Description: "Select the jail type to create.",
@@ -62,7 +68,9 @@ var wizardSteps = []wizardStep{
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
-			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Bridge or jail interface name"},
+			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Jail interface name for thick, thin, and linux jails"},
+			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
+			{ID: "uplink", Label: "Uplink", Placeholder: "em0", Help: "Optional host uplink to attach to the bridge"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
@@ -74,7 +82,15 @@ var wizardSteps = []wizardStep{
 		},
 	},
 	{
-		Title:       "6. Confirmation",
+		Title:       "6. Linux Bootstrap",
+		Description: "Choose the Linux distro and release to bootstrap inside /compat when creating a linux jail.",
+		Fields: []wizardField{
+			{ID: "linux_distro", Label: "Linux distro", Placeholder: "ubuntu", Help: "Supported: ubuntu or debian"},
+			{ID: "linux_release", Label: "Linux release", Placeholder: "jammy", Help: "Ubuntu codename or Debian suite"},
+		},
+	},
+	{
+		Title:       "7. Confirmation",
 		Description: "Review the generated jail.conf and creation plan.",
 	},
 }
@@ -85,10 +101,14 @@ type jailWizardValues struct {
 	Dataset         string
 	TemplateRelease string
 	Interface       string
+	Bridge          string
+	Uplink          string
 	IP4             string
 	IP6             string
 	DefaultRouter   string
 	Hostname        string
+	LinuxDistro     string
+	LinuxRelease    string
 	CPUPercent      string
 	MemoryLimit     string
 	ProcessLimit    string
@@ -101,19 +121,22 @@ type mountPointSpec struct {
 }
 
 type jailCreationWizard struct {
-	step           int
-	field          int
-	values         jailWizardValues
-	templateMode   wizardTemplateMode
-	templateInput  string
-	templates      []wizardTemplate
-	templateCursor int
-	userlandMode   bool
-	userlandOpts   []userlandOption
-	userlandCursor int
-	message        string
-	executionLogs  []string
-	executionError string
+	step              int
+	field             int
+	values            jailWizardValues
+	templateMode      wizardTemplateMode
+	templateInput     string
+	templates         []wizardTemplate
+	templateCursor    int
+	userlandMode      bool
+	userlandOpts      []userlandOption
+	userlandCursor    int
+	thinDatasetMode   bool
+	thinDatasetOpts   []templateDatasetOption
+	thinDatasetCursor int
+	message           string
+	executionLogs     []string
+	executionError    string
 }
 
 func newJailCreationWizard(defaultDestination string) jailCreationWizard {
@@ -125,36 +148,47 @@ func newJailCreationWizard(defaultDestination string) jailCreationWizard {
 	}
 }
 
-func (w jailCreationWizard) currentStep() wizardStep {
-	if w.step < 0 || w.step >= len(wizardSteps) {
-		return wizardSteps[0]
+func (w jailCreationWizard) steps() []wizardStep {
+	if normalizedJailType(w.values.JailType) == "linux" {
+		return wizardBaseSteps
 	}
-	return wizardSteps[w.step]
+	return []wizardStep{wizardBaseSteps[0], wizardBaseSteps[1], wizardBaseSteps[3]}
+}
+
+func (w jailCreationWizard) currentStep() wizardStep {
+	steps := w.steps()
+	if len(steps) == 0 {
+		return wizardStep{}
+	}
+	if w.step < 0 || w.step >= len(steps) {
+		return steps[0]
+	}
+	return steps[w.step]
 }
 
 func (w jailCreationWizard) isConfirmationStep() bool {
-	return w.step == len(wizardSteps)-1
+	return w.step == len(w.steps())-1
 }
 
 func (w *jailCreationWizard) nextField() {
-	step := w.currentStep()
-	if len(step.Fields) == 0 {
+	fields := w.visibleFields()
+	if len(fields) == 0 {
 		return
 	}
 	w.field++
-	if w.field >= len(step.Fields) {
+	if w.field >= len(fields) {
 		w.field = 0
 	}
 }
 
 func (w *jailCreationWizard) prevField() {
-	step := w.currentStep()
-	if len(step.Fields) == 0 {
+	fields := w.visibleFields()
+	if len(fields) == 0 {
 		return
 	}
 	w.field--
 	if w.field < 0 {
-		w.field = len(step.Fields) - 1
+		w.field = len(fields) - 1
 	}
 }
 
@@ -163,7 +197,7 @@ func (w *jailCreationWizard) nextStep() error {
 		w.message = err.Error()
 		return err
 	}
-	if w.step < len(wizardSteps)-1 {
+	if w.step < len(w.steps())-1 {
 		w.step++
 		w.field = 0
 		w.message = ""
@@ -186,6 +220,7 @@ func (w *jailCreationWizard) prevStep() {
 func (w *jailCreationWizard) beginTemplateSave() {
 	w.templateMode = wizardTemplateModeSave
 	w.userlandMode = false
+	w.thinDatasetMode = false
 	if strings.TrimSpace(w.templateInput) == "" {
 		w.templateInput = strings.TrimSpace(w.values.Name)
 	}
@@ -198,6 +233,7 @@ func (w *jailCreationWizard) beginTemplateLoad() error {
 		return err
 	}
 	w.userlandMode = false
+	w.thinDatasetMode = false
 	w.templates = templates
 	w.templateCursor = 0
 	w.templateMode = wizardTemplateModeLoad
@@ -222,6 +258,7 @@ func (w *jailCreationWizard) beginUserlandSelect() error {
 	}
 	w.templateMode = wizardTemplateModeNone
 	w.userlandMode = true
+	w.thinDatasetMode = false
 	w.userlandOpts = options
 	w.userlandCursor = 0
 	w.message = ""
@@ -232,6 +269,29 @@ func (w *jailCreationWizard) endUserlandSelect() {
 	w.userlandMode = false
 	w.userlandOpts = nil
 	w.userlandCursor = 0
+}
+
+func (w *jailCreationWizard) beginThinDatasetSelect() error {
+	options, err := discoverThinTemplateDatasets()
+	if err != nil {
+		return err
+	}
+	if len(options) == 0 {
+		return fmt.Errorf("no thin-jail template datasets found")
+	}
+	w.templateMode = wizardTemplateModeNone
+	w.userlandMode = false
+	w.thinDatasetMode = true
+	w.thinDatasetOpts = options
+	w.thinDatasetCursor = 0
+	w.message = ""
+	return nil
+}
+
+func (w *jailCreationWizard) endThinDatasetSelect() {
+	w.thinDatasetMode = false
+	w.thinDatasetOpts = nil
+	w.thinDatasetCursor = 0
 }
 
 func (w *jailCreationWizard) boundUserlandCursor() {
@@ -253,6 +313,27 @@ func (w *jailCreationWizard) selectedUserlandOption() (userlandOption, bool) {
 	}
 	w.boundUserlandCursor()
 	return w.userlandOpts[w.userlandCursor], true
+}
+
+func (w *jailCreationWizard) boundThinDatasetCursor() {
+	if len(w.thinDatasetOpts) == 0 {
+		w.thinDatasetCursor = 0
+		return
+	}
+	if w.thinDatasetCursor < 0 {
+		w.thinDatasetCursor = 0
+	}
+	if w.thinDatasetCursor >= len(w.thinDatasetOpts) {
+		w.thinDatasetCursor = len(w.thinDatasetOpts) - 1
+	}
+}
+
+func (w *jailCreationWizard) selectedThinDatasetOption() (templateDatasetOption, bool) {
+	if len(w.thinDatasetOpts) == 0 {
+		return templateDatasetOption{}, false
+	}
+	w.boundThinDatasetCursor()
+	return w.thinDatasetOpts[w.thinDatasetCursor], true
 }
 
 func (w *jailCreationWizard) selectedTemplate() (wizardTemplate, bool) {
@@ -324,18 +405,72 @@ func (w *jailCreationWizard) backspaceActive() {
 }
 
 func (w jailCreationWizard) activeField() (wizardField, bool) {
-	step := w.currentStep()
-	if len(step.Fields) == 0 {
+	fields := w.visibleFields()
+	if len(fields) == 0 {
 		return wizardField{}, false
 	}
 	idx := w.field
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(step.Fields) {
-		idx = len(step.Fields) - 1
+	if idx >= len(fields) {
+		idx = len(fields) - 1
 	}
-	return step.Fields[idx], true
+	return fields[idx], true
+}
+
+func (w *jailCreationWizard) normalizeField() {
+	fields := w.visibleFields()
+	if len(fields) == 0 {
+		w.field = 0
+		return
+	}
+	if w.field < 0 {
+		w.field = 0
+	}
+	if w.field >= len(fields) {
+		w.field = len(fields) - 1
+	}
+}
+
+func (w *jailCreationWizard) normalizeStep() {
+	steps := w.steps()
+	if len(steps) == 0 {
+		w.step = 0
+		w.field = 0
+		return
+	}
+	if w.step < 0 {
+		w.step = 0
+	}
+	if w.step >= len(steps) {
+		w.step = len(steps) - 1
+	}
+	w.normalizeField()
+}
+
+func (w jailCreationWizard) visibleFields() []wizardField {
+	step := w.currentStep()
+	jailType := normalizedJailType(w.values.JailType)
+	fields := make([]wizardField, 0, len(step.Fields))
+	for _, field := range step.Fields {
+		switch field.ID {
+		case "interface":
+			if jailType == "vnet" {
+				continue
+			}
+		case "bridge", "uplink":
+			if jailType != "vnet" {
+				continue
+			}
+		case "linux_distro", "linux_release":
+			if jailType != "linux" {
+				continue
+			}
+		}
+		fields = append(fields, field)
+	}
+	return fields
 }
 
 func (w *jailCreationWizard) valueRef(id string) *string {
@@ -350,6 +485,10 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.TemplateRelease
 	case "interface":
 		return &w.values.Interface
+	case "bridge":
+		return &w.values.Bridge
+	case "uplink":
+		return &w.values.Uplink
 	case "ip4":
 		return &w.values.IP4
 	case "ip6":
@@ -358,6 +497,10 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.DefaultRouter
 	case "hostname":
 		return &w.values.Hostname
+	case "linux_distro":
+		return &w.values.LinuxDistro
+	case "linux_release":
+		return &w.values.LinuxRelease
 	case "cpu_percent":
 		return &w.values.CPUPercent
 	case "memory_limit":
@@ -383,6 +526,10 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.TemplateRelease
 	case "interface":
 		return w.values.Interface
+	case "bridge":
+		return w.values.Bridge
+	case "uplink":
+		return w.values.Uplink
 	case "ip4":
 		return w.values.IP4
 	case "ip6":
@@ -391,6 +538,10 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.DefaultRouter
 	case "hostname":
 		return w.values.Hostname
+	case "linux_distro":
+		return w.values.LinuxDistro
+	case "linux_release":
+		return w.values.LinuxRelease
 	case "cpu_percent":
 		return w.values.CPUPercent
 	case "memory_limit":
@@ -440,11 +591,15 @@ func (w jailCreationWizard) validateCurrentStep() error {
 	if hasConflictingJailConfig(w.values.Name) {
 		return fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
 	}
-	if strings.TrimSpace(w.values.Interface) == "" {
+	if jailType == "vnet" {
+		if strings.TrimSpace(w.values.Bridge) == "" {
+			return fmt.Errorf("bridge is required for vnet jails")
+		}
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Bridge)), "bridge") {
+			return fmt.Errorf("vnet jails require a bridge such as bridge0")
+		}
+	} else if strings.TrimSpace(w.values.Interface) == "" {
 		return fmt.Errorf("interface is required")
-	}
-	if jailType == "vnet" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Interface)), "bridge") {
-		return fmt.Errorf("vnet jails require a bridge interface such as bridge0")
 	}
 	if strings.TrimSpace(w.values.IP4) == "" {
 		return fmt.Errorf("IPv4 is required")
@@ -474,13 +629,23 @@ func (w jailCreationWizard) validateCurrentStep() error {
 			return fmt.Errorf("max processes must be a positive integer")
 		}
 	}
+	if jailType == "linux" {
+		distro := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
+		switch distro {
+		case "", "ubuntu", "debian":
+		default:
+			return fmt.Errorf("linux distro must be ubuntu or debian")
+		}
+	}
 	return nil
 }
 
 func (w jailCreationWizard) validateAll() error {
-	for idx := 0; idx < len(wizardSteps)-1; idx++ {
+	steps := w.steps()
+	for idx := 0; idx < len(steps)-1; idx++ {
 		test := w
 		test.step = idx
+		test.normalizeField()
 		if err := test.validateCurrentStep(); err != nil {
 			return err
 		}
@@ -494,7 +659,6 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("Name: %s", w.values.Name),
 		fmt.Sprintf("Destination: %s", w.values.Dataset),
 		fmt.Sprintf("Template/Release: %s", w.values.TemplateRelease),
-		fmt.Sprintf("Interface: %s", w.values.Interface),
 		fmt.Sprintf("IPv4: %s", w.values.IP4),
 		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
@@ -502,6 +666,20 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
 		fmt.Sprintf("Memory limit: %s", valueOrDash(w.values.MemoryLimit)),
 		fmt.Sprintf("Process limit: %s", valueOrDash(w.values.ProcessLimit)),
+	}
+	if normalizedJailType(w.values.JailType) == "vnet" {
+		lines = append(lines,
+			fmt.Sprintf("Bridge: %s", valueOrDash(w.values.Bridge)),
+			fmt.Sprintf("Uplink: %s", valueOrDash(w.values.Uplink)),
+		)
+	} else {
+		lines = append(lines, fmt.Sprintf("Interface: %s", w.values.Interface))
+	}
+	if normalizedJailType(w.values.JailType) == "linux" {
+		lines = append(lines,
+			fmt.Sprintf("Linux distro: %s", effectiveLinuxDistro(w.values)),
+			fmt.Sprintf("Linux release: %s", effectiveLinuxRelease(w.values)),
+		)
 	}
 	mounts := w.mountPointList()
 	if len(mounts) == 0 {
@@ -566,32 +744,39 @@ func (w jailCreationWizard) commandPlanLines() []string {
 
 	switch jailType {
 	case "vnet":
-		addStep(fmt.Sprintf("VNET prestart config: create %s and attach it to %s", vnetEpairName(w.values.Name), strings.TrimSpace(w.values.Interface)))
+		addStep(fmt.Sprintf("VNET prestart config: create %s and attach it to %s", vnetEpairName(w.values.Name), strings.TrimSpace(w.values.Bridge)))
+		if strings.TrimSpace(w.values.Uplink) != "" {
+			addDetail(fmt.Sprintf("   ifconfig %s addm %s up", strings.TrimSpace(w.values.Bridge), strings.TrimSpace(w.values.Uplink)))
+		}
 		addStep(fmt.Sprintf("VNET start config: assign %s inside the jail", strings.TrimSpace(w.values.IP4)))
 	case "linux":
-		addStep(fmt.Sprintf("Linux compatibility mounts are configured under %s/compat/ubuntu", destination))
+		addStep(fmt.Sprintf("Linux compatibility mounts are configured under %s", linuxCompatRoot(destination, w.values)))
+		addStep("Bootstrap Linux userland inside the jail:")
+		addDetail("   jexec <jail> pkg bootstrap -f")
+		addDetail("   jexec <jail> pkg install -y debootstrap")
+		addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxMirrorURL(w.values)))
 	}
 
 	if strings.TrimSpace(w.values.CPUPercent) != "" ||
 		strings.TrimSpace(w.values.MemoryLimit) != "" ||
 		strings.TrimSpace(w.values.ProcessLimit) != "" {
-		lines = append(lines, "5. Apply rctl limits:")
+		addStep("Apply rctl limits:")
 		if strings.TrimSpace(w.values.CPUPercent) != "" {
-			lines = append(lines, fmt.Sprintf("   rctl -a jail:%s:pcpu:deny=%s", w.values.Name, w.values.CPUPercent))
+			addDetail(fmt.Sprintf("   rctl -a jail:%s:pcpu:deny=%s", w.values.Name, w.values.CPUPercent))
 		}
 		if strings.TrimSpace(w.values.MemoryLimit) != "" {
-			lines = append(lines, fmt.Sprintf("   rctl -a jail:%s:memoryuse:deny=%s", w.values.Name, strings.ToUpper(w.values.MemoryLimit)))
+			addDetail(fmt.Sprintf("   rctl -a jail:%s:memoryuse:deny=%s", w.values.Name, strings.ToUpper(w.values.MemoryLimit)))
 		}
 		if strings.TrimSpace(w.values.ProcessLimit) != "" {
-			lines = append(lines, fmt.Sprintf("   rctl -a jail:%s:maxproc:deny=%s", w.values.Name, w.values.ProcessLimit))
+			addDetail(fmt.Sprintf("   rctl -a jail:%s:maxproc:deny=%s", w.values.Name, w.values.ProcessLimit))
 		}
 	}
 
 	mounts := w.mountPointList()
 	if len(mounts) > 0 {
-		lines = append(lines, "6. Configure mount points:")
+		addStep("Configure mount points:")
 		for _, mount := range mounts {
-			lines = append(lines, "   mountpoint: "+mount)
+			addDetail("   mountpoint: " + mount)
 		}
 	}
 	return lines
@@ -778,7 +963,7 @@ func appendJailIPConfig(lines *[]string, family, value string) {
 
 func buildVNETJailConfig(values jailWizardValues) []string {
 	epair := vnetEpairName(values.Name)
-	bridge := strings.TrimSpace(values.Interface)
+	bridge := strings.TrimSpace(values.Bridge)
 	lines := []string{
 		"  vnet;",
 		"  devfs_ruleset = 5;",
@@ -786,6 +971,9 @@ func buildVNETJailConfig(values jailWizardValues) []string {
 		fmt.Sprintf("  exec.prestart = \"/sbin/ifconfig %s create up\";", epair),
 		fmt.Sprintf("  exec.prestart += \"/sbin/ifconfig %sa up descr jail:${name}\";", epair),
 		fmt.Sprintf("  exec.prestart += \"/sbin/ifconfig %s addm %sa up\";", bridge, epair),
+	}
+	if uplink := strings.TrimSpace(values.Uplink); uplink != "" {
+		lines = append(lines, fmt.Sprintf("  exec.prestart += %q;", "/bin/sh -c '/sbin/ifconfig "+bridge+" addm "+uplink+" up >/dev/null 2>&1 || true'"))
 	}
 	if ip4 := strings.TrimSpace(values.IP4); ip4 != "" {
 		lines = append(lines, fmt.Sprintf("  exec.start = \"/sbin/ifconfig %sb inet %s up\";", epair, ip4))
@@ -812,6 +1000,7 @@ func buildVNETJailConfig(values jailWizardValues) []string {
 }
 
 func buildLinuxJailConfig(values jailWizardValues, jailPath string) []string {
+	compatRoot := linuxCompatRoot(jailPath, values)
 	lines := []string{
 		"  exec.start = \"/bin/sh /etc/rc\";",
 		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
@@ -829,15 +1018,49 @@ func buildLinuxJailConfig(values jailWizardValues, jailPath string) []string {
 	appendJailIPConfig(&lines, "ip4", strings.TrimSpace(values.IP4))
 	appendJailIPConfig(&lines, "ip6", strings.TrimSpace(values.IP6))
 	lines = append(lines,
-		fmt.Sprintf("  mount += %q;", fmt.Sprintf("devfs     %s/compat/ubuntu/dev     devfs     rw  0 0", jailPath)),
-		fmt.Sprintf("  mount += %q;", fmt.Sprintf("tmpfs     %s/compat/ubuntu/dev/shm tmpfs     rw,size=1g,mode=1777  0 0", jailPath)),
-		fmt.Sprintf("  mount += %q;", fmt.Sprintf("fdescfs   %s/compat/ubuntu/dev/fd  fdescfs   rw,linrdlnk 0 0", jailPath)),
-		fmt.Sprintf("  mount += %q;", fmt.Sprintf("linprocfs %s/compat/ubuntu/proc    linprocfs rw  0 0", jailPath)),
-		fmt.Sprintf("  mount += %q;", fmt.Sprintf("linsysfs  %s/compat/ubuntu/sys     linsysfs  rw  0 0", jailPath)),
-		fmt.Sprintf("  mount += %q;", fmt.Sprintf("/tmp      %s/compat/ubuntu/tmp     nullfs    rw  0 0", jailPath)),
-		fmt.Sprintf("  mount += %q;", fmt.Sprintf("/home     %s/compat/ubuntu/home    nullfs    rw  0 0", jailPath)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("devfs     %s/dev     devfs     rw  0 0", compatRoot)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("tmpfs     %s/dev/shm tmpfs     rw,size=1g,mode=1777  0 0", compatRoot)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("fdescfs   %s/dev/fd  fdescfs   rw,linrdlnk 0 0", compatRoot)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("linprocfs %s/proc    linprocfs rw  0 0", compatRoot)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("linsysfs  %s/sys     linsysfs  rw  0 0", compatRoot)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("/tmp      %s/tmp     nullfs    rw  0 0", compatRoot)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("/home     %s/home    nullfs    rw  0 0", compatRoot)),
 	)
 	return lines
+}
+
+func effectiveLinuxDistro(values jailWizardValues) string {
+	distro := strings.ToLower(strings.TrimSpace(values.LinuxDistro))
+	if distro == "" {
+		return "ubuntu"
+	}
+	return distro
+}
+
+func effectiveLinuxRelease(values jailWizardValues) string {
+	release := strings.TrimSpace(values.LinuxRelease)
+	if release != "" {
+		return release
+	}
+	switch effectiveLinuxDistro(values) {
+	case "debian":
+		return "bookworm"
+	default:
+		return "jammy"
+	}
+}
+
+func linuxMirrorURL(values jailWizardValues) string {
+	switch effectiveLinuxDistro(values) {
+	case "debian":
+		return "https://deb.debian.org/debian"
+	default:
+		return "https://archive.ubuntu.com/ubuntu"
+	}
+}
+
+func linuxCompatRoot(jailPath string, values jailWizardValues) string {
+	return filepath.Join(jailPath, "compat", effectiveLinuxDistro(values))
 }
 
 func vnetEpairName(name string) string {
@@ -854,12 +1077,14 @@ func wizardSectionForField(id string) string {
 		return "1. Name & Destination"
 	case "template_release":
 		return "2. Template or release"
-	case "interface", "ip4", "ip6", "default_router", "hostname":
+	case "interface", "bridge", "uplink", "ip4", "ip6", "default_router", "hostname":
 		return "3. Networking"
 	case "cpu_percent", "memory_limit", "process_limit":
 		return "4. Resource Limits (optional)"
 	case "mount_points":
 		return "5. Mount points"
+	case "linux_distro", "linux_release":
+		return "6. Linux Bootstrap"
 	default:
 		return ""
 	}
@@ -895,6 +1120,50 @@ func discoverWizardUserlandOptions() ([]userlandOption, error) {
 		options = append(options, userlandOption{
 			Label: "download: " + release + " (from " + defaultDownloadHost + ")",
 			Value: release,
+		})
+	}
+	sort.Slice(options, func(i, j int) bool {
+		return strings.ToLower(options[i].Label) < strings.ToLower(options[j].Label)
+	})
+	return options, nil
+}
+
+func discoverThinTemplateDatasets() ([]templateDatasetOption, error) {
+	out, err := exec.Command("zfs", "list", "-H", "-o", "name,mountpoint", "-t", "filesystem").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ZFS datasets for thin templates: %w", err)
+	}
+
+	var options []templateDatasetOption
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			fields = strings.Fields(line)
+		}
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(fields[0])
+		mountpoint := strings.TrimSpace(fields[1])
+		if name == "" || mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
+			continue
+		}
+		lowerName := strings.ToLower(name)
+		lowerMount := strings.ToLower(mountpoint)
+		if filepath.Base(lowerName) == "templates" || filepath.Base(lowerMount) == "templates" {
+			continue
+		}
+		if !strings.Contains(lowerName, "template") && !strings.Contains(lowerMount, "/templates/") && !strings.Contains(lowerMount, "/template/") {
+			continue
+		}
+		options = append(options, templateDatasetOption{
+			Label: fmt.Sprintf("%s -> %s", name, mountpoint),
+			Value: mountpoint,
 		})
 	}
 	sort.Slice(options, func(i, j int) bool {

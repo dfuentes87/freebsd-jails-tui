@@ -368,6 +368,9 @@ func (m model) isTextEntryMode() bool {
 		if m.wizard.userlandMode {
 			return false
 		}
+		if m.wizard.thinDatasetMode {
+			return false
+		}
 		if m.wizard.templateMode == wizardTemplateModeSave {
 			return true
 		}
@@ -538,6 +541,40 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenHelp
 		return m, nil
 	}
+	if m.wizard.thinDatasetMode {
+		switch msg.String() {
+		case "esc", "left":
+			m.wizard.endThinDatasetSelect()
+			m.wizard.message = "Thin template dataset selection canceled."
+			return m, nil
+		case "j", "down", "tab":
+			m.wizard.thinDatasetCursor++
+		case "k", "up", "shift+tab":
+			m.wizard.thinDatasetCursor--
+		case "g", "home":
+			m.wizard.thinDatasetCursor = 0
+		case "G", "end":
+			m.wizard.thinDatasetCursor = len(m.wizard.thinDatasetOpts) - 1
+		case "r", "R":
+			if err := m.wizard.beginThinDatasetSelect(); err != nil {
+				m.wizard.message = err.Error()
+				return m, nil
+			}
+			return m, nil
+		case "enter":
+			option, ok := m.wizard.selectedThinDatasetOption()
+			if !ok {
+				m.wizard.message = "No thin template dataset selected."
+				return m, nil
+			}
+			m.wizard.values.TemplateRelease = option.Value
+			m.wizard.endThinDatasetSelect()
+			m.wizard.message = fmt.Sprintf("Selected thin template dataset: %s", option.Label)
+			return m, nil
+		}
+		m.wizard.boundThinDatasetCursor()
+		return m, nil
+	}
 	if m.wizard.userlandMode {
 		switch msg.String() {
 		case "esc", "left":
@@ -635,6 +672,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.wizard.values.Interface) == "" {
 				m.wizard.values.Interface = "em0"
 			}
+			m.wizard.normalizeStep()
 			m.wizard.endTemplateMode()
 			m.wizard.message = fmt.Sprintf("Template %q loaded.", template.Name)
 			return m, nil
@@ -702,6 +740,19 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if err := m.wizard.beginUserlandSelect(); err != nil {
+			m.wizard.message = err.Error()
+			return m, nil
+		}
+		return m, nil
+	case "ctrl+t":
+		if m.wizardApplying {
+			return m, nil
+		}
+		if normalizedJailType(m.wizard.values.JailType) != "thin" {
+			m.wizard.message = "Thin template dataset selector is only used for thin jails."
+			return m, nil
+		}
+		if err := m.wizard.beginThinDatasetSelect(); err != nil {
 			m.wizard.message = err.Error()
 			return m, nil
 		}
@@ -853,10 +904,11 @@ func (m model) helpLines(width int) []string {
 		truncate("tab/shift+tab/up/down: move field", width),
 		truncate("enter/right: next step", width),
 		truncate("left: previous step", width),
-		truncate("s/l on step 6: save/load templates", width),
+		truncate("s/l on the confirmation step: save/load templates", width),
 		truncate("ctrl+u: open userland selector", width),
+		truncate("ctrl+t: open thin template dataset selector", width),
 		truncate("?: open help page", width),
-		truncate("step 6 enter: execute create actions", width),
+		truncate("confirmation enter: execute create actions", width),
 	}
 	return lines
 }
@@ -1001,7 +1053,7 @@ func (m model) renderJailDetailView() string {
 func (m model) renderWizardView() string {
 	step := m.wizard.currentStep()
 	title := titleStyle.Render("Jail Creation Wizard")
-	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(wizardSteps), step.Title))
+	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
 	bodyHeight := max(4, m.height-3)
@@ -1013,6 +1065,9 @@ func (m model) renderWizardView() string {
 		Render(strings.Join(lines, "\n"))
 
 	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
+	if normalizedJailType(m.wizard.values.JailType) == "thin" {
+		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: thin template selector | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
+	}
 	if m.wizard.isConfirmationStep() {
 		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit"
 	}
@@ -1024,6 +1079,9 @@ func (m model) renderWizardView() string {
 	}
 	if m.wizard.userlandMode {
 		hint = "Userland select: j/k choose | enter: apply | r: refresh options | esc: cancel"
+	}
+	if m.wizard.thinDatasetMode {
+		hint = "Thin template select: j/k choose | enter: apply | r: refresh options | esc: cancel"
 	}
 	if m.wizardApplying {
 		hint = "Applying changes... please wait | q: quit"
@@ -1111,6 +1169,31 @@ func (m model) wizardLines(width int) []string {
 		return lines
 	}
 
+	if m.wizard.thinDatasetMode {
+		lines = append(lines, sectionStyle.Render("Select Thin Template Dataset"))
+		if len(m.wizard.thinDatasetOpts) == 0 {
+			lines = append(lines, "No thin template datasets found.")
+			return lines
+		}
+		for idx, option := range m.wizard.thinDatasetOpts {
+			row := "  " + option.Label
+			if idx == m.wizard.thinDatasetCursor {
+				row = truncate("> "+option.Label, width)
+				row = selectedRowStyle.Width(max(1, width)).Render(row)
+				lines = append(lines, row)
+				continue
+			}
+			lines = append(lines, truncate(row, width))
+		}
+		if option, ok := m.wizard.selectedThinDatasetOption(); ok {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Selected Value"))
+			lines = append(lines, truncate(option.Value, width))
+			lines = append(lines, truncate("Thin jails require an extracted template dataset mountpoint, not a release tag or archive.", width))
+		}
+		return lines
+	}
+
 	if m.wizard.isConfirmationStep() {
 		lines = append(lines, sectionStyle.Render("Summary"))
 		for _, line := range m.wizard.summaryLines() {
@@ -1142,7 +1225,9 @@ func (m model) wizardLines(width int) []string {
 	}
 
 	currentSection := ""
-	for idx, field := range step.Fields {
+	fields := m.wizard.visibleFields()
+	m.wizard.normalizeField()
+	for idx, field := range fields {
 		section := wizardSectionForField(field.ID)
 		if section != "" && section != currentSection {
 			if len(lines) > 0 && lines[len(lines)-1] != "" {
@@ -1173,8 +1258,11 @@ func (m model) wizardLines(width int) []string {
 		if field.ID == "template_release" {
 			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
 			lines = append(lines, truncate("  custom https URL is supported and will be downloaded", width))
+			if normalizedJailType(m.wizard.values.JailType) == "thin" {
+				lines = append(lines, truncate("  ctrl+t: select an extracted ZFS template dataset mountpoint", width))
+			}
 		}
-		if field.ID == "name" || field.ID == "interface" || field.ID == "ip6" {
+		if field.ID == "name" || field.ID == "interface" || field.ID == "uplink" || field.ID == "ip6" {
 			lines = append(lines, "")
 		}
 	}

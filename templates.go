@@ -35,6 +35,9 @@ func saveWizardTemplate(name string, values jailWizardValues) error {
 	if strings.TrimSpace(entry.Values.Interface) == "" {
 		entry.Values.Interface = "em0"
 	}
+	if normalizedJailType(entry.Values.JailType) == "vnet" && strings.TrimSpace(entry.Values.Bridge) == "" {
+		entry.Values.Bridge = strings.TrimSpace(entry.Values.Interface)
+	}
 
 	replaced := false
 	for idx := range templates {
@@ -112,6 +115,9 @@ func loadWizardTemplates() ([]wizardTemplate, error) {
 		}
 		if strings.TrimSpace(t.Values.Interface) == "" {
 			t.Values.Interface = "em0"
+		}
+		if normalizedJailType(t.Values.JailType) == "vnet" && strings.TrimSpace(t.Values.Bridge) == "" {
+			t.Values.Bridge = strings.TrimSpace(t.Values.Interface)
 		}
 		templates = append(templates, t)
 	}

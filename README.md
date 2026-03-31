@@ -34,7 +34,7 @@ The application is aimed at a FreeBSD host that already uses the base jail tooli
 - The type selector now changes provisioning and generated `jail.conf`, but it is still opinionated and intentionally scoped.
 - `thin` assumes an OpenZFS-backed template dataset and destination parent dataset.
 - `vnet` assumes a host bridge interface already exists.
-- `linux` prepares a FreeBSD jail for Linux ABI use; it is not a full Linux distribution bootstrap workflow by itself.
+- `linux` bootstraps a Linux userspace under `/compat/<distro>` and still depends on working networking/package access inside the jail.
 - Detail view includes some raw runtime values from `jls`, which may show kernel defaults or module parameters in addition to explicit `jail.conf` settings.
 - Create/destroy/start/stop operations are real host actions. Run carefully.
 
@@ -152,10 +152,14 @@ Wizard fields include:
 - destination
 - template or release source
 - interface
+- bridge
+- uplink
 - IPv4
 - IPv6
 - default router
 - hostname
+- Linux distro
+- Linux release
 - CPU percentage limit
 - memory limit
 - max process limit
@@ -169,7 +173,7 @@ Important behavior:
 - `IPv6` is optional
 - `inherit` is allowed for non-`vnet` networking
 - `inherit` is rejected for `vnet` jails
-- `vnet` requires the `Interface` field to be a bridge such as `bridge0`
+- `vnet` uses dedicated `Bridge` and optional `Uplink` fields instead of `Interface`
 - the wizard writes new configs into `/etc/jail.conf.d/<name>.conf`
 - the wizard refuses to overwrite an existing jail config file
 
@@ -180,14 +184,18 @@ Type-specific notes:
   - seeds host `resolv.conf` and `localtime`
 - `thin`
   - requires the template source to resolve to an exact ZFS dataset mountpoint
+  - supports `ctrl+t` to browse extracted template datasets
   - creates `@freebsd-jails-tui-base` on that template dataset if missing
   - clones the template dataset into the destination dataset
 - `vnet`
   - uses `vnet`, `vnet.interface`, `devfs_ruleset = 5`, and generated `exec.prestart` / `exec.poststop` commands
+  - requires a bridge such as `bridge0` and can optionally add an uplink to that bridge during prestart
   - configures IP addresses inside the jail with `ifconfig`
 - `linux`
   - enables `linux_enable=YES` and starts the host `linux` service during creation
-  - prepares compatibility mount targets under `$path/compat/ubuntu`
+  - has a dedicated Linux bootstrap step for distro and release selection
+  - prepares compatibility mount targets under `$path/compat/<distro>`
+  - bootstraps the selected Linux userspace with `debootstrap` after the jail starts
   - adds Linux-oriented mount and permission directives from the FreeBSD Handbook
 
 ### Destroy Confirmation

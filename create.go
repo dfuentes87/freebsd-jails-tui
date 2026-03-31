@@ -104,6 +104,11 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	if _, err := runLoggedCommand(&logs, "service", "jail", "start", result.Name); err != nil {
 		return fail(err)
 	}
+	if normalizedJailType(values.JailType) == "linux" {
+		if err := bootstrapLinuxUserland(values, result.Name, &logs); err != nil {
+			return fail(err)
+		}
+	}
 	if err := applyRctlLimits(values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
@@ -162,7 +167,7 @@ func provisionJailRoot(values jailWizardValues, jailPath string, logs *[]string)
 		if err := provisionStandardJailRoot(jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
 			return err
 		}
-		return ensureLinuxCompatPaths(jailPath, logs)
+		return ensureLinuxCompatPaths(jailPath, values, logs)
 	default:
 		if err := provisionStandardJailRoot(jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
 			return err
@@ -335,14 +340,15 @@ func ensureLinuxHostReady(logs *[]string) error {
 	return nil
 }
 
-func ensureLinuxCompatPaths(jailPath string, logs *[]string) error {
+func ensureLinuxCompatPaths(jailPath string, values jailWizardValues, logs *[]string) error {
+	compatRoot := linuxCompatRoot(jailPath, values)
 	paths := []string{
-		filepath.Join(jailPath, "compat", "ubuntu", "dev", "shm"),
-		filepath.Join(jailPath, "compat", "ubuntu", "dev", "fd"),
-		filepath.Join(jailPath, "compat", "ubuntu", "proc"),
-		filepath.Join(jailPath, "compat", "ubuntu", "sys"),
-		filepath.Join(jailPath, "compat", "ubuntu", "tmp"),
-		filepath.Join(jailPath, "compat", "ubuntu", "home"),
+		filepath.Join(compatRoot, "dev", "shm"),
+		filepath.Join(compatRoot, "dev", "fd"),
+		filepath.Join(compatRoot, "proc"),
+		filepath.Join(compatRoot, "sys"),
+		filepath.Join(compatRoot, "tmp"),
+		filepath.Join(compatRoot, "home"),
 	}
 	for _, path := range paths {
 		*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", path))
@@ -351,6 +357,40 @@ func ensureLinuxCompatPaths(jailPath string, logs *[]string) error {
 		}
 	}
 	return seedGuestBaseFiles(jailPath, logs)
+}
+
+func bootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]string) error {
+	distro := effectiveLinuxDistro(values)
+	release := effectiveLinuxRelease(values)
+	target := filepath.ToSlash(filepath.Join("/compat", distro))
+	mirror := linuxMirrorURL(values)
+
+	if _, err := runLoggedCommand(logs, "jexec", jailName, "test", "-x", filepath.ToSlash(filepath.Join(target, "bin", "sh"))); err == nil {
+		*logs = append(*logs, "Linux userland already present under "+target+"; skipping debootstrap.")
+		return nil
+	}
+	if _, err := runLoggedCommand(logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "bootstrap", "-f"); err != nil {
+		return fmt.Errorf("failed to bootstrap pkg inside linux jail: %w", err)
+	}
+	if _, err := runLoggedCommand(logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "install", "-y", "debootstrap"); err != nil {
+		return fmt.Errorf("failed to install debootstrap inside linux jail: %w", err)
+	}
+	if _, err := runLoggedCommand(logs, "jexec", jailName, "debootstrap", "--arch", hostArch(), release, target, mirror); err != nil {
+		return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
+	}
+	return nil
+}
+
+func hostArch() string {
+	out, err := exec.Command("uname", "-m").Output()
+	if err != nil {
+		return "amd64"
+	}
+	arch := strings.TrimSpace(string(out))
+	if arch == "" {
+		return "amd64"
+	}
+	return arch
 }
 
 func ensureJailConfigDoesNotExist(configPath string) error {
@@ -401,14 +441,7 @@ func resolveTemplateSource(input string, logs *[]string) (string, func(), error)
 }
 
 func defaultReleaseBaseURLs(release string) ([]string, error) {
-	archOut, err := exec.Command("uname", "-m").Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect system arch for release download: %w", err)
-	}
-	arch := strings.TrimSpace(string(archOut))
-	if arch == "" {
-		arch = "amd64"
-	}
+	arch := hostArch()
 	release = strings.ToUpper(strings.TrimSpace(release))
 	urls := []string{
 		// FreeBSD release directory layout commonly uses arch/arch/<release>/base.txz.
