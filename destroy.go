@@ -1,0 +1,252 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type JailDestroyResult struct {
+	Name string
+	Logs []string
+	Err  error
+}
+
+type jailDestroyPlan struct {
+	Name       string
+	JailPath   string
+	ConfigPath string
+	FstabPath  string
+	ZFSDataset string
+	Running    bool
+}
+
+func ExecuteJailDestroy(target Jail) JailDestroyResult {
+	result := JailDestroyResult{Name: strings.TrimSpace(target.Name)}
+	logs := make([]string, 0, 32)
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	fail := func(err error) JailDestroyResult {
+		result.Logs = logs
+		result.Err = err
+		return result
+	}
+
+	if result.Name == "" {
+		return fail(fmt.Errorf("jail name is required"))
+	}
+
+	logf("Starting jail destroy for %s", result.Name)
+	plan := buildJailDestroyPlan(target, &logs)
+
+	if plan.ConfigPath != "" && !isManagedJailConfigPath(plan.ConfigPath, result.Name) {
+		return fail(fmt.Errorf("refusing to remove shared config file %q; remove the jail block manually first", plan.ConfigPath))
+	}
+	if plan.JailPath != "" {
+		if err := validateDestroyPath(plan.JailPath); err != nil {
+			return fail(err)
+		}
+	}
+
+	if plan.Running {
+		if _, err := runLoggedCommand(&logs, "service", "jail", "stop", result.Name); err != nil {
+			return fail(fmt.Errorf("failed to stop jail %q: %w", result.Name, err))
+		}
+	}
+
+	removeJailRctlRules(result.Name, &logs)
+
+	if plan.ZFSDataset != "" {
+		if _, err := runLoggedCommand(&logs, "zfs", "destroy", "-r", plan.ZFSDataset); err != nil {
+			return fail(fmt.Errorf("failed to destroy dataset %q: %w", plan.ZFSDataset, err))
+		}
+	} else if plan.JailPath != "" {
+		logs = append(logs, "$ rm -rf "+plan.JailPath)
+		if err := os.RemoveAll(plan.JailPath); err != nil {
+			return fail(fmt.Errorf("failed to remove jail path %q: %w", plan.JailPath, err))
+		}
+	}
+
+	if err := removeFileIfExists(plan.ConfigPath, &logs); err != nil {
+		return fail(err)
+	}
+	if err := removeFileIfExists(plan.FstabPath, &logs); err != nil {
+		return fail(err)
+	}
+
+	logf("Jail %s destroyed successfully.", result.Name)
+	result.Logs = logs
+	return result
+}
+
+func buildJailDestroyPlan(target Jail, logs *[]string) jailDestroyPlan {
+	name := strings.TrimSpace(target.Name)
+	plan := jailDestroyPlan{
+		Name:      name,
+		JailPath:  strings.TrimSpace(target.Path),
+		FstabPath: jailFstabPathForName(name),
+		Running:   target.Running || target.JID > 0,
+	}
+
+	if fields, err := discoverRunningJailFields(name); err == nil {
+		if jid, _ := strconv.Atoi(fields["jid"]); jid > 0 {
+			plan.Running = true
+		}
+		if plan.JailPath == "" {
+			plan.JailPath = strings.TrimSpace(fields["path"])
+		}
+	} else {
+		*logs = append(*logs, "warning: unable to inspect running jail fields: "+err.Error())
+	}
+
+	if conf, err := discoverJailConf(name); err == nil {
+		if plan.JailPath == "" {
+			plan.JailPath = strings.TrimSpace(conf.Values["path"])
+		}
+		plan.ConfigPath = strings.TrimSpace(conf.SourcePath)
+	} else {
+		*logs = append(*logs, "warning: unable to inspect jail config: "+err.Error())
+	}
+
+	defaultConfigPath := jailConfigPathForName(name)
+	if plan.ConfigPath == "" {
+		if _, err := os.Stat(defaultConfigPath); err == nil {
+			plan.ConfigPath = defaultConfigPath
+		}
+	}
+
+	if plan.JailPath != "" {
+		if zfsInfo, err := discoverZFSDataset(plan.JailPath); err == nil && zfsInfo != nil {
+			plan.ZFSDataset = strings.TrimSpace(zfsInfo.Name)
+		} else if err != nil {
+			*logs = append(*logs, "warning: unable to inspect ZFS dataset: "+err.Error())
+		}
+	}
+
+	return plan
+}
+
+func isManagedJailConfigPath(path, name string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return false
+	}
+	base := name + ".conf"
+	if filepath.Base(path) != base {
+		return false
+	}
+	dir := filepath.Dir(path)
+	return dir == "/etc/jail.conf.d" || dir == "/usr/local/etc/jail.conf.d"
+}
+
+func validateDestroyPath(path string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("refusing to destroy non-absolute jail path %q", path)
+	}
+	disallowed := map[string]struct{}{
+		"/":                           {},
+		"/jail":                       {},
+		"/usr":                        {},
+		"/usr/jail":                   {},
+		"/usr/local":                  {},
+		"/usr/local/jails":            {},
+		"/usr/local/jails/containers": {},
+		"/usr/local/jails/media":      {},
+		"/usr/local/jails/templates":  {},
+		"/etc":                        {},
+		"/var":                        {},
+	}
+	if _, blocked := disallowed[path]; blocked {
+		return fmt.Errorf("refusing to destroy shared root path %q", path)
+	}
+	return nil
+}
+
+func removeJailRctlRules(name string, logs *[]string) {
+	if _, err := runLoggedCommand(logs, "rctl", "-r", "jail:"+name); err != nil {
+		*logs = append(*logs, "warning: unable to remove rctl rules: "+err.Error())
+	}
+}
+
+func removeFileIfExists(path string, logs *[]string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to inspect %q: %w", path, err)
+	}
+	*logs = append(*logs, "$ rm -f "+path)
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("failed to remove %q: %w", path, err)
+	}
+	return nil
+}
+
+func buildDestroyPreview(target Jail) []string {
+	lines := []string{
+		"Destroying a jail will make irreversible changes:",
+		"1. Stop the jail if it is currently running.",
+		"2. Remove jail-specific rctl rules if present.",
+		"3. Destroy the matching ZFS dataset recursively when detected.",
+		"4. Otherwise remove the jail root path recursively.",
+		"5. Remove /etc/jail.conf.d/<name>.conf and /etc/fstab.<name> when present.",
+		"",
+		fmt.Sprintf("Selected jail: %s", target.Name),
+		fmt.Sprintf("Current JID: %s", valueOrDash(jailJIDText(target))),
+		fmt.Sprintf("Current path: %s", valueOrDash(strings.TrimSpace(target.Path))),
+	}
+	if strings.TrimSpace(target.Hostname) != "" {
+		lines = append(lines, fmt.Sprintf("Current hostname: %s", target.Hostname))
+	}
+	return lines
+}
+
+func jailJIDText(target Jail) string {
+	if target.JID <= 0 {
+		return ""
+	}
+	return strconv.Itoa(target.JID)
+}
+
+func destroyResultMessage(result JailDestroyResult) string {
+	if result.Err != nil {
+		return "Destroy failed. Review execution output before retrying."
+	}
+	return fmt.Sprintf("Jail %s destroyed successfully.", result.Name)
+}
+
+func destroyTargetFromDetail(detail JailDetail) Jail {
+	return Jail{
+		Name:     detail.Name,
+		JID:      detail.JID,
+		Path:     detail.Path,
+		Hostname: detail.Hostname,
+		Running:  detail.JID > 0,
+	}
+}
+
+func buildDestroyTarget(target Jail) Jail {
+	target.Name = strings.TrimSpace(target.Name)
+	target.Path = strings.TrimSpace(target.Path)
+	target.Hostname = strings.TrimSpace(target.Hostname)
+	if target.JID > 0 {
+		target.Running = true
+	}
+	return target
+}
+
+func timestampedDestroyNotice(name string) string {
+	return fmt.Sprintf("Jail %s destroyed at %s.", name, time.Now().Format("15:04:05"))
+}

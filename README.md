@@ -44,6 +44,7 @@ go run .
 - `g` / `G`: first/last jail
 - `enter` / `d`: open full jail detail view
 - `c`: open jail creation wizard
+- `x`: destroy selected jail (confirmation required)
 - `?`: open help/shortcuts page from any screen
 - `h`: open help/shortcuts page from non-edit screens
 - `r`: immediate refresh
@@ -64,7 +65,19 @@ go run .
 - `g` / `G`: top/bottom
 - `r`: refresh detail data
 - `z`: open ZFS integration panel
+- `x`: destroy this jail (confirmation required)
 - `esc` / `backspace`: return to dashboard
+
+### Jail destroy flow
+
+- Available from the dashboard and jail detail view with `x`
+- Requires explicit confirmation before destructive actions run
+- Stops the jail if it is running
+- Removes jail-specific `rctl` rules when possible
+- Destroys the matching ZFS dataset recursively when detected
+- Otherwise removes the jail root path recursively
+- Removes `/etc/jail.conf.d/<name>.conf` and `/etc/fstab.<name>` when present
+- Refuses to remove shared config files such as `/etc/jail.conf`; those require manual cleanup
 
 ### ZFS integration panel
 
@@ -89,6 +102,7 @@ go run .
 - `Destination` expects a full path (example: `/usr/local/jails/containers/web01`)
 - `Destination` is prefilled from the initial config check path
 - `Network` includes optional IPv6 (`CIDR or 'inherit'`)
+- `Network` includes optional hostname (defaults to the jail name if left empty)
 - `Template/Release` uses local resources:
   - release tags (for example `14.2-RELEASE`) first use local `/usr/freebsd-dist/base.txz` if present
   - template directory/archive paths must already exist on the system
@@ -119,7 +133,7 @@ go run .
 
 ## Next milestones
 
-- Create jail workflow
 - Start/stop/restart actions
-- Destroy and edit jail configuration
-- Confirmation dialogs and command logs
+- Edit jail configuration
+- Bulk operations
+- Additional jail-type-specific options

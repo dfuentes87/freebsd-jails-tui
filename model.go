@@ -60,6 +60,10 @@ type wizardApplyMsg struct {
 	result JailCreationResult
 }
 
+type destroyApplyMsg struct {
+	result JailDestroyResult
+}
+
 type tickMsg time.Time
 
 type screenMode int
@@ -70,8 +74,18 @@ const (
 	screenJailDetail
 	screenCreateWizard
 	screenZFSPanel
+	screenDestroyConfirm
 	screenHelp
 )
+
+type destroyState struct {
+	returnMode screenMode
+	target     Jail
+	applying   bool
+	logs       []string
+	err        error
+	message    string
+}
 
 type model struct {
 	width  int
@@ -91,6 +105,7 @@ type model struct {
 	zfsPanel       zfsPanelState
 	wizard         jailCreationWizard
 	wizardApplying bool
+	destroy        destroyState
 	initCheck      initialCheckState
 	helpReturnMode screenMode
 	helpScroll     int
@@ -128,6 +143,13 @@ func createJailCmd(values jailWizardValues) tea.Cmd {
 	return func() tea.Msg {
 		result := ExecuteJailCreation(values)
 		return wizardApplyMsg{result: result}
+	}
+}
+
+func destroyJailCmd(target Jail) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteJailDestroy(target)
+		return destroyApplyMsg{result: result}
 	}
 }
 
@@ -227,6 +249,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, pollCmd()
 		}
 		return m, nil
+	case destroyApplyMsg:
+		m.destroy.applying = false
+		m.destroy.logs = append([]string(nil), msg.result.Logs...)
+		m.destroy.err = msg.result.Err
+		m.destroy.message = destroyResultMessage(msg.result)
+		if msg.result.Err == nil {
+			m.mode = screenDashboard
+			m.destroy = destroyState{}
+			m.notice = timestampedDestroyNotice(msg.result.Name)
+			return m, pollCmd()
+		}
+		return m, nil
 	case tickMsg:
 		return m, pollCmd()
 	case tea.KeyMsg:
@@ -245,6 +279,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpScroll = 0
 			m.mode = screenHelp
 			return m, nil
+		}
+		if m.mode == screenDestroyConfirm {
+			return m.updateDestroyKeys(msg)
 		}
 		if m.mode == screenInitialCheck {
 			return m.updateInitialCheckKeys(msg)
@@ -309,6 +346,18 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.notice = ""
 		return m, nil
+	case "x", "X":
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		m.destroy = destroyState{
+			returnMode: screenDashboard,
+			target:     buildDestroyTarget(jail),
+			message:    "Press enter to destroy this jail, or esc to cancel.",
+		}
+		m.mode = screenDestroyConfirm
+		return m, nil
 	case "enter", "d", "right":
 		jail, ok := m.selectedJail()
 		if !ok {
@@ -367,8 +416,43 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenZFSPanel
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name)
 		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+	case "x", "X":
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, nil
+		}
+		m.destroy = destroyState{
+			returnMode: screenJailDetail,
+			target:     buildDestroyTarget(jail),
+			message:    "Press enter to destroy this jail, or esc to cancel.",
+		}
+		m.mode = screenDestroyConfirm
+		return m, nil
 	}
 	m.boundDetailScroll()
+	return m, nil
+}
+
+func (m model) updateDestroyKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "backspace", "left", "n", "N":
+		if m.destroy.applying {
+			return m, nil
+		}
+		m.mode = m.destroy.returnMode
+		m.notice = "Destroy canceled."
+		m.destroy = destroyState{}
+		return m, nil
+	case "enter", "y", "Y":
+		if m.destroy.applying {
+			return m, nil
+		}
+		m.destroy.logs = nil
+		m.destroy.err = nil
+		m.destroy.message = "Destroying jail..."
+		m.destroy.applying = true
+		return m, destroyJailCmd(m.destroy.target)
+	}
 	return m, nil
 }
 
@@ -606,6 +690,9 @@ func (m model) View() string {
 	if m.mode == screenZFSPanel {
 		return m.renderZFSPanelView()
 	}
+	if m.mode == screenDestroyConfirm {
+		return m.renderDestroyView()
+	}
 	if m.mode == screenHelp {
 		return m.renderHelpView()
 	}
@@ -657,13 +744,19 @@ func (m model) helpLines(width int) []string {
 		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
 		truncate("enter or d: open jail detail view", width),
 		truncate("c: open jail creation wizard", width),
+		truncate("x: destroy selected jail (confirmation required)", width),
 		truncate("r: refresh dashboard data", width),
 		"",
 		sectionStyle.Render("Jail Detail"),
 		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
 		truncate("r: refresh selected jail details", width),
 		truncate("z: open ZFS integration panel", width),
+		truncate("x: destroy this jail (confirmation required)", width),
 		truncate("esc: return to dashboard", width),
+		"",
+		sectionStyle.Render("Destroy Confirm"),
+		truncate("enter/y: stop and destroy selected jail", width),
+		truncate("esc/n: cancel and return", width),
 		"",
 		sectionStyle.Render("ZFS Panel"),
 		truncate("j/k: select snapshot", width),
@@ -683,6 +776,47 @@ func (m model) helpLines(width int) []string {
 		truncate("step 6 enter: execute create actions", width),
 	}
 	return lines
+}
+
+func (m model) renderDestroyView() string {
+	title := titleStyle.Render("Destroy Jail")
+	meta := summaryStyle.Render("Selected: " + valueOrDash(m.destroy.target.Name))
+	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+
+	bodyWidth := max(12, m.width-2)
+	lines := []string{sectionStyle.Render("Confirmation")}
+	for _, line := range buildDestroyPreview(m.destroy.target) {
+		lines = append(lines, truncate(line, bodyWidth))
+	}
+	if m.destroy.message != "" {
+		lines = append(lines, "")
+		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.destroy.message, bodyWidth)))
+	}
+	if m.destroy.err != nil {
+		lines = append(lines, wizardErrorStyle.Render(truncate("Error: "+m.destroy.err.Error(), bodyWidth)))
+	}
+	if len(m.destroy.logs) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Execution output"))
+		maxLogs := min(12, len(m.destroy.logs))
+		for _, line := range m.destroy.logs[len(m.destroy.logs)-maxLogs:] {
+			lines = append(lines, truncate(line, bodyWidth))
+		}
+	}
+
+	bodyHeight := max(5, m.height-3)
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+
+	hint := "enter/y: destroy jail | esc/n: cancel | q: quit"
+	if m.destroy.applying {
+		hint = "Destroying jail... please wait | q: quit"
+	}
+	footer := footerStyle.Width(m.width).Render(hint)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
 func (m model) helpBodyHeight() int {
@@ -766,7 +900,7 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail | z: ZFS panel | h: help | esc: back | q: quit"
+	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
 	if m.detailLoading {
 		hint += " | loading detail..."
 	}
@@ -1127,7 +1261,7 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | h: help | r: refresh | q: quit"
+	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | x: destroy | h: help | r: refresh | q: quit"
 	if m.notice != "" {
 		hint += " | " + m.notice
 	}
@@ -1278,6 +1412,8 @@ func styleWizardMessage(message string) string {
 	if strings.Contains(lower, "failed") ||
 		strings.Contains(lower, "required") ||
 		strings.Contains(lower, "invalid") ||
+		strings.Contains(lower, "must") ||
+		strings.Contains(lower, "already exists") ||
 		strings.Contains(lower, "error") {
 		return wizardErrorStyle.Render(message)
 	}

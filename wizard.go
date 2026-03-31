@@ -65,8 +65,9 @@ var wizardSteps = []wizardStep{
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit'"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit'"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
+			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
-			{ID: "memory_limit", Label: "Memory", Placeholder: "2G", Help: "Examples: 512M, 2G"},
+			{ID: "memory_limit", Label: "Memory", Placeholder: "2G"},
 			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: ""},
 			{ID: "mount_points", Label: "Mount points (optional)", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
 		},
@@ -86,6 +87,7 @@ type jailWizardValues struct {
 	IP4             string
 	IP6             string
 	DefaultRouter   string
+	Hostname        string
 	CPUPercent      string
 	MemoryLimit     string
 	ProcessLimit    string
@@ -353,6 +355,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.IP6
 	case "default_router":
 		return &w.values.DefaultRouter
+	case "hostname":
+		return &w.values.Hostname
 	case "cpu_percent":
 		return &w.values.CPUPercent
 	case "memory_limit":
@@ -384,6 +388,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.IP6
 	case "default_router":
 		return w.values.DefaultRouter
+	case "hostname":
+		return w.values.Hostname
 	case "cpu_percent":
 		return w.values.CPUPercent
 	case "memory_limit":
@@ -480,6 +486,7 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("IPv4: %s", w.values.IP4),
 		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
+		fmt.Sprintf("Hostname: %s", valueOrDash(w.values.Hostname)),
 		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
 		fmt.Sprintf("Memory limit: %s", valueOrDash(w.values.MemoryLimit)),
 		fmt.Sprintf("Process limit: %s", valueOrDash(w.values.ProcessLimit)),
@@ -654,7 +661,7 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	}
 	lines := []string{
 		fmt.Sprintf("%s {", name),
-		fmt.Sprintf("  host.hostname = %q;", name),
+		fmt.Sprintf("  host.hostname = %q;", effectiveJailHostname(values)),
 		fmt.Sprintf("  path = %q;", jailPath),
 		"  vnet;",
 		fmt.Sprintf("  vnet.interface = %q;", strings.TrimSpace(values.Interface)),
@@ -678,6 +685,18 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	return lines
 }
 
+func effectiveJailHostname(values jailWizardValues) string {
+	hostname := strings.TrimSpace(values.Hostname)
+	if hostname != "" {
+		return hostname
+	}
+	name := strings.TrimSpace(values.Name)
+	if name != "" {
+		return name
+	}
+	return "new-jail"
+}
+
 func wizardSectionForField(id string) string {
 	switch id {
 	case "jail_type":
@@ -686,7 +705,7 @@ func wizardSectionForField(id string) string {
 		return "1. Name & Destination"
 	case "template_release":
 		return "2. Template or release"
-	case "interface", "ip4", "ip6", "default_router":
+	case "interface", "ip4", "ip6", "default_router", "hostname":
 		return "3. Networking"
 	case "cpu_percent", "memory_limit", "process_limit":
 		return "4. Resource Limits (optional)"
