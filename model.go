@@ -69,6 +69,14 @@ type destroyApplyMsg struct {
 	result JailDestroyResult
 }
 
+type jailServiceApplyMsg struct {
+	result jailServiceResult
+}
+
+type zfsOpenMsg struct {
+	result zfsOpenResult
+}
+
 type tickMsg time.Time
 
 type screenMode int
@@ -155,6 +163,20 @@ func destroyJailCmd(target Jail) tea.Cmd {
 	return func() tea.Msg {
 		result := ExecuteJailDestroy(target)
 		return destroyApplyMsg{result: result}
+	}
+}
+
+func jailServiceCmd(target Jail, action string) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteJailServiceAction(target, action)
+		return jailServiceApplyMsg{result: result}
+	}
+}
+
+func openZFSPanelCmd(target Jail) tea.Cmd {
+	return func() tea.Msg {
+		result := resolveZFSPanelTarget(target)
+		return zfsOpenMsg{result: result}
 	}
 }
 
@@ -266,6 +288,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, pollCmd()
 		}
 		return m, nil
+	case jailServiceApplyMsg:
+		if msg.result.Err != nil {
+			m.err = msg.result.Err
+			m.notice = ""
+			return m, pollCmd()
+		}
+		m.err = nil
+		actionWord := "started"
+		if msg.result.Action == "stop" {
+			actionWord = "stopped"
+		}
+		m.notice = fmt.Sprintf("Jail %s %s.", msg.result.Name, actionWord)
+		return m, pollCmd()
+	case zfsOpenMsg:
+		if msg.result.Detail.ZFS == nil || strings.TrimSpace(msg.result.Detail.ZFS.Name) == "" {
+			if msg.result.Err != nil {
+				m.err = msg.result.Err
+				m.notice = ""
+			} else {
+				m.err = nil
+				m.notice = "No ZFS dataset detected for selected jail."
+			}
+			return m, nil
+		}
+		m.detail = msg.result.Detail
+		m.detailErr = msg.result.Err
+		m.detailLoading = false
+		m.mode = screenZFSPanel
+		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenDashboard)
+		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	case tickMsg:
 		return m, pollCmd()
 	case tea.KeyMsg:
@@ -351,6 +403,24 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.notice = ""
 		return m, nil
+	case "s", "S":
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		action := "start"
+		if jail.Running {
+			action = "stop"
+		}
+		return m, jailServiceCmd(jail, action)
+	case "z":
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		m.notice = ""
+		m.err = nil
+		return m, openZFSPanelCmd(jail)
 	case "x", "X":
 		jail, ok := m.selectedJail()
 		if !ok {
@@ -419,7 +489,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = screenZFSPanel
-		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name)
+		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail)
 		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	case "x", "X":
 		jail, ok := m.detailJail()
@@ -462,6 +532,12 @@ func (m model) updateDestroyKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "?" {
+		m.helpReturnMode = m.mode
+		m.helpScroll = 0
+		m.mode = screenHelp
+		return m, nil
+	}
 	if m.wizard.userlandMode {
 		switch msg.String() {
 		case "esc", "left":
@@ -749,6 +825,8 @@ func (m model) helpLines(width int) []string {
 		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
 		truncate("enter or d: open jail detail view", width),
 		truncate("c: open jail creation wizard", width),
+		truncate("s: start or stop selected jail", width),
+		truncate("z: open ZFS panel for selected jail", width),
 		truncate("x: destroy selected jail (confirmation required)", width),
 		truncate("r: refresh dashboard data", width),
 		"",
@@ -765,14 +843,14 @@ func (m model) helpLines(width int) []string {
 		"",
 		sectionStyle.Render("ZFS Panel"),
 		truncate("j/k: select snapshot", width),
-		truncate("n: new snapshot", width),
+		truncate("c: create snapshot", width),
 		truncate("r: rollback selected snapshot (confirmation required)", width),
-		truncate("R: refresh snapshot list", width),
+		truncate("x: refresh snapshot list", width),
 		truncate("esc: cancel prompt or return to detail", width),
 		"",
 		sectionStyle.Render("Creation Wizard"),
 		truncate("steps 1-5 are shown together on one page", width),
-		truncate("tab/shift+tab: move field", width),
+		truncate("tab/shift+tab/up/down: move field", width),
 		truncate("enter/right: next step", width),
 		truncate("left: previous step", width),
 		truncate("s/l on step 6: save/load templates", width),
@@ -934,7 +1012,7 @@ func (m model) renderWizardView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "type to edit | tab/shift+tab: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
+	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
 	if m.wizard.isConfirmationStep() {
 		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit"
 	}
@@ -1269,7 +1347,7 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | x: destroy | h: help | r: refresh | q: quit"
+	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
 	if m.notice != "" {
 		hint += " | " + m.notice
 	}
@@ -1361,8 +1439,9 @@ func (m model) renderDetailPanel(width, height int) string {
 			fmt.Sprintf("%s %s", detailKeyStyle.Render("JID:"), jidText),
 			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
 			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
+			"s: start/stop selected jail.",
+			"z: open ZFS panel for selected jail.",
 			"Press enter for full detail view.",
-			"Inside detail view, press z for ZFS panel.",
 		)
 	}
 

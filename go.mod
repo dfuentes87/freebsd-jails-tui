@@ -1,4 +1,4 @@
-module github.com/davidfuentes/freebsd-jails-tui
+module github.com/dfuentes87/freebsd-jails-tui
 
 go 1.25
 

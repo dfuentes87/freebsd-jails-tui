@@ -29,6 +29,7 @@ type zfsActionMsg struct {
 }
 
 type zfsPanelState struct {
+	returnMode      screenMode
 	dataset         string
 	snapshots       []ZFSSnapshot
 	cursor          int
@@ -44,11 +45,12 @@ type zfsPanelState struct {
 	err             error
 }
 
-func newZFSPanelState(dataset string) zfsPanelState {
+func newZFSPanelState(dataset string, returnMode screenMode) zfsPanelState {
 	return zfsPanelState{
-		dataset: strings.TrimSpace(dataset),
-		loading: true,
-		message: "Loading snapshots...",
+		returnMode: returnMode,
+		dataset:    strings.TrimSpace(dataset),
+		loading:    true,
+		message:    "Loading snapshots...",
 	}
 }
 
@@ -185,16 +187,16 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.zfsPanel.message = "Rollback canceled."
 			return m, nil
 		}
-		m.mode = screenJailDetail
+		m.mode = m.zfsPanel.returnMode
 		return m, nil
-	case "R":
+	case "x", "X":
 		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
 		m.zfsPanel.loading = true
 		m.zfsPanel.message = "Refreshing snapshots..."
 		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
-	case "n":
+	case "c", "C":
 		if m.zfsPanel.actionRunning {
 			return m, nil
 		}
@@ -283,7 +285,7 @@ func (m model) renderZFSPanelView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "j/k: select snapshot | n: new snapshot | r: rollback selected | R: refresh | esc: back | q: quit"
+	hint := "j/k: select snapshot | c: create snapshot | r: rollback selected | x: refresh | esc: back | q: quit"
 	if m.zfsPanel.inputMode {
 		hint = "Type snapshot name | enter: create snapshot | backspace: edit | esc: cancel"
 	}
@@ -336,9 +338,9 @@ func (m model) zfsPanelLines(width, height int) []string {
 
 	lines = append(lines, "")
 	lines = append(lines, sectionStyle.Render("Actions"))
-	lines = append(lines, "n: create snapshot")
+	lines = append(lines, "c: create snapshot")
 	lines = append(lines, "r: rollback selected snapshot")
-	lines = append(lines, "R: refresh snapshot list")
+	lines = append(lines, "x: refresh snapshot list")
 
 	if m.zfsPanel.inputMode {
 		lines = append(lines, "")

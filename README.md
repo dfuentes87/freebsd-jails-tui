@@ -44,6 +44,8 @@ go run .
 - `g` / `G`: first/last jail
 - `enter` / `d`: open full jail detail view
 - `c`: open jail creation wizard
+- `s`: start/stop selected jail
+- `z`: open ZFS panel for selected jail
 - `x`: destroy selected jail (confirmation required)
 - `?`: open help/shortcuts page from any screen
 - `h`: open help/shortcuts page from non-edit screens
@@ -82,16 +84,16 @@ go run .
 ### ZFS integration panel
 
 - `j` / `k` or `up` / `down`: select snapshot
-- `n`: create snapshot (prompts for snapshot name)
+- `c`: create snapshot (prompts for snapshot name)
 - `r`: begin rollback to selected snapshot (with confirmation)
 - `enter`: confirm create/rollback action
-- `R`: refresh snapshot list
+- `x`: refresh snapshot list
 - `esc`: cancel prompt/confirmation or return to detail view
 
 ### Jail creation wizard
 
 - first page asks jail type: `thick`, `thin`, `vnet`, or `linux` (additional type-specific options not implemented yet)
-- `tab` / `shift+tab`: move active field
+- `tab` / `shift+tab` / `up` / `down`: move active field
 - `enter` / `right`: next step
 - `left`: previous step
 - `s` (step 6/confirmation): save current wizard values as a template
