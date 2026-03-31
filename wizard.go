@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -442,6 +443,9 @@ func (w jailCreationWizard) validateCurrentStep() error {
 	if strings.TrimSpace(w.values.Interface) == "" {
 		return fmt.Errorf("interface is required")
 	}
+	if jailType == "vnet" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Interface)), "bridge") {
+		return fmt.Errorf("vnet jails require a bridge interface such as bridge0")
+	}
 	if strings.TrimSpace(w.values.IP4) == "" {
 		return fmt.Errorf("IPv4 is required")
 	}
@@ -525,13 +529,47 @@ func (w jailCreationWizard) jailConfPreviewLines() []string {
 
 func (w jailCreationWizard) commandPlanLines() []string {
 	destination := strings.TrimSpace(w.values.Dataset)
-	lines := []string{
-		"1. Ensure destination path exists:",
-		fmt.Sprintf("   mkdir -p %s", destination),
-		"2. Provision jail root from selected template/release:",
-		fmt.Sprintf("   # source: %s", w.values.TemplateRelease),
-		fmt.Sprintf("3. Write jail config: %s", jailConfigPathForName(w.values.Name)),
-		fmt.Sprintf("4. Start jail: service jail start %s", w.values.Name),
+	jailType := normalizedJailType(w.values.JailType)
+	lines := []string{}
+	step := 1
+	addStep := func(title string) {
+		lines = append(lines, fmt.Sprintf("%d. %s", step, title))
+		step++
+	}
+	addDetail := func(text string) {
+		lines = append(lines, text)
+	}
+	switch jailType {
+	case "thin":
+		addStep("Prepare thin-jail destination from a ZFS template dataset:")
+		addDetail(fmt.Sprintf("   # source template: %s", w.values.TemplateRelease))
+		addDetail(fmt.Sprintf("   # destination: %s", destination))
+		addDetail("   zfs snapshot <template-dataset>@freebsd-jails-tui-base")
+		addDetail(fmt.Sprintf("   zfs clone <template-dataset>@freebsd-jails-tui-base <parent-dataset>/%s", strings.TrimSpace(w.values.Name)))
+	case "linux":
+		addStep("Ensure Linux ABI is enabled on the host:")
+		addDetail("   sysrc linux_enable=YES")
+		addDetail("   service linux start")
+		addStep("Ensure destination path exists:")
+		addDetail(fmt.Sprintf("   mkdir -p %s", destination))
+		addStep("Provision jail root from selected template/release:")
+		addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
+	default:
+		addStep("Ensure destination path exists:")
+		addDetail(fmt.Sprintf("   mkdir -p %s", destination))
+		addStep("Provision jail root from selected template/release:")
+		addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
+	}
+
+	addStep("Write jail config: " + jailConfigPathForName(w.values.Name))
+	addStep(fmt.Sprintf("Start jail: service jail start %s", w.values.Name))
+
+	switch jailType {
+	case "vnet":
+		addStep(fmt.Sprintf("VNET prestart config: create %s and attach it to %s", vnetEpairName(w.values.Name), strings.TrimSpace(w.values.Interface)))
+		addStep(fmt.Sprintf("VNET start config: assign %s inside the jail", strings.TrimSpace(w.values.IP4)))
+	case "linux":
+		addStep(fmt.Sprintf("Linux compatibility mounts are configured under %s/compat/ubuntu", destination))
 	}
 
 	if strings.TrimSpace(w.values.CPUPercent) != "" ||
@@ -670,33 +708,38 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	jailType := normalizedJailType(values.JailType)
 	lines := []string{
 		fmt.Sprintf("%s {", name),
+		"  exec.consolelog = \"/var/log/jail_console_${name}.log\";",
+		"  allow.raw_sockets;",
+		"  exec.clean;",
+		"  mount.devfs;",
 		fmt.Sprintf("  host.hostname = %q;", effectiveJailHostname(values)),
 		fmt.Sprintf("  path = %q;", jailPath),
 	}
 
-	if jailType == "vnet" {
+	switch jailType {
+	case "vnet":
+		lines = append(lines, buildVNETJailConfig(values)...)
+	case "linux":
+		lines = append(lines, buildLinuxJailConfig(values, jailPath)...)
+	default:
 		lines = append(lines,
-			"  vnet;",
-			fmt.Sprintf("  vnet.interface = %q;", strings.TrimSpace(values.Interface)),
+			"  exec.start = \"/bin/sh /etc/rc\";",
+			"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
 		)
-	} else {
 		lines = append(lines, fmt.Sprintf("  interface = %q;", strings.TrimSpace(values.Interface)))
+		appendJailIPConfig(&lines, "ip4", strings.TrimSpace(values.IP4))
+		appendJailIPConfig(&lines, "ip6", strings.TrimSpace(values.IP6))
 	}
 
-	appendJailIPConfig(&lines, "ip4", strings.TrimSpace(values.IP4))
-	appendJailIPConfig(&lines, "ip6", strings.TrimSpace(values.IP6))
-
-	lines = append(lines,
-		"  exec.start = \"/bin/sh /etc/rc\";",
-		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
-		"  persist;",
-	)
 	if strings.TrimSpace(values.DefaultRouter) != "" {
-		lines = append(lines, fmt.Sprintf("  defaultrouter = %q;", strings.TrimSpace(values.DefaultRouter)))
+		if jailType != "vnet" {
+			lines = append(lines, fmt.Sprintf("  defaultrouter = %q;", strings.TrimSpace(values.DefaultRouter)))
+		}
 	}
 	if strings.TrimSpace(fstabPath) != "" {
 		lines = append(lines, fmt.Sprintf("  mount.fstab = %q;", fstabPath))
 	}
+	lines = append(lines, "  persist;")
 	lines = append(lines, "}")
 	return lines
 }
@@ -731,6 +774,76 @@ func appendJailIPConfig(lines *[]string, family, value string) {
 		return
 	}
 	*lines = append(*lines, fmt.Sprintf("  %s.addr = %q;", family, value))
+}
+
+func buildVNETJailConfig(values jailWizardValues) []string {
+	epair := vnetEpairName(values.Name)
+	bridge := strings.TrimSpace(values.Interface)
+	lines := []string{
+		"  vnet;",
+		"  devfs_ruleset = 5;",
+		fmt.Sprintf("  vnet.interface = %q;", epair+"b"),
+		fmt.Sprintf("  exec.prestart = \"/sbin/ifconfig %s create up\";", epair),
+		fmt.Sprintf("  exec.prestart += \"/sbin/ifconfig %sa up descr jail:${name}\";", epair),
+		fmt.Sprintf("  exec.prestart += \"/sbin/ifconfig %s addm %sa up\";", bridge, epair),
+	}
+	if ip4 := strings.TrimSpace(values.IP4); ip4 != "" {
+		lines = append(lines, fmt.Sprintf("  exec.start = \"/sbin/ifconfig %sb inet %s up\";", epair, ip4))
+	} else {
+		lines = append(lines, fmt.Sprintf("  exec.start = \"/bin/true\";"))
+	}
+	if ip6 := strings.TrimSpace(values.IP6); ip6 != "" {
+		lines = append(lines, fmt.Sprintf("  exec.start += \"/sbin/ifconfig %sb inet6 %s up\";", epair, ip6))
+	}
+	if router := strings.TrimSpace(values.DefaultRouter); router != "" {
+		routeCmd := "/sbin/route add default " + router
+		if strings.Contains(router, ":") {
+			routeCmd = "/sbin/route -6 add default " + router
+		}
+		lines = append(lines, fmt.Sprintf("  exec.start += %q;", routeCmd))
+	}
+	lines = append(lines,
+		"  exec.start += \"/bin/sh /etc/rc\";",
+		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
+		fmt.Sprintf("  exec.poststop = \"/sbin/ifconfig %s deletem %sa\";", bridge, epair),
+		fmt.Sprintf("  exec.poststop += \"/sbin/ifconfig %sa destroy\";", epair),
+	)
+	return lines
+}
+
+func buildLinuxJailConfig(values jailWizardValues, jailPath string) []string {
+	lines := []string{
+		"  exec.start = \"/bin/sh /etc/rc\";",
+		"  exec.stop = \"/bin/sh /etc/rc.shutdown\";",
+		"  devfs_ruleset = 4;",
+		"  allow.mount;",
+		"  allow.mount.devfs;",
+		"  allow.mount.fdescfs;",
+		"  allow.mount.procfs;",
+		"  allow.mount.linprocfs;",
+		"  allow.mount.linsysfs;",
+		"  allow.mount.tmpfs;",
+		"  enforce_statfs = 1;",
+		fmt.Sprintf("  interface = %q;", strings.TrimSpace(values.Interface)),
+	}
+	appendJailIPConfig(&lines, "ip4", strings.TrimSpace(values.IP4))
+	appendJailIPConfig(&lines, "ip6", strings.TrimSpace(values.IP6))
+	lines = append(lines,
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("devfs     %s/compat/ubuntu/dev     devfs     rw  0 0", jailPath)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("tmpfs     %s/compat/ubuntu/dev/shm tmpfs     rw,size=1g,mode=1777  0 0", jailPath)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("fdescfs   %s/compat/ubuntu/dev/fd  fdescfs   rw,linrdlnk 0 0", jailPath)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("linprocfs %s/compat/ubuntu/proc    linprocfs rw  0 0", jailPath)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("linsysfs  %s/compat/ubuntu/sys     linsysfs  rw  0 0", jailPath)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("/tmp      %s/compat/ubuntu/tmp     nullfs    rw  0 0", jailPath)),
+		fmt.Sprintf("  mount += %q;", fmt.Sprintf("/home     %s/compat/ubuntu/home    nullfs    rw  0 0", jailPath)),
+	)
+	return lines
+}
+
+func vnetEpairName(name string) string {
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.TrimSpace(name)))
+	return fmt.Sprintf("epair%d", 100+(hasher.Sum32()%9000))
 }
 
 func wizardSectionForField(id string) string {

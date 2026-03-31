@@ -74,14 +74,19 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	}
 	logf("Starting jail creation for %s", result.Name)
 
-	jailPath, err := ensureDestinationJailPath(destination, &logs)
+	jailPath, err := prepareJailPath(values, destination, &logs)
 	if err != nil {
 		return fail(err)
 	}
 	result.JailPath = jailPath
 
-	if err := provisionJailRoot(jailPath, strings.TrimSpace(values.TemplateRelease), &logs); err != nil {
+	if err := provisionJailRoot(values, jailPath, &logs); err != nil {
 		return fail(err)
+	}
+	if normalizedJailType(values.JailType) == "linux" {
+		if err := ensureLinuxHostReady(&logs); err != nil {
+			return fail(err)
+		}
 	}
 
 	mountSpecs := parseMountPointSpecs(values.MountPoints)
@@ -106,6 +111,13 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	logf("Jail %s created successfully.", result.Name)
 	result.Logs = logs
 	return result
+}
+
+func prepareJailPath(values jailWizardValues, destination string, logs *[]string) (string, error) {
+	if normalizedJailType(values.JailType) == "thin" {
+		return ensureThinDestinationPath(destination, logs)
+	}
+	return ensureDestinationJailPath(destination, logs)
 }
 
 func ensureDestinationJailPath(destination string, logs *[]string) (string, error) {
@@ -142,7 +154,24 @@ func ensureDestinationJailPath(destination string, logs *[]string) (string, erro
 	return mountpoint, nil
 }
 
-func provisionJailRoot(jailPath, templateRelease string, logs *[]string) error {
+func provisionJailRoot(values jailWizardValues, jailPath string, logs *[]string) error {
+	switch normalizedJailType(values.JailType) {
+	case "thin":
+		return provisionThinJailRoot(values, jailPath, logs)
+	case "linux":
+		if err := provisionStandardJailRoot(jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
+			return err
+		}
+		return ensureLinuxCompatPaths(jailPath, logs)
+	default:
+		if err := provisionStandardJailRoot(jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
+			return err
+		}
+		return seedGuestBaseFiles(jailPath, logs)
+	}
+}
+
+func provisionStandardJailRoot(jailPath, templateRelease string, logs *[]string) error {
 	entries, err := os.ReadDir(jailPath)
 	if err != nil {
 		return fmt.Errorf("failed to read jail path %q: %w", jailPath, err)
@@ -178,6 +207,150 @@ func provisionJailRoot(jailPath, templateRelease string, logs *[]string) error {
 		return nil
 	}
 	return fmt.Errorf("resolved template/release %q is not accessible", sourcePath)
+}
+
+func ensureThinDestinationPath(destination string, logs *[]string) (string, error) {
+	jailPath := filepath.Clean(strings.TrimSpace(destination))
+	if jailPath == "" || !strings.HasPrefix(jailPath, "/") {
+		return "", fmt.Errorf("thin jails require an absolute destination path")
+	}
+	parent := filepath.Dir(jailPath)
+	*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", parent))
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create thin jail parent path %q: %w", parent, err)
+	}
+	if _, err := os.Stat(jailPath); err == nil {
+		return "", fmt.Errorf("thin jail destination %q already exists", jailPath)
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to inspect thin jail destination %q: %w", jailPath, err)
+	}
+	return jailPath, nil
+}
+
+func provisionThinJailRoot(values jailWizardValues, jailPath string, logs *[]string) error {
+	sourcePath, cleanup, err := resolveTemplateSource(strings.TrimSpace(values.TemplateRelease), logs)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("thin jail template %q is not accessible: %w", sourcePath, err)
+	}
+	if !sourceInfo.IsDir() {
+		return fmt.Errorf("thin jails require a template directory backed by ZFS; archives and release tags should be extracted into a template dataset first")
+	}
+
+	sourceDataset, err := exactZFSDatasetForPath(sourcePath)
+	if err != nil {
+		return fmt.Errorf("thin jail template path must be an exact ZFS dataset mountpoint: %w", err)
+	}
+	parentDataset, err := parentZFSDatasetForPath(jailPath)
+	if err != nil {
+		return fmt.Errorf("thin jail destination must be inside a ZFS dataset: %w", err)
+	}
+
+	snapshot := sourceDataset.Name + "@freebsd-jails-tui-base"
+	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-t", "snapshot", "-o", "name", snapshot); err != nil {
+		if _, snapshotErr := runLoggedCommand(logs, "zfs", "snapshot", snapshot); snapshotErr != nil {
+			return fmt.Errorf("failed to create thin jail template snapshot %q: %w", snapshot, snapshotErr)
+		}
+	}
+
+	cloneDataset := parentDataset.Name + "/" + filepath.Base(jailPath)
+	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "name", cloneDataset); err == nil {
+		return fmt.Errorf("thin jail dataset %q already exists", cloneDataset)
+	}
+	if _, err := runLoggedCommand(logs, "zfs", "clone", snapshot, cloneDataset); err != nil {
+		return fmt.Errorf("failed to clone thin jail dataset %q from %q: %w", cloneDataset, snapshot, err)
+	}
+	expectedMount := filepath.Join(filepath.Clean(parentDataset.Mountpoint), filepath.Base(jailPath))
+	if filepath.Clean(expectedMount) != filepath.Clean(jailPath) {
+		if _, err := runLoggedCommand(logs, "zfs", "set", "mountpoint="+jailPath, cloneDataset); err != nil {
+			return fmt.Errorf("failed to set mountpoint for thin jail dataset %q: %w", cloneDataset, err)
+		}
+	}
+	return seedGuestBaseFiles(jailPath, logs)
+}
+
+func exactZFSDatasetForPath(path string) (*ZFSDatasetInfo, error) {
+	info, err := discoverZFSDataset(path)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, fmt.Errorf("no ZFS dataset matched %q", path)
+	}
+	if filepath.Clean(info.Mountpoint) != filepath.Clean(path) {
+		return nil, fmt.Errorf("%q resolves to parent dataset %q mounted at %q", path, info.Name, info.Mountpoint)
+	}
+	return info, nil
+}
+
+func parentZFSDatasetForPath(path string) (*ZFSDatasetInfo, error) {
+	parent := filepath.Clean(filepath.Dir(path))
+	info, err := discoverZFSDataset(parent)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, fmt.Errorf("no parent ZFS dataset matched %q", parent)
+	}
+	return info, nil
+}
+
+func seedGuestBaseFiles(jailPath string, logs *[]string) error {
+	copyList := []struct {
+		src string
+		dst string
+	}{
+		{src: "/etc/resolv.conf", dst: filepath.Join(jailPath, "etc", "resolv.conf")},
+		{src: "/etc/localtime", dst: filepath.Join(jailPath, "etc", "localtime")},
+	}
+	for _, item := range copyList {
+		if _, err := os.Stat(item.src); err != nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(item.dst), 0o755); err != nil {
+			return fmt.Errorf("failed to prepare guest file path %q: %w", item.dst, err)
+		}
+		*logs = append(*logs, fmt.Sprintf("$ cp %s %s", item.src, item.dst))
+		if _, err := runLoggedCommand(logs, "cp", "-f", item.src, item.dst); err != nil {
+			return fmt.Errorf("failed to copy %q into jail: %w", item.src, err)
+		}
+	}
+	return nil
+}
+
+func ensureLinuxHostReady(logs *[]string) error {
+	if _, err := runLoggedCommand(logs, "sysrc", "linux_enable=YES"); err != nil {
+		return fmt.Errorf("failed to enable linux ABI on host: %w", err)
+	}
+	if _, err := runLoggedCommand(logs, "service", "linux", "start"); err != nil {
+		return fmt.Errorf("failed to start linux ABI service on host: %w", err)
+	}
+	return nil
+}
+
+func ensureLinuxCompatPaths(jailPath string, logs *[]string) error {
+	paths := []string{
+		filepath.Join(jailPath, "compat", "ubuntu", "dev", "shm"),
+		filepath.Join(jailPath, "compat", "ubuntu", "dev", "fd"),
+		filepath.Join(jailPath, "compat", "ubuntu", "proc"),
+		filepath.Join(jailPath, "compat", "ubuntu", "sys"),
+		filepath.Join(jailPath, "compat", "ubuntu", "tmp"),
+		filepath.Join(jailPath, "compat", "ubuntu", "home"),
+	}
+	for _, path := range paths {
+		*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", path))
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return fmt.Errorf("failed to prepare Linux compatibility path %q: %w", path, err)
+		}
+	}
+	return seedGuestBaseFiles(jailPath, logs)
 }
 
 func ensureJailConfigDoesNotExist(configPath string) error {
