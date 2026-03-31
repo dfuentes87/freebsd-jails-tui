@@ -469,8 +469,20 @@ func discoverZFSDataset(jailPath string) (*ZFSDatasetInfo, error) {
 }
 
 func discoverRctlRules(name string, jid int) ([]string, error) {
-	out, err := exec.Command("rctl").Output()
+	out, err := exec.Command("rctl").CombinedOutput()
 	if err != nil {
+		text := strings.TrimSpace(string(out))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			lower := strings.ToLower(text)
+			if text == "" ||
+				strings.Contains(lower, "racct") ||
+				strings.Contains(lower, "rctl support not present") ||
+				strings.Contains(lower, "not supported") {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to run rctl: %s", text)
+		}
 		return nil, fmt.Errorf("failed to run rctl: %w", err)
 	}
 

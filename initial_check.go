@@ -21,6 +21,7 @@ const (
 	docDatasetMedia    = "zroot/jails/media"
 	docDatasetTemplate = "zroot/jails/templates"
 	docDatasetCont     = "zroot/jails/containers"
+	initialCheckMarker = "initial-check.done"
 )
 
 type initialConfigMsg struct {
@@ -134,15 +135,26 @@ func (state *initialCheckState) preferredJailsPath() string {
 }
 
 func initialWizardDestination(status initialConfigStatus) string {
-	base := docJailsPath
+	base := ""
 	for _, path := range status.ExistingJailPaths {
 		if path == docJailsPath {
 			base = path
 			break
 		}
-		if base == docJailsPath {
+		if base == "" {
 			base = path
 		}
+	}
+	if base == "" {
+		for _, path := range []string{docJailsPath, "/usr/jail", "/jail"} {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				base = path
+				break
+			}
+		}
+	}
+	if base == "" {
+		base = docJailsPath
 	}
 	base = filepath.Clean(base)
 	containers := filepath.Join(base, "containers")
@@ -150,6 +162,43 @@ func initialWizardDestination(status initialConfigStatus) string {
 		return filepath.Join(containers, "new-jail")
 	}
 	return filepath.Join(base, "new-jail")
+}
+
+func initialCheckCompleted() (bool, error) {
+	path, err := initialCheckMarkerPath()
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("failed to inspect initial check marker: %w", err)
+}
+
+func markInitialCheckCompleted() error {
+	path, err := initialCheckMarkerPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("failed to persist initial check marker: %w", err)
+	}
+	return nil
+}
+
+func initialCheckMarkerPath() (string, error) {
+	configDir, err := appConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, initialCheckMarker), nil
 }
 
 func (state *initialCheckState) beginCustomDirInput() {
@@ -630,6 +679,11 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case initialPhaseComplete:
 		switch key {
 		case "enter", "right":
+			if err := markInitialCheckCompleted(); err != nil {
+				m.initCheck.err = err
+				m.initCheck.message = "Failed to persist initial setup completion."
+				return m, nil
+			}
 			m.mode = screenDashboard
 			m.notice = "Initial config check completed."
 			return m, pollCmd()

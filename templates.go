@@ -30,10 +30,13 @@ func saveWizardTemplate(name string, values jailWizardValues) error {
 		Values: values,
 	}
 	if strings.TrimSpace(entry.Values.JailType) == "" {
-		entry.Values.JailType = "vnet"
+		entry.Values.JailType = "thick"
 	}
 	if strings.TrimSpace(entry.Values.Interface) == "" {
 		entry.Values.Interface = "em0"
+	}
+	if normalizedJailType(entry.Values.JailType) == "vnet" && strings.TrimSpace(entry.Values.Bridge) == "" {
+		entry.Values.Bridge = strings.TrimSpace(entry.Values.Interface)
 	}
 
 	replaced := false
@@ -108,10 +111,13 @@ func loadWizardTemplates() ([]wizardTemplate, error) {
 			continue
 		}
 		if strings.TrimSpace(t.Values.JailType) == "" {
-			t.Values.JailType = "vnet"
+			t.Values.JailType = "thick"
 		}
 		if strings.TrimSpace(t.Values.Interface) == "" {
 			t.Values.Interface = "em0"
+		}
+		if normalizedJailType(t.Values.JailType) == "vnet" && strings.TrimSpace(t.Values.Bridge) == "" {
+			t.Values.Bridge = strings.TrimSpace(t.Values.Interface)
 		}
 		templates = append(templates, t)
 	}
@@ -122,12 +128,20 @@ func loadWizardTemplates() ([]wizardTemplate, error) {
 }
 
 func wizardTemplateFilePath() (string, error) {
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		return filepath.Join(xdg, "freebsd-jails-tui", "templates.json"), nil
+	configDir, err := appConfigDir()
+	if err != nil {
+		return "", err
 	}
-	configDir, err := os.UserConfigDir()
+	return filepath.Join(configDir, "templates.json"), nil
+}
+
+func appConfigDir() (string, error) {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(xdg, "freebsd-jails-tui"), nil
+	}
+	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to locate user config directory: %w", err)
 	}
-	return filepath.Join(configDir, "freebsd-jails-tui", "templates.json"), nil
+	return filepath.Join(dir, "freebsd-jails-tui"), nil
 }

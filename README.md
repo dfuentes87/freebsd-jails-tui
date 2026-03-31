@@ -1,125 +1,291 @@
 # freebsd-jails-tui
 
-Terminal UI for creating and managing FreeBSD jails, built in Go.
+Terminal UI for creating and managing FreeBSD jails, built in Go with Bubble Tea.
 
-This initial milestone implements the **main dashboard**:
+The application is aimed at a FreeBSD host that already uses the base jail tooling (`jail`, `jls`, `rctl`, `zfs`, `service jail ...`). It provides a dashboard, detail views, a creation wizard, ZFS snapshot actions, startup configuration checks, and destructive jail cleanup workflows.
 
-- Scrollable jail list (`j/k`, arrows, page up/down)
-- Live metrics refresh every 2 seconds
-- Colorized status badges (`[+]` running, `[-]` stopped)
-- JID-based running detection (a jail with a JID is treated as running)
-- Quick detail panel for the selected jail
-- Dedicated jail detail view that consolidates `jls`, `jail.conf`, `zfs`, and `rctl`
-- Jail creation wizard with one configuration page (steps 1-5) plus separate confirmation page (step 6)
-- Save/load wizard templates for repeated jail setups
+## Features
+
+- Scrollable dashboard of discovered jails
+- Live CPU and memory metrics
+- Running/stopped state based on JID presence
+- Jail detail view that combines:
+  - `jls`
+  - `jail.conf`
+  - ZFS dataset information
+  - `rctl`
+- First-run initial configuration check
+- Jail creation wizard
+- Save/load wizard templates
 - ZFS integration panel for snapshot and rollback actions
-- Help/shortcuts screen (`h` or `?`)
-- Startup initial config check page for rc.conf, jail paths, and ZFS datasets
+- Start/stop actions from the dashboard
+- Jail destroy workflow with confirmation
+- Built-in help/shortcuts page
 
 ## Requirements
 
-- FreeBSD host with jails configured/running
+- FreeBSD host
 - Go 1.25+
+- Root privileges, or equivalent via `doas`/`sudo`
+
+## Notes and Limitations
+
+- The application assumes the host is using the standard FreeBSD jail tooling.
+- The type selector now changes provisioning and generated `jail.conf`, but it is still opinionated and intentionally scoped.
+- `thin` assumes an OpenZFS-backed template dataset and destination parent dataset.
+- `vnet` assumes a host bridge interface already exists.
+- `linux` bootstraps a Linux userspace under `/compat/<distro>` and still depends on working networking/package access inside the jail.
+- Linux bootstrap is treated as a second phase. If jail creation succeeds but Linux bootstrap preflight fails, the jail is kept and the TUI reports a warning instead of destroying or rolling back the new jail.
+- Detail view includes some raw runtime values from `jls`, which may show kernel defaults or module parameters in addition to explicit `jail.conf` settings.
+- Create/destroy/start/stop operations are real host actions. Run carefully.
+
+## Build
+
+```bash
+go mod tidy
+go build .
+```
 
 ## Run
 
 ```bash
-go mod tidy
 go run .
 ```
 
-## Data sources
+For real host operations, build the binary and run that with privileges:
 
-- `/etc/jail.conf` and `/usr/local/etc/jail.conf` for configured jail names
-- `/etc/jail.conf.d/*` and `/usr/local/etc/jail.conf.d/*` for additional jail definitions
-- `jls -n` for running jail/JID metadata
-- `ps -axo jid=,pcpu=,rss=` for per-jail CPU and memory metrics
-- `zfs list` for mapped jail dataset usage/quota details in detail view
-- `rctl` for jail-specific resource control rules in detail view
+```bash
+go build .
+doas ./freebsd-jails-tui
+```
 
-## Keybindings
+## Screens
 
-- `j` / `k` or `up` / `down`: move selection
-- `pgdown` / `pgup`: scroll page
-- `g` / `G`: first/last jail
-- `enter` / `d`: open full jail detail view
-- `c`: open jail creation wizard
-- `?`: open help/shortcuts page from any screen
-- `h`: open help/shortcuts page from non-edit screens
-- `r`: immediate refresh
-- `q`: quit
+### Dashboard
 
-### Initial config check page
+The main dashboard shows all discovered jails and their current state.
 
-- Runs before dashboard startup
-- Checks `jail_enable` and `jail_parallel_start`
-- Checks for `/jail`, `/usr/jail`, or `/usr/local/jails`
-- Checks for ZFS datasets with `jail` in their name
-- Offers to apply FreeBSD documentation defaults or custom values
+Data shown includes:
 
-### Jail detail view
+- Jail name
+- Running/stopped badge
+- JID
+- CPU usage
+- Memory usage
 
-- `j` / `k` or `up` / `down`: scroll details
-- `pgdown` / `pgup`: scroll a page
-- `g` / `G`: top/bottom
-- `r`: refresh detail data
-- `z`: open ZFS integration panel
-- `esc` / `backspace`: return to dashboard
+### Initial Config Check
 
-### ZFS integration panel
+On first launch, the TUI runs an initial configuration check before opening the dashboard.
 
-- `j` / `k` or `up` / `down`: select snapshot
-- `n`: create snapshot (prompts for snapshot name)
-- `r`: begin rollback to selected snapshot (with confirmation)
-- `enter`: confirm create/rollback action
-- `R`: refresh snapshot list
-- `esc`: cancel prompt/confirmation or return to detail view
+It checks:
 
-### Jail creation wizard
+- `jail_enable`
+- `jail_parallel_start`
+- whether one of these jail roots exists:
+  - `/jail`
+  - `/usr/jail`
+  - `/usr/local/jails`
+- whether a jail-related ZFS dataset exists
 
-- first page asks jail type: `thick`, `thin`, `vnet`, or `linux` (additional type-specific options not implemented yet)
-- `tab` / `shift+tab`: move active field
-- `enter` / `right`: next step
-- `left`: previous step
-- `s` (step 6/confirmation): save current wizard values as a template
-- `l` (step 6/confirmation): load a saved template
-- `ctrl+u`: open userland selector (local media entries + official release options)
-- `backspace`: delete character in active field
-- `esc`: cancel wizard and return to dashboard
-- `Destination` expects a full path (example: `/usr/local/jails/containers/web01`)
-- `Destination` is prefilled from the initial config check path
-- `Network` includes optional IPv6 (`CIDR or 'inherit'`)
-- `Template/Release` uses local resources:
-  - release tags (for example `14.2-RELEASE`) first use local `/usr/freebsd-dist/base.txz` if present
-  - template directory/archive paths must already exist on the system
-  - if local userland is missing, release tags can be downloaded from `https://download.freebsd.org`
-  - release download pattern is `https://download.freebsd.org/ftp/releases/<arch>/<arch>/<RELEASE>/base.txz`
-  - custom `https://...` URL downloads are supported
+It can optionally:
 
-### Templates
+- enable missing `rc.conf` settings
+- create the FreeBSD documentation-style jail directory layout
+- create the FreeBSD documentation-style ZFS layout
+- accept custom paths and custom dataset names
 
-- Templates are persisted in `templates.json` under your user config directory:
-  - `$XDG_CONFIG_HOME/freebsd-jails-tui/templates.json` when `XDG_CONFIG_HOME` is set
-  - otherwise `~/.config/freebsd-jails-tui/templates.json`
-- Loading a template populates all wizard fields (name, destination, release/template, networking, limits, mounts)
+After a successful first completion, the startup check is skipped on later runs.
 
-### Help/shortcuts page
+Persistent state is stored in the user config directory:
 
-- `?`: open from any screen
-- `h`: open from non-edit screens (dashboard/detail/ZFS list)
-- `j` / `k` or `pgup` / `pgdown`: scroll
-- `esc` or `enter`: close help and return to previous screen
+- `$XDG_CONFIG_HOME/freebsd-jails-tui/initial-check.done`
+- or `~/.config/freebsd-jails-tui/initial-check.done`
 
-### Wizard execution behavior
+### Jail Detail View
 
-- On step 6, `enter` executes jail creation commands (destructive operations)
-- The wizard now creates/uses destination jail paths, writes `/etc/jail.conf.d/<name>.conf`, optionally writes `/etc/fstab.<name>`, starts the jail, and applies `rctl` limits
-- The wizard checks for existing `/etc/jail.conf.d/<name>.conf` and refuses to overwrite it
-- Run the TUI as root (or with equivalent privileges) for these operations
+The detail view shows a consolidated view of a single jail.
 
-## Next milestones
+Sections include:
 
-- Create jail workflow
-- Start/stop/restart actions
-- Destroy and edit jail configuration
-- Confirmation dialogs and command logs
+- Overview
+- `jls`
+- `jail.conf`
+- ZFS dataset
+- `rctl`
+- Source errors, when present
+
+### ZFS Integration Panel
+
+The ZFS panel works on the dataset associated with the selected jail.
+
+Actions:
+
+- list snapshots
+- create snapshot
+- rollback snapshot
+- refresh snapshot list
+
+### Jail Creation Wizard
+
+The wizard has:
+
+- a jail type page
+- a single configuration page for steps 1-5
+- a confirmation page
+
+Current jail types:
+
+- `thick`
+- `thin`
+- `vnet`
+- `linux`
+
+Type-specific behavior is implemented:
+
+- `thick`: full extracted or copied jail root
+- `thin`: OpenZFS snapshot and clone workflow
+- `vnet`: VNET-style jail networking config with bridge/epair hooks
+- `linux`: Linux ABI host setup plus Linux-specific jail permissions and mount directives
+
+Wizard fields include:
+
+- jail name
+- destination
+- template or release source
+- interface
+- bridge
+- uplink
+- IPv4
+- IPv6
+- default router
+- hostname
+- Linux distro
+- Linux release
+- Linux bootstrap mode
+- CPU percentage limit
+- memory limit
+- max process limit
+- mount points
+
+Important behavior:
+
+- `Destination` expects a full path, for example `/usr/local/jails/containers/web01`
+- `Destination` is prefilled from the initial config path when available
+- `Hostname` is optional; if empty, the jail name is used
+- `IPv6` is optional
+- `inherit` is allowed for non-`vnet` networking
+- `inherit` is rejected for `vnet` jails
+- `vnet` uses dedicated `Bridge` and optional `Uplink` fields instead of `Interface`
+- Linux bootstrap mode supports `auto` or `skip`
+- the wizard writes new configs into `/etc/jail.conf.d/<name>.conf`
+- the wizard refuses to overwrite an existing jail config file
+
+Type-specific notes:
+
+- `thick`
+  - provisions a full root filesystem in the destination
+  - seeds host `resolv.conf` and `localtime`
+- `thin`
+  - requires the template source to resolve to an exact ZFS dataset mountpoint
+  - supports `ctrl+t` to browse extracted template datasets
+  - creates `@freebsd-jails-tui-base` on that template dataset if missing
+  - clones the template dataset into the destination dataset
+- `vnet`
+  - uses `vnet`, `vnet.interface`, `devfs_ruleset = 5`, and generated `exec.prestart` / `exec.poststop` commands
+  - requires a bridge such as `bridge0` and can optionally add an uplink to that bridge during prestart
+  - configures IP addresses inside the jail with `ifconfig`
+- `linux`
+  - enables `linux_enable=YES` and starts the host `linux` service during creation
+  - has a dedicated Linux bootstrap step for distro and release selection
+  - preflights IPv4/IPv6 default routing, family-specific DNS answers, and mirror fetch access before bootstrapping
+  - can skip bootstrap during creation and retry later from detail view with `b`
+  - prepares compatibility mount targets under `$path/compat/<distro>`
+  - bootstraps the selected Linux userspace with `debootstrap` after the jail starts
+  - adds Linux-oriented mount and permission directives from the FreeBSD Handbook
+
+### Destroy Confirmation
+
+Destroy is available from the dashboard and detail view.
+
+The destroy workflow can:
+
+- stop the jail if it is running
+- remove jail-specific `rctl` rules when possible
+- destroy the matched ZFS dataset recursively when one is detected
+- otherwise remove the jail root path recursively
+- remove `/etc/jail.conf.d/<name>.conf`
+- remove `/etc/fstab.<name>`
+
+Safety behavior:
+
+- destroy requires explicit confirmation
+- shared config files such as `/etc/jail.conf` are not removed automatically
+- obvious shared root paths are refused
+
+## Userland Sources
+
+The wizard accepts multiple sources for jail userland:
+
+- explicit filesystem path
+- entry found in `/usr/local/jails/media`
+- release tag such as `15.0-RELEASE`
+- custom `https://...` URL
+
+For release tags, the resolver checks in this order:
+
+1. `/usr/freebsd-dist/base.txz`
+2. matching archive in `/usr/local/jails/media`
+3. download from FreeBSD mirrors
+
+Release download pattern:
+
+```text
+https://download.freebsd.org/ftp/releases/<arch>/<arch>/<RELEASE>/base.txz
+```
+
+## Templates
+
+Wizard templates are stored in the user config directory:
+
+- `$XDG_CONFIG_HOME/freebsd-jails-tui/templates.json`
+- or `~/.config/freebsd-jails-tui/templates.json`
+
+Templates persist:
+
+- jail type
+- name
+- destination
+- template/release source
+- networking values
+- resource limits
+- mount points
+
+## Data Sources
+
+The TUI reads from the host system using standard FreeBSD tooling and config locations.
+
+Config discovery:
+
+- `/etc/jail.conf`
+- `/usr/local/etc/jail.conf`
+- `/etc/jail.conf.d/*`
+- `/usr/local/etc/jail.conf.d/*`
+
+Runtime and metrics:
+
+- `jls -n`
+- `ps -axo jid=,pcpu=,rss=`
+- `rctl`
+- `zfs list`
+
+Actions:
+
+- `service jail start <name>`
+- `service jail stop <name>`
+- `zfs snapshot`
+- `zfs rollback`
+- `zfs destroy -r`
+
+## License
+
+BSD 2-Clause
