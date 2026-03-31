@@ -14,7 +14,7 @@ This initial milestone implements the **main dashboard**:
 - Save/load wizard templates for repeated jail setups
 - ZFS integration panel for snapshot and rollback actions
 - Help/shortcuts screen (`h` or `?`)
-- Startup initial config check page for rc.conf, jail paths, and ZFS datasets
+- First-run initial config check page for rc.conf, jail paths, and ZFS datasets
 
 ## Requirements
 
@@ -51,7 +51,7 @@ go run .
 
 ### Initial config check page
 
-- Runs before dashboard startup
+- Runs before dashboard startup on first launch, then stays out of the way
 - Checks `jail_enable` and `jail_parallel_start`
 - Checks for `/jail`, `/usr/jail`, or `/usr/local/jails`
 - Checks for ZFS datasets with `jail` in their name
