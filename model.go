@@ -780,17 +780,18 @@ func (m model) helpLines(width int) []string {
 
 func (m model) renderDestroyView() string {
 	title := titleStyle.Render("Destroy Jail")
-	meta := summaryStyle.Render("Selected: " + valueOrDash(m.destroy.target.Name))
+	meta := detailKeyStyle.Render("Selected:") + " " + selectedRowStyle.Render(valueOrDash(m.destroy.target.Name))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
 	bodyWidth := max(12, m.width-2)
-	lines := []string{sectionStyle.Render("Confirmation")}
+	lines := []string{"", sectionStyle.Render("Confirmation")}
 	for _, line := range buildDestroyPreview(m.destroy.target) {
 		lines = append(lines, truncate(line, bodyWidth))
 	}
 	if m.destroy.message != "" {
 		lines = append(lines, "")
-		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.destroy.message, bodyWidth)))
+		noticeText := truncate(m.destroy.message, max(1, bodyWidth-8))
+		lines = append(lines, detailKeyStyle.Render("Notice:")+" "+styleWizardMessage(noticeText))
 	}
 	if m.destroy.err != nil {
 		lines = append(lines, wizardErrorStyle.Render(truncate("Error: "+m.destroy.err.Error(), bodyWidth)))
