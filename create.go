@@ -25,6 +25,7 @@ type JailCreationResult struct {
 	FstabPath  string
 	JailPath   string
 	Logs       []string
+	Warnings   []string
 	Err        error
 }
 
@@ -43,8 +44,10 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	logf := func(format string, args ...any) {
 		logs = append(logs, fmt.Sprintf(format, args...))
 	}
+	warnings := make([]string, 0, 4)
 	fail := func(err error) JailCreationResult {
 		result.Logs = logs
+		result.Warnings = warnings
 		result.Err = err
 		return result
 	}
@@ -105,9 +108,11 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return fail(err)
 	}
 	if normalizedJailType(values.JailType) == "linux" {
-		if err := bootstrapLinuxUserland(values, result.Name, &logs); err != nil {
+		bootstrapWarnings, err := maybeBootstrapLinuxUserland(values, result.Name, &logs)
+		if err != nil {
 			return fail(err)
 		}
+		warnings = append(warnings, bootstrapWarnings...)
 	}
 	if err := applyRctlLimits(values, result.Name, &logs); err != nil {
 		return fail(err)
@@ -115,6 +120,7 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 
 	logf("Jail %s created successfully.", result.Name)
 	result.Logs = logs
+	result.Warnings = warnings
 	return result
 }
 
@@ -381,6 +387,36 @@ func bootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]st
 	return nil
 }
 
+func maybeBootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]string) ([]string, error) {
+	if effectiveLinuxBootstrapMode(values) == "skip" {
+		return []string{"Linux bootstrap skipped by wizard setting. Use detail view action 'b' after networking is ready."}, nil
+	}
+	if err := preflightLinuxBootstrap(values, jailName, logs); err != nil {
+		return []string{err.Error() + " Use detail view action 'b' to retry after fixing networking."}, nil
+	}
+	if err := bootstrapLinuxUserland(values, jailName, logs); err != nil {
+		return []string{err.Error() + " Use detail view action 'b' to retry after fixing networking or package access."}, nil
+	}
+	return nil, nil
+}
+
+func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]string) error {
+	if _, err := runLoggedCommand(logs, "jexec", jailName, "route", "-n", "get", "default"); err != nil {
+		return fmt.Errorf("linux bootstrap preflight failed: no default route inside the jail")
+	}
+	host := linuxMirrorHost(values)
+	if host == "" {
+		return fmt.Errorf("linux bootstrap preflight failed: could not determine mirror host")
+	}
+	if _, err := runLoggedCommand(logs, "jexec", jailName, "getent", "hosts", host); err != nil {
+		return fmt.Errorf("linux bootstrap preflight failed: DNS lookup failed for %s", host)
+	}
+	if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-qo", "/dev/null", linuxPreflightURL(values)); err != nil {
+		return fmt.Errorf("linux bootstrap preflight failed: could not fetch %s", linuxPreflightURL(values))
+	}
+	return nil
+}
+
 func hostArch() string {
 	out, err := exec.Command("uname", "-m").Output()
 	if err != nil {
@@ -391,6 +427,46 @@ func hostArch() string {
 		return "amd64"
 	}
 	return arch
+}
+
+func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
+	values := jailWizardValues{}
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.Contains(line, "freebsd-jails-tui:") {
+			continue
+		}
+		parts := strings.SplitN(line, "freebsd-jails-tui:", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		meta := strings.TrimSpace(strings.TrimSuffix(parts[1], ";"))
+		for _, token := range strings.Fields(meta) {
+			key, value, ok := strings.Cut(token, "=")
+			if !ok {
+				continue
+			}
+			switch strings.TrimSpace(key) {
+			case "linux_distro":
+				values.LinuxDistro = strings.TrimSpace(value)
+			case "linux_release":
+				values.LinuxRelease = strings.TrimSpace(value)
+			case "linux_bootstrap":
+				values.LinuxBootstrap = strings.TrimSpace(value)
+			}
+		}
+	}
+	if strings.TrimSpace(values.LinuxDistro) == "" {
+		re := regexp.MustCompile(`/compat/([^/\s"]+)`)
+		for _, raw := range lines {
+			matches := re.FindStringSubmatch(raw)
+			if len(matches) == 2 {
+				values.LinuxDistro = matches[1]
+				break
+			}
+		}
+	}
+	return values
 }
 
 func ensureJailConfigDoesNotExist(configPath string) error {

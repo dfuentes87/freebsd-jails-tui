@@ -87,6 +87,7 @@ var wizardBaseSteps = []wizardStep{
 		Fields: []wizardField{
 			{ID: "linux_distro", Label: "Linux distro", Placeholder: "ubuntu", Help: "Supported: ubuntu or debian"},
 			{ID: "linux_release", Label: "Linux release", Placeholder: "jammy", Help: "Ubuntu codename or Debian suite"},
+			{ID: "linux_bootstrap", Label: "Bootstrap mode", Placeholder: "auto", Help: "Options: auto or skip"},
 		},
 	},
 	{
@@ -109,6 +110,7 @@ type jailWizardValues struct {
 	Hostname        string
 	LinuxDistro     string
 	LinuxRelease    string
+	LinuxBootstrap  string
 	CPUPercent      string
 	MemoryLimit     string
 	ProcessLimit    string
@@ -467,6 +469,10 @@ func (w jailCreationWizard) visibleFields() []wizardField {
 			if jailType != "linux" {
 				continue
 			}
+		case "linux_bootstrap":
+			if jailType != "linux" {
+				continue
+			}
 		}
 		fields = append(fields, field)
 	}
@@ -501,6 +507,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.LinuxDistro
 	case "linux_release":
 		return &w.values.LinuxRelease
+	case "linux_bootstrap":
+		return &w.values.LinuxBootstrap
 	case "cpu_percent":
 		return &w.values.CPUPercent
 	case "memory_limit":
@@ -542,6 +550,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.LinuxDistro
 	case "linux_release":
 		return w.values.LinuxRelease
+	case "linux_bootstrap":
+		return w.values.LinuxBootstrap
 	case "cpu_percent":
 		return w.values.CPUPercent
 	case "memory_limit":
@@ -636,6 +646,12 @@ func (w jailCreationWizard) validateCurrentStep() error {
 		default:
 			return fmt.Errorf("linux distro must be ubuntu or debian")
 		}
+		mode := effectiveLinuxBootstrapMode(w.values)
+		switch mode {
+		case "auto", "skip":
+		default:
+			return fmt.Errorf("bootstrap mode must be auto or skip")
+		}
 	}
 	return nil
 }
@@ -679,6 +695,7 @@ func (w jailCreationWizard) summaryLines() []string {
 		lines = append(lines,
 			fmt.Sprintf("Linux distro: %s", effectiveLinuxDistro(w.values)),
 			fmt.Sprintf("Linux release: %s", effectiveLinuxRelease(w.values)),
+			fmt.Sprintf("Bootstrap mode: %s", effectiveLinuxBootstrapMode(w.values)),
 		)
 	}
 	mounts := w.mountPointList()
@@ -751,10 +768,19 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		addStep(fmt.Sprintf("VNET start config: assign %s inside the jail", strings.TrimSpace(w.values.IP4)))
 	case "linux":
 		addStep(fmt.Sprintf("Linux compatibility mounts are configured under %s", linuxCompatRoot(destination, w.values)))
-		addStep("Bootstrap Linux userland inside the jail:")
-		addDetail("   jexec <jail> pkg bootstrap -f")
-		addDetail("   jexec <jail> pkg install -y debootstrap")
-		addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxMirrorURL(w.values)))
+		if effectiveLinuxBootstrapMode(w.values) == "skip" {
+			addStep("Skip Linux bootstrap for now.")
+			addDetail("   # use detail view action 'b' later after networking is ready")
+		} else {
+			addStep("Preflight Linux bootstrap networking inside the jail:")
+			addDetail("   jexec <jail> route -n get default")
+			addDetail(fmt.Sprintf("   jexec <jail> getent hosts %s", linuxMirrorHost(w.values)))
+			addDetail(fmt.Sprintf("   jexec <jail> fetch -qo /dev/null %s", linuxPreflightURL(w.values)))
+			addStep("Bootstrap Linux userland inside the jail:")
+			addDetail("   jexec <jail> pkg bootstrap -f")
+			addDetail("   jexec <jail> pkg install -y debootstrap")
+			addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxMirrorURL(w.values)))
+		}
 	}
 
 	if strings.TrimSpace(w.values.CPUPercent) != "" ||
@@ -811,6 +837,10 @@ func (w *jailCreationWizard) setExecutionResult(result JailCreationResult) {
 		return
 	}
 	w.executionError = ""
+	if len(result.Warnings) > 0 {
+		w.message = "Creation completed with warnings."
+		return
+	}
 	w.message = "Creation completed successfully."
 }
 
@@ -905,6 +935,9 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	case "vnet":
 		lines = append(lines, buildVNETJailConfig(values)...)
 	case "linux":
+		lines = append(lines,
+			fmt.Sprintf("  # freebsd-jails-tui: linux_distro=%s linux_release=%s linux_bootstrap=%s;", effectiveLinuxDistro(values), effectiveLinuxRelease(values), effectiveLinuxBootstrapMode(values)),
+		)
 		lines = append(lines, buildLinuxJailConfig(values, jailPath)...)
 	default:
 		lines = append(lines,
@@ -1050,6 +1083,14 @@ func effectiveLinuxRelease(values jailWizardValues) string {
 	}
 }
 
+func effectiveLinuxBootstrapMode(values jailWizardValues) string {
+	mode := strings.ToLower(strings.TrimSpace(values.LinuxBootstrap))
+	if mode == "" {
+		return "auto"
+	}
+	return mode
+}
+
 func linuxMirrorURL(values jailWizardValues) string {
 	switch effectiveLinuxDistro(values) {
 	case "debian":
@@ -1057,6 +1098,20 @@ func linuxMirrorURL(values jailWizardValues) string {
 	default:
 		return "https://archive.ubuntu.com/ubuntu"
 	}
+}
+
+func linuxMirrorHost(values jailWizardValues) string {
+	mirror := linuxMirrorURL(values)
+	mirror = strings.TrimPrefix(mirror, "https://")
+	mirror = strings.TrimPrefix(mirror, "http://")
+	if idx := strings.IndexByte(mirror, '/'); idx >= 0 {
+		mirror = mirror[:idx]
+	}
+	return mirror
+}
+
+func linuxPreflightURL(values jailWizardValues) string {
+	return strings.TrimRight(linuxMirrorURL(values), "/") + "/dists/" + effectiveLinuxRelease(values) + "/Release"
 }
 
 func linuxCompatRoot(jailPath string, values jailWizardValues) string {
@@ -1083,7 +1138,7 @@ func wizardSectionForField(id string) string {
 		return "4. Resource Limits (optional)"
 	case "mount_points":
 		return "5. Mount points"
-	case "linux_distro", "linux_release":
+	case "linux_distro", "linux_release", "linux_bootstrap":
 		return "6. Linux Bootstrap"
 	default:
 		return ""

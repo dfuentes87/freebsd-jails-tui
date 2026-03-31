@@ -35,6 +35,7 @@ The application is aimed at a FreeBSD host that already uses the base jail tooli
 - `thin` assumes an OpenZFS-backed template dataset and destination parent dataset.
 - `vnet` assumes a host bridge interface already exists.
 - `linux` bootstraps a Linux userspace under `/compat/<distro>` and still depends on working networking/package access inside the jail.
+- Linux bootstrap is treated as a second phase. If jail creation succeeds but Linux bootstrap preflight fails, the jail is kept and the TUI reports a warning instead of destroying or rolling back the new jail.
 - Detail view includes some raw runtime values from `jls`, which may show kernel defaults or module parameters in addition to explicit `jail.conf` settings.
 - Create/destroy/start/stop operations are real host actions. Run carefully.
 
@@ -160,6 +161,7 @@ Wizard fields include:
 - hostname
 - Linux distro
 - Linux release
+- Linux bootstrap mode
 - CPU percentage limit
 - memory limit
 - max process limit
@@ -174,6 +176,7 @@ Important behavior:
 - `inherit` is allowed for non-`vnet` networking
 - `inherit` is rejected for `vnet` jails
 - `vnet` uses dedicated `Bridge` and optional `Uplink` fields instead of `Interface`
+- Linux bootstrap mode supports `auto` or `skip`
 - the wizard writes new configs into `/etc/jail.conf.d/<name>.conf`
 - the wizard refuses to overwrite an existing jail config file
 
@@ -194,6 +197,8 @@ Type-specific notes:
 - `linux`
   - enables `linux_enable=YES` and starts the host `linux` service during creation
   - has a dedicated Linux bootstrap step for distro and release selection
+  - preflights route, DNS, and mirror fetch access before bootstrapping
+  - can skip bootstrap during creation and retry later from detail view with `b`
   - prepares compatibility mount targets under `$path/compat/<distro>`
   - bootstraps the selected Linux userspace with `debootstrap` after the jail starts
   - adds Linux-oriented mount and permission directives from the FreeBSD Handbook

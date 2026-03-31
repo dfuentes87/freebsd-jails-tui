@@ -14,6 +14,13 @@ type jailServiceResult struct {
 	Err    error
 }
 
+type linuxBootstrapResult struct {
+	Name     string
+	Logs     []string
+	Warnings []string
+	Err      error
+}
+
 type zfsOpenResult struct {
 	Detail JailDetail
 	Err    error
@@ -62,4 +69,53 @@ func resolveZFSPanelTarget(target Jail) zfsOpenResult {
 		Detail: detail,
 		Err:    err,
 	}
+}
+
+func ExecuteLinuxBootstrapAction(detail JailDetail) linuxBootstrapResult {
+	result := linuxBootstrapResult{
+		Name: strings.TrimSpace(detail.Name),
+	}
+	logs := make([]string, 0, 16)
+	fail := func(err error) linuxBootstrapResult {
+		result.Logs = logs
+		result.Err = err
+		return result
+	}
+
+	if result.Name == "" {
+		return fail(fmt.Errorf("jail name is required"))
+	}
+	if !detailLooksLikeLinuxJail(detail) {
+		return fail(fmt.Errorf("linux bootstrap retry is only available for linux jails"))
+	}
+	if detail.JID <= 0 {
+		return fail(fmt.Errorf("linux bootstrap retry requires the jail to be running"))
+	}
+
+	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
+	values.LinuxBootstrap = "auto"
+	if err := preflightLinuxBootstrap(values, result.Name, &logs); err != nil {
+		return fail(err)
+	}
+	if err := bootstrapLinuxUserland(values, result.Name, &logs); err != nil {
+		return fail(err)
+	}
+
+	result.Logs = logs
+	return result
+}
+
+func detailLooksLikeLinuxJail(detail JailDetail) bool {
+	for _, flag := range detail.JailConfFlags {
+		switch strings.TrimSpace(flag) {
+		case "allow.mount.linprocfs", "allow.mount.linsysfs":
+			return true
+		}
+	}
+	for _, raw := range detail.JailConfRaw {
+		if strings.Contains(raw, "/compat/") || strings.Contains(raw, "linux_distro=") {
+			return true
+		}
+	}
+	return false
 }

@@ -73,6 +73,10 @@ type jailServiceApplyMsg struct {
 	result jailServiceResult
 }
 
+type linuxBootstrapApplyMsg struct {
+	result linuxBootstrapResult
+}
+
 type zfsOpenMsg struct {
 	result zfsOpenResult
 }
@@ -115,6 +119,7 @@ type model struct {
 	detailErr      error
 	detailLoading  bool
 	detailScroll   int
+	detailNotice   string
 	zfsPanel       zfsPanelState
 	wizard         jailCreationWizard
 	wizardApplying bool
@@ -170,6 +175,13 @@ func jailServiceCmd(target Jail, action string) tea.Cmd {
 	return func() tea.Msg {
 		result := ExecuteJailServiceAction(target, action)
 		return jailServiceApplyMsg{result: result}
+	}
+}
+
+func linuxBootstrapCmd(detail JailDetail) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteLinuxBootstrapAction(detail)
+		return linuxBootstrapApplyMsg{result: result}
 	}
 }
 
@@ -271,7 +283,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wizard.setExecutionResult(msg.result)
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
-			m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
+			if len(msg.result.Warnings) > 0 {
+				m.notice = fmt.Sprintf("Jail %s created and started with warnings: %s", msg.result.Name, msg.result.Warnings[0])
+			} else {
+				m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
+			}
 			m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 			return m, pollCmd()
 		}
@@ -301,6 +317,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.notice = fmt.Sprintf("Jail %s %s.", msg.result.Name, actionWord)
 		return m, pollCmd()
+	case linuxBootstrapApplyMsg:
+		if msg.result.Err != nil {
+			m.detailErr = msg.result.Err
+			m.detailNotice = ""
+			return m, nil
+		}
+		m.detailErr = nil
+		if len(msg.result.Warnings) > 0 {
+			m.detailNotice = "Linux bootstrap warning: " + msg.result.Warnings[0]
+		} else {
+			m.detailNotice = "Linux bootstrap completed."
+		}
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, nil
+		}
+		m.detailLoading = true
+		return m, detailCmd(jail)
 	case zfsOpenMsg:
 		if msg.result.Detail.ZFS == nil || strings.TrimSpace(msg.result.Detail.ZFS.Name) == "" {
 			if msg.result.Err != nil {
@@ -445,6 +479,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailLoading = true
 		m.detailScroll = 0
 		m.detailErr = nil
+		m.detailNotice = ""
 		m.detail = JailDetail{
 			Name:           jail.Name,
 			JID:            jail.JID,
@@ -485,7 +520,21 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.detailLoading = true
 		m.detailErr = nil
+		m.detailNotice = ""
 		return m, detailCmd(jail)
+	case "b", "B":
+		if !detailLooksLikeLinuxJail(m.detail) {
+			m.detailErr = fmt.Errorf("linux bootstrap retry is only available for linux jails")
+			return m, nil
+		}
+		jail, ok := m.detailJail()
+		if !ok || jail.JID <= 0 {
+			m.detailErr = fmt.Errorf("linux bootstrap retry requires the jail to be running")
+			return m, nil
+		}
+		m.detailErr = nil
+		m.detailNotice = "Retrying Linux bootstrap..."
+		return m, linuxBootstrapCmd(m.detail)
 	case "z":
 		if m.detail.ZFS == nil || strings.TrimSpace(m.detail.ZFS.Name) == "" {
 			m.detailErr = fmt.Errorf("no ZFS dataset detected for this jail")
@@ -884,6 +933,7 @@ func (m model) helpLines(width int) []string {
 		sectionStyle.Render("Jail Detail"),
 		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
 		truncate("r: refresh selected jail details", width),
+		truncate("b: retry linux bootstrap for a running linux jail", width),
 		truncate("z: open ZFS integration panel", width),
 		truncate("x: destroy this jail (confirmation required)", width),
 		truncate("esc: return to dashboard", width),
@@ -1036,7 +1086,11 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
+	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail"
+	if detailLooksLikeLinuxJail(m.detail) {
+		hint += " | b: retry linux bootstrap"
+	}
+	hint += " | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
 	if m.detailLoading {
 		hint += " | loading detail..."
 	}
@@ -1044,6 +1098,8 @@ func (m model) renderJailDetailView() string {
 	if m.detailErr != nil {
 		hint += " | warning: " + m.detailErr.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	} else if m.detailNotice != "" {
+		hint += " | " + m.detailNotice
 	}
 	footer := footerRenderer.Width(m.width).Render(hint)
 
