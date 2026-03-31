@@ -51,7 +51,7 @@ var wizardSteps = []wizardStep{
 		Title:       "0. Jail Type",
 		Description: "Select the jail type to create.",
 		Fields: []wizardField{
-			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux. IP inherit is for non-vnet jails only"},
+			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux"},
 		},
 	},
 	{

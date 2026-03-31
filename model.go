@@ -41,6 +41,11 @@ var (
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("45"))
+	wizardActionStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("31")).
+				Padding(0, 1)
 	wizardErrorStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("196"))
@@ -905,10 +910,12 @@ func (m model) renderJailDetailView() string {
 	if m.detailLoading {
 		hint += " | loading detail..."
 	}
+	footerRenderer := footerStyle
 	if m.detailErr != nil {
 		hint += " | warning: " + m.detailErr.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
-	footer := footerStyle.Width(m.width).Render(hint)
+	footer := footerRenderer.Width(m.width).Render(hint)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -1182,7 +1189,7 @@ func (m model) detailLines(width int) []string {
 		appendLine("")
 		lines = append(lines, sectionStyle.Render("Source errors"))
 		for _, source := range sortedKeys(m.detail.SourceErrors) {
-			appendLine(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]))
+			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
 		}
 	}
 	return lines
@@ -1266,10 +1273,12 @@ func (m model) renderFooter() string {
 	if m.notice != "" {
 		hint += " | " + m.notice
 	}
+	footerRenderer := footerStyle
 	if m.err != nil {
 		hint += " | warning: " + m.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
-	return footerStyle.Width(m.width).Render(hint)
+	return footerRenderer.Width(m.width).Render(hint)
 }
 
 func (m model) renderJailList(width, height int) string {
@@ -1410,6 +1419,9 @@ func statusBadge(running bool) string {
 
 func styleWizardMessage(message string) string {
 	lower := strings.ToLower(message)
+	if strings.Contains(lower, "applying creation plan") {
+		return wizardActionStyle.Render(message)
+	}
 	if strings.Contains(lower, "failed") ||
 		strings.Contains(lower, "required") ||
 		strings.Contains(lower, "invalid") ||
