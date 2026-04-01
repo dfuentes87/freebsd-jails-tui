@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,8 @@ import (
 )
 
 var releaseValuePattern = regexp.MustCompile(`^[0-9]+\.[0-9]+-RELEASE`)
+
+var errTemplateDatasetParentMissing = errors.New("template parent dataset missing")
 
 const (
 	defaultUserlandDir  = "/usr/local/jails/media"
@@ -40,15 +43,23 @@ type TemplateDatasetResult struct {
 }
 
 type TemplateDatasetPreview struct {
-	SourceInput      string
-	SourceKind       string
-	ResolvedSource   string
-	Action           string
-	ParentDataset    string
-	ParentMountpoint string
-	Dataset          string
-	Mountpoint       string
-	Err              error
+	SourceInput       string
+	SourceKind        string
+	ResolvedSource    string
+	Action            string
+	ParentDataset     string
+	ParentMountpoint  string
+	Dataset           string
+	Mountpoint        string
+	NeedsParentCreate bool
+	Err               error
+}
+
+type TemplateParentDatasetResult struct {
+	Dataset    string
+	Mountpoint string
+	Logs       []string
+	Err        error
 }
 
 func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
@@ -526,6 +537,10 @@ func hostArch() string {
 }
 
 func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
+	return ExecuteTemplateDatasetCreateWithParent(sourceInput, nil)
+}
+
+func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent) TemplateDatasetResult {
 	result := TemplateDatasetResult{}
 	logs := make([]string, 0, 24)
 	fail := func(err error) TemplateDatasetResult {
@@ -539,7 +554,7 @@ func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
 		return fail(fmt.Errorf("template/release is required before a template dataset can be created"))
 	}
 
-	parent, err := discoverTemplateDatasetParent()
+	parent, err := resolveTemplateDatasetParent(parentOverride)
 	if err != nil {
 		return fail(err)
 	}
@@ -598,12 +613,19 @@ func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
 }
 
 func InspectTemplateDatasetCreate(sourceInput string) TemplateDatasetPreview {
+	return InspectTemplateDatasetCreateWithParent(sourceInput, nil)
+}
+
+func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent) TemplateDatasetPreview {
 	preview := TemplateDatasetPreview{
 		SourceInput: strings.TrimSpace(sourceInput),
 	}
 
-	parent, err := discoverTemplateDatasetParent()
+	parent, err := resolveTemplateDatasetParent(parentOverride)
 	if err != nil {
+		if errors.Is(err, errTemplateDatasetParentMissing) {
+			preview.NeedsParentCreate = true
+		}
 		preview.Err = err
 		return preview
 	}
@@ -636,6 +658,42 @@ func InspectTemplateDatasetCreate(sourceInput string) TemplateDatasetPreview {
 	}
 
 	return preview
+}
+
+func ExecuteTemplateParentDatasetCreate(dataset, mountpoint string) TemplateParentDatasetResult {
+	result := TemplateParentDatasetResult{
+		Dataset:    strings.TrimSpace(dataset),
+		Mountpoint: filepath.Clean(strings.TrimSpace(mountpoint)),
+	}
+	var logs []string
+	fail := func(err error) TemplateParentDatasetResult {
+		result.Logs = logs
+		result.Err = err
+		return result
+	}
+
+	if result.Dataset == "" {
+		return fail(fmt.Errorf("parent dataset is required"))
+	}
+	if result.Mountpoint == "." || result.Mountpoint == "" || !strings.HasPrefix(result.Mountpoint, "/") {
+		return fail(fmt.Errorf("parent mountpoint must be absolute"))
+	}
+
+	out, err := exec.Command("zfs", "list", "-H", "-o", "mountpoint", result.Dataset).CombinedOutput()
+	if err == nil {
+		existing := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+		if existing != "" && existing != "-" && existing != "legacy" && filepath.Clean(existing) != result.Mountpoint {
+			return fail(fmt.Errorf("dataset %q already exists with mountpoint %q", result.Dataset, existing))
+		}
+		result.Logs = logs
+		return result
+	}
+
+	if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+result.Mountpoint, result.Dataset); err != nil {
+		return fail(fmt.Errorf("failed to create template parent dataset %q: %w", result.Dataset, err))
+	}
+	result.Logs = logs
+	return result
 }
 
 func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
@@ -720,7 +778,18 @@ func discoverTemplateDatasetParent() (*templateDatasetParent, error) {
 	if fallback != nil {
 		return fallback, nil
 	}
-	return nil, fmt.Errorf("no templates dataset found; create one first in the initial config check or under your jail dataset layout")
+	return nil, fmt.Errorf("%w: no templates dataset found; create one first in the initial config check or under your jail dataset layout", errTemplateDatasetParentMissing)
+}
+
+func resolveTemplateDatasetParent(parentOverride *templateDatasetParent) (*templateDatasetParent, error) {
+	if parentOverride != nil {
+		name := strings.TrimSpace(parentOverride.Name)
+		mountpoint := strings.TrimSpace(parentOverride.Mountpoint)
+		if name != "" && mountpoint != "" {
+			return &templateDatasetParent{Name: name, Mountpoint: filepath.Clean(mountpoint)}, nil
+		}
+	}
+	return discoverTemplateDatasetParent()
 }
 
 func inspectTemplateSourceInput(input string) (string, string, string, error) {

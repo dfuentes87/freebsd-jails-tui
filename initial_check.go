@@ -164,6 +164,85 @@ func initialWizardDestination(status initialConfigStatus) string {
 	return filepath.Join(base, "new-jail")
 }
 
+func suggestTemplateParentDataset(status initialConfigStatus) (string, string, bool) {
+	baseDataset := preferredBaseJailDataset(status.JailDatasets)
+	if baseDataset == "" {
+		return "", "", false
+	}
+
+	baseMountpoint := ""
+	if mp, err := zfsMountpointForDataset(baseDataset); err == nil {
+		baseMountpoint = mp
+	}
+	if baseMountpoint == "" {
+		for _, path := range status.ExistingJailPaths {
+			if path == docJailsPath {
+				baseMountpoint = path
+				break
+			}
+			if baseMountpoint == "" {
+				baseMountpoint = path
+			}
+		}
+	}
+	if baseMountpoint == "" || !strings.HasPrefix(baseMountpoint, "/") {
+		return "", "", false
+	}
+
+	return baseDataset + "/templates", filepath.Join(filepath.Clean(baseMountpoint), "templates"), true
+}
+
+func preferredBaseJailDataset(datasets []string) string {
+	if len(datasets) == 0 {
+		return ""
+	}
+	for _, dataset := range datasets {
+		if dataset == docDatasetBase {
+			return dataset
+		}
+	}
+	for _, dataset := range datasets {
+		if base := trimJailDatasetRole(dataset); base != "" {
+			return base
+		}
+	}
+	for _, dataset := range datasets {
+		if strings.Contains(strings.ToLower(filepath.Base(dataset)), "jail") {
+			return dataset
+		}
+	}
+	return ""
+}
+
+func trimJailDatasetRole(dataset string) string {
+	parts := strings.Split(strings.Trim(strings.TrimSpace(dataset), "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	for idx, part := range parts {
+		switch strings.ToLower(part) {
+		case "media", "templates", "containers":
+			if idx == 0 {
+				return ""
+			}
+			return strings.Join(parts[:idx], "/")
+		}
+	}
+	return ""
+}
+
+func zfsMountpointForDataset(dataset string) (string, error) {
+	out, err := exec.Command("zfs", "list", "-H", "-o", "mountpoint", dataset).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to read mountpoint for %q: %w", dataset, err)
+	}
+	mountpoint := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
+		return "", nil
+	}
+	return filepath.Clean(mountpoint), nil
+}
+
 func initialCheckCompleted() (bool, error) {
 	path, err := initialCheckMarkerPath()
 	if err != nil {

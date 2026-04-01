@@ -228,6 +228,12 @@ The screen shows:
 - source type and whether the create step will copy or extract
 - execution output after creation
 
+If the parent `templates` dataset does not exist, the screen can:
+
+- propose a parent dataset and mountpoint derived from the current jail layout
+- create that parent dataset first
+- let you edit the parent dataset and mountpoint manually before creation
+
 Supported sources:
 
 - local directory
