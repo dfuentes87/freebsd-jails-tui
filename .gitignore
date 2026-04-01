@@ -68,6 +68,7 @@ out/
 *.prof
 .gocache
 .gopath
+.gomodcache
 
 # Build outputs
 /bin/
@@ -151,3 +152,4 @@ temp/
 # =========================================================
 freebsd-jails-tui
 TODO.md
+Makefile
