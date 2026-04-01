@@ -94,6 +94,7 @@ const (
 	screenDashboard
 	screenJailDetail
 	screenCreateWizard
+	screenTemplateDatasetCreate
 	screenZFSPanel
 	screenDestroyConfirm
 	screenHelp
@@ -106,6 +107,14 @@ type destroyState struct {
 	logs       []string
 	err        error
 	message    string
+}
+
+type templateDatasetCreateState struct {
+	sourceInput string
+	preview     TemplateDatasetPreview
+	applying    bool
+	logs        []string
+	message     string
 }
 
 type model struct {
@@ -127,6 +136,7 @@ type model struct {
 	zfsPanel       zfsPanelState
 	wizard         jailCreationWizard
 	wizardApplying bool
+	templateCreate templateDatasetCreateState
 	destroy        destroyState
 	initCheck      initialCheckState
 	helpReturnMode screenMode
@@ -144,6 +154,7 @@ func newModel() model {
 		initCheck: newInitialCheckState(),
 	}
 	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
+	m.templateCreate = newTemplateDatasetCreateState("")
 	return m
 }
 
@@ -347,7 +358,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailLoading = true
 		return m, detailCmd(jail)
 	case templateDatasetApplyMsg:
+		if m.mode == screenTemplateDatasetCreate {
+			m.templateCreate.applying = false
+			m.templateCreate.logs = append([]string(nil), msg.result.Logs...)
+			if msg.result.Err != nil {
+				m.templateCreate.message = msg.result.Err.Error()
+				return m, nil
+			}
+			m.templateCreate.message = fmt.Sprintf("Template dataset created: %s", msg.result.Dataset)
+			return m, nil
+		}
 		m.wizard.datasetCreateRunning = false
+		m.wizard.executionLogs = append([]string(nil), msg.result.Logs...)
 		if msg.result.Err != nil {
 			m.wizard.message = msg.result.Err.Error()
 			return m, nil
@@ -404,6 +426,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == screenCreateWizard {
 			return m.updateWizardKeys(msg)
 		}
+		if m.mode == screenTemplateDatasetCreate {
+			return m.updateTemplateDatasetKeys(msg)
+		}
 		if m.mode == screenJailDetail {
 			return m.updateDetailKeys(msg)
 		}
@@ -433,6 +458,8 @@ func (m model) isTextEntryMode() bool {
 			return false
 		}
 		return !m.wizard.isConfirmationStep()
+	case screenTemplateDatasetCreate:
+		return !m.templateCreate.applying
 	case screenZFSPanel:
 		return m.zfsPanel.inputMode
 	default:
@@ -460,6 +487,12 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenCreateWizard
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.notice = ""
+		return m, nil
+	case "t", "T":
+		m.mode = screenTemplateDatasetCreate
+		m.templateCreate = newTemplateDatasetCreateState("")
+		m.notice = ""
+		m.err = nil
 		return m, nil
 	case "s", "S":
 		jail, ok := m.selectedJail()
@@ -878,6 +911,63 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "?" {
+		m.helpReturnMode = m.mode
+		m.helpScroll = 0
+		m.mode = screenHelp
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc", "left":
+		if m.templateCreate.applying {
+			return m, nil
+		}
+		m.mode = screenDashboard
+		m.notice = "Template dataset creation canceled."
+		return m, nil
+	case "enter":
+		if m.templateCreate.applying {
+			return m, nil
+		}
+		if strings.TrimSpace(m.templateCreate.sourceInput) == "" {
+			m.templateCreate.message = "template/release is required"
+			return m, nil
+		}
+		if m.templateCreate.preview.Err != nil {
+			m.templateCreate.message = m.templateCreate.preview.Err.Error()
+			return m, nil
+		}
+		m.templateCreate.message = "Creating template dataset..."
+		m.templateCreate.logs = nil
+		m.templateCreate.applying = true
+		return m, templateDatasetCreateCmd(m.templateCreate.sourceInput)
+	case "r", "R":
+		if m.templateCreate.applying {
+			return m, nil
+		}
+		m.templateCreate.refreshPreview()
+		if m.templateCreate.preview.Err == nil {
+			m.templateCreate.message = "Template dataset preview refreshed."
+		}
+		return m, nil
+	case "backspace", "delete":
+		if m.templateCreate.applying {
+			return m, nil
+		}
+		m.templateCreate.backspaceSource()
+		return m, nil
+	}
+
+	if !m.templateCreate.applying && msg.Type == tea.KeyRunes {
+		m.templateCreate.appendSource(string(msg.Runes))
+		return m, nil
+	}
+
+	return m, nil
+}
+
 func (m model) updateHelpKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "left", "backspace", "enter", "h", "?":
@@ -909,6 +999,9 @@ func (m model) View() string {
 	}
 	if m.mode == screenCreateWizard {
 		return m.renderWizardView()
+	}
+	if m.mode == screenTemplateDatasetCreate {
+		return m.renderTemplateDatasetCreateView()
 	}
 	if m.mode == screenZFSPanel {
 		return m.renderZFSPanelView()
@@ -967,6 +1060,7 @@ func (m model) helpLines(width int) []string {
 		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
 		truncate("enter or d: open jail detail view", width),
 		truncate("c: open jail creation wizard", width),
+		truncate("t: open template dataset creation", width),
 		truncate("s: start or stop selected jail", width),
 		truncate("z: open ZFS panel for selected jail", width),
 		truncate("x: destroy selected jail (confirmation required)", width),
@@ -1002,6 +1096,12 @@ func (m model) helpLines(width int) []string {
 		truncate("thin selector c: create a template dataset from current Template/Release", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
+		"",
+		sectionStyle.Render("Template Dataset Create"),
+		truncate("type a source path, release tag, userland entry, or custom URL", width),
+		truncate("enter: create the previewed template dataset", width),
+		truncate("r: refresh preview", width),
+		truncate("esc: return to dashboard", width),
 	}
 	return lines
 }
@@ -1194,6 +1294,91 @@ func (m model) renderWizardView() string {
 	footer := footerStyle.Width(m.width).Render(hint)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m model) renderTemplateDatasetCreateView() string {
+	title := titleStyle.Render("Template Dataset Create")
+	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
+	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+
+	bodyHeight := max(4, m.height-3)
+	lines := m.templateDatasetCreateLines(max(12, m.width-2))
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+
+	hint := "type source | enter: create | backspace: edit | r: refresh preview | ?: help | esc: dashboard | q: quit"
+	if m.templateCreate.applying {
+		hint = "Creating template dataset... please wait | q: quit"
+	}
+	if m.templateCreate.message != "" {
+		hint += " | " + m.templateCreate.message
+	}
+	footer := footerStyle.Width(m.width).Render(hint)
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m model) templateDatasetCreateLines(width int) []string {
+	lines := []string{
+		sectionStyle.Render("Source"),
+		truncate("Supported sources: local directory, local archive, release tag, custom https URL, or a named userland entry.", width),
+	}
+
+	sourceDisplay := m.templateCreate.sourceInput
+	if strings.TrimSpace(sourceDisplay) == "" {
+		sourceDisplay = "(15.0-RELEASE)"
+	}
+	sourceLine := truncate("> Template/Release: "+sourceDisplay, width)
+	lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(sourceLine))
+
+	if m.templateCreate.message != "" {
+		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.templateCreate.message, width)))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, sectionStyle.Render("Preview"))
+	preview := m.templateCreate.preview
+
+	if preview.ParentDataset != "" {
+		lines = append(lines, truncate("Parent dataset: "+preview.ParentDataset, width))
+	}
+	if preview.ParentMountpoint != "" {
+		lines = append(lines, truncate("Parent mountpoint: "+preview.ParentMountpoint, width))
+	}
+	if preview.Dataset != "" {
+		lines = append(lines, truncate("Derived dataset: "+preview.Dataset, width))
+	}
+	if preview.Mountpoint != "" {
+		lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
+	}
+	if preview.SourceKind != "" {
+		lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
+	}
+	if preview.ResolvedSource != "" {
+		lines = append(lines, truncate("Resolved source: "+preview.ResolvedSource, width))
+	}
+	if preview.Action != "" {
+		lines = append(lines, truncate("Create action: "+preview.Action, width))
+	}
+
+	if preview.Err != nil {
+		lines = append(lines, wizardErrorStyle.Render(truncate("Error: "+preview.Err.Error(), width)))
+	} else if strings.TrimSpace(m.templateCreate.sourceInput) == "" {
+		lines = append(lines, truncate("Enter a source above to preview the dataset name and mountpoint before creation.", width))
+	}
+
+	if len(m.templateCreate.logs) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Execution output"))
+		for _, line := range m.templateCreate.logs {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+
+	return lines
 }
 
 func (m model) wizardLines(width int) []string {
@@ -1519,6 +1704,38 @@ func (m model) selectedJail() (Jail, bool) {
 	return m.snapshot.Jails[idx], true
 }
 
+func newTemplateDatasetCreateState(sourceInput string) templateDatasetCreateState {
+	state := templateDatasetCreateState{
+		sourceInput: strings.TrimSpace(sourceInput),
+	}
+	state.refreshPreview()
+	return state
+}
+
+func (s *templateDatasetCreateState) refreshPreview() {
+	s.preview = InspectTemplateDatasetCreate(s.sourceInput)
+}
+
+func (s *templateDatasetCreateState) appendSource(text string) {
+	if text == "" {
+		return
+	}
+	s.sourceInput += text
+	s.logs = nil
+	s.message = ""
+	s.refreshPreview()
+}
+
+func (s *templateDatasetCreateState) backspaceSource() {
+	if s.sourceInput == "" {
+		return
+	}
+	s.sourceInput = s.sourceInput[:len(s.sourceInput)-1]
+	s.logs = nil
+	s.message = ""
+	s.refreshPreview()
+}
+
 func (m model) renderHeader() string {
 	total := len(m.snapshot.Jails)
 	lastUpdated := "never"
@@ -1539,7 +1756,7 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
+	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | t: template dataset | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
 	if m.notice != "" {
 		hint += " | " + m.notice
 	}
@@ -1575,7 +1792,7 @@ func (m model) renderJailList(width, height int) string {
 
 func (m model) renderRows(maxRows, width int) string {
 	if len(m.snapshot.Jails) == 0 {
-		return "No jails discovered yet. Create one manually in jail.conf/jail.conf.d or press c to open the jail creation wizard."
+		return "No jails discovered yet. Create one manually in jail.conf/jail.conf.d, press c to open the jail creation wizard, or press t to create a template dataset."
 	}
 	start := m.offset
 	end := min(len(m.snapshot.Jails), start+maxRows)
@@ -1631,6 +1848,7 @@ func (m model) renderDetailPanel(width, height int) string {
 			fmt.Sprintf("%s %s", detailKeyStyle.Render("JID:"), jidText),
 			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
 			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
+			"t: create a reusable template dataset.",
 			"s: start/stop selected jail.",
 			"z: open ZFS panel for selected jail.",
 			"Press enter for full detail view.",
@@ -1690,7 +1908,7 @@ func statusBadge(running bool) string {
 
 func styleWizardMessage(message string) string {
 	lower := strings.ToLower(message)
-	if strings.Contains(lower, "applying creation plan") {
+	if strings.Contains(lower, "applying creation plan") || strings.Contains(lower, "creating template dataset") {
 		return wizardActionStyle.Render(message)
 	}
 	if strings.Contains(lower, "failed") ||

@@ -34,8 +34,21 @@ type JailCreationResult struct {
 type TemplateDatasetResult struct {
 	Dataset    string
 	Mountpoint string
+	Parent     string
 	Logs       []string
 	Err        error
+}
+
+type TemplateDatasetPreview struct {
+	SourceInput      string
+	SourceKind       string
+	ResolvedSource   string
+	Action           string
+	ParentDataset    string
+	ParentMountpoint string
+	Dataset          string
+	Mountpoint       string
+	Err              error
 }
 
 func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
@@ -545,6 +558,7 @@ func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
 
 	childDataset := parent.Name + "/" + templateName
 	childMountpoint := filepath.Join(parent.Mountpoint, templateName)
+	result.Parent = parent.Name
 	result.Dataset = childDataset
 	result.Mountpoint = childMountpoint
 
@@ -581,6 +595,47 @@ func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
 	success = true
 	result.Logs = logs
 	return result
+}
+
+func InspectTemplateDatasetCreate(sourceInput string) TemplateDatasetPreview {
+	preview := TemplateDatasetPreview{
+		SourceInput: strings.TrimSpace(sourceInput),
+	}
+
+	parent, err := discoverTemplateDatasetParent()
+	if err != nil {
+		preview.Err = err
+		return preview
+	}
+	preview.ParentDataset = parent.Name
+	preview.ParentMountpoint = parent.Mountpoint
+
+	if preview.SourceInput == "" {
+		return preview
+	}
+
+	templateName := suggestTemplateDatasetName(preview.SourceInput)
+	if templateName == "" {
+		preview.Err = fmt.Errorf("could not derive a template dataset name from %q", preview.SourceInput)
+		return preview
+	}
+	preview.Dataset = parent.Name + "/" + templateName
+	preview.Mountpoint = filepath.Join(parent.Mountpoint, templateName)
+
+	sourceKind, resolvedSource, action, err := inspectTemplateSourceInput(preview.SourceInput)
+	preview.SourceKind = sourceKind
+	preview.ResolvedSource = resolvedSource
+	preview.Action = action
+	if err != nil {
+		preview.Err = err
+		return preview
+	}
+
+	if _, err := exec.Command("zfs", "list", "-H", "-o", "name", preview.Dataset).Output(); err == nil {
+		preview.Err = fmt.Errorf("template dataset %q already exists", preview.Dataset)
+	}
+
+	return preview
 }
 
 func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
@@ -666,6 +721,63 @@ func discoverTemplateDatasetParent() (*templateDatasetParent, error) {
 		return fallback, nil
 	}
 	return nil, fmt.Errorf("no templates dataset found; create one first in the initial config check or under your jail dataset layout")
+}
+
+func inspectTemplateSourceInput(input string) (string, string, string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", "", fmt.Errorf("template/release is required")
+	}
+
+	if info, err := os.Stat(input); err == nil {
+		if info.IsDir() {
+			return "local directory", filepath.Clean(input), "copy directory contents into the new dataset", nil
+		}
+		return "local archive", filepath.Clean(input), "extract archive into the new dataset", nil
+	}
+
+	if source, ok := findNamedUserlandSource(defaultUserlandDir, input); ok {
+		info, err := os.Stat(source)
+		if err != nil {
+			return "", "", "", fmt.Errorf("named userland source %q is not accessible: %w", source, err)
+		}
+		if info.IsDir() {
+			return "named userland directory", source, "copy directory contents into the new dataset", nil
+		}
+		return "named userland archive", source, "extract archive into the new dataset", nil
+	}
+
+	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
+		parsed, err := neturl.Parse(input)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return "", "", "", fmt.Errorf("template/release URL %q is invalid", input)
+		}
+		return "custom URL", input, "download and extract archive into the new dataset", nil
+	}
+
+	if releaseValuePattern.MatchString(strings.ToUpper(input)) {
+		localBaseArchive := "/usr/freebsd-dist/base.txz"
+		if _, err := os.Stat(localBaseArchive); err == nil {
+			return "release tag", localBaseArchive, "extract archive into the new dataset", nil
+		}
+		if source, ok := findReleaseArchiveInUserland(defaultUserlandDir, input); ok {
+			return "release tag", source, "extract archive into the new dataset", nil
+		}
+		urls, err := defaultReleaseBaseURLs(input)
+		if err != nil {
+			return "", "", "", err
+		}
+		if len(urls) == 0 {
+			return "", "", "", fmt.Errorf("could not resolve a download URL for release %q", input)
+		}
+		return "release tag", urls[0], "download and extract archive into the new dataset", nil
+	}
+
+	return "", "", "", fmt.Errorf(
+		"template/release %q not found; use a local path, an entry from %s, a release tag, or a custom URL",
+		input,
+		defaultUserlandDir,
+	)
 }
 
 func suggestTemplateDatasetName(sourceInput string) string {

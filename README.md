@@ -16,6 +16,7 @@ The application is aimed at a FreeBSD host that already uses the base jail tooli
   - `rctl`
 - First-run initial configuration check
 - Jail creation wizard
+- Dedicated template dataset creation flow
 - Save/load wizard templates
 - ZFS integration panel for snapshot and rollback actions
 - Start/stop actions from the dashboard
@@ -72,6 +73,14 @@ Data shown includes:
 - JID
 - CPU usage
 - Memory usage
+
+Key actions from the dashboard include:
+
+- `c` to open the jail creation wizard
+- `t` to open template dataset creation
+- `s` to start or stop the selected jail
+- `z` to open the selected jail's ZFS panel
+- `x` to destroy the selected jail
 
 ### Initial Config Check
 
@@ -203,6 +212,31 @@ Type-specific notes:
   - prepares compatibility mount targets under `$path/compat/<distro>`
   - bootstraps the selected Linux userspace with `debootstrap` after the jail starts
   - adds Linux-oriented mount and permission directives from the FreeBSD Handbook
+
+### Template Dataset Create
+
+The TUI includes a dedicated top-level workflow for creating reusable ZFS template datasets for later thin-jail cloning.
+
+It is opened from the dashboard with `t`.
+
+The screen shows:
+
+- source input
+- detected parent `templates` dataset
+- derived child dataset name
+- target mountpoint
+- source type and whether the create step will copy or extract
+- execution output after creation
+
+Supported sources:
+
+- local directory
+- local archive
+- named entry from `/usr/local/jails/media`
+- release tag such as `15.0-RELEASE`
+- custom `https://...` URL
+
+The existing thin-jail `ctrl+t` selector still supports `c` to create a template dataset from the current `Template/Release` value, and it uses the same backend creation path as the dedicated screen.
 
 ### Destroy Confirmation
 
