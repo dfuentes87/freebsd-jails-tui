@@ -1154,7 +1154,7 @@ func (m model) renderHelpView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	footer := footerStyle.Width(m.width).Render("j/k or pgup/pgdown scroll | esc/enter: close help | q: quit")
+	footer := footerStyle.Width(m.width).Render("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit")
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
@@ -1162,7 +1162,8 @@ func (m model) helpLines(width int) []string {
 	lines := []string{
 		sectionStyle.Render("Global"),
 		truncate("?: open help page (h works outside text input)", width),
-		truncate("q: quit the application", width),
+		truncate("ctrl+c: quit the application", width),
+		truncate("q: quit outside text input", width),
 		"",
 		sectionStyle.Render("Initial Config Check"),
 		truncate("runs at startup before dashboard", width),
@@ -1377,30 +1378,30 @@ func (m model) renderWizardView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
+	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	if normalizedJailType(m.wizard.values.JailType) == "thin" {
-		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: thin template selector | enter/right: next | left: back | ?: help | esc: cancel | q: quit"
+		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: thin template selector | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	}
 	if m.wizard.isConfirmationStep() {
-		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit"
+		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.templateMode == wizardTemplateModeSave {
-		hint = "Template save: type name | enter: save | backspace: edit | esc: cancel"
+		hint = "Template save: type name | enter: save | backspace: edit | esc: cancel | ctrl+c: quit"
 	}
 	if m.wizard.templateMode == wizardTemplateModeLoad {
-		hint = "Template load: j/k select | enter: load | r: refresh list | esc: cancel"
+		hint = "Template load: j/k select | enter: load | r: refresh list | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.userlandMode {
-		hint = "Userland select: j/k choose | enter: apply | r: refresh options | esc: cancel"
+		hint = "Userland select: j/k choose | enter: apply | r: refresh options | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.thinDatasetMode {
-		hint = "Thin template select: j/k choose | enter: apply | c: create from Template/Release | r: refresh options | esc: cancel"
+		hint = "Thin template select: j/k choose | enter: apply | c: create from Template/Release | r: refresh options | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.datasetCreateRunning {
-		hint = "Creating template dataset... please wait | q: quit"
+		hint = "Creating template dataset... please wait | ctrl+c: quit"
 	}
 	if m.wizardApplying {
-		hint = "Applying changes... please wait | q: quit"
+		hint = "Applying changes... please wait | ctrl+c: quit"
 	}
 	if m.wizard.message != "" {
 		hint += " | " + m.wizard.message
@@ -1423,18 +1424,18 @@ func (m model) renderTemplateDatasetCreateView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "type source | enter: create | backspace: edit | r: refresh preview | ?: help | esc: back | q: quit"
+	hint := "type source | enter: create | backspace: edit | r: refresh preview | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.parentEdit {
-		hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | q: quit"
+		hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
 	}
 	if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
-		hint = "enter: create proposed parent | e: edit parent values | r: refresh preview | ?: help | esc: back | q: quit"
+		hint = "enter: create proposed parent | e: edit parent values | r: refresh preview | ?: help | esc: back | q: quit | ctrl+c: quit"
 	}
 	if m.templateCreate.parentApplying {
-		hint = "Creating template parent dataset... please wait | q: quit"
+		hint = "Creating template parent dataset... please wait | ctrl+c: quit"
 	}
 	if m.templateCreate.applying {
-		hint = "Creating template dataset... please wait | q: quit"
+		hint = "Creating template dataset... please wait | ctrl+c: quit"
 	}
 	if m.templateCreate.message != "" {
 		hint += " | " + m.templateCreate.message
@@ -1458,7 +1459,9 @@ func (m model) templateDatasetCreateLines(width int) []string {
 	lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(sourceLine))
 
 	if m.templateCreate.message != "" {
-		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.templateCreate.message, width)))
+		for _, line := range wrapText("Notice: "+m.templateCreate.message, width) {
+			lines = append(lines, styleWizardMessage(line))
+		}
 	}
 
 	lines = append(lines, "")
@@ -1515,7 +1518,9 @@ func (m model) templateDatasetCreateLines(width int) []string {
 	if preview.NeedsParentCreate {
 		lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent dataset or edit the values first.", width))
 	} else if preview.Err != nil {
-		lines = append(lines, wizardErrorStyle.Render(truncate("Error: "+preview.Err.Error(), width)))
+		for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
+			lines = append(lines, wizardErrorStyle.Render(line))
+		}
 	} else if strings.TrimSpace(m.templateCreate.sourceInput) == "" {
 		lines = append(lines, truncate("Enter a source above to preview the dataset name and mountpoint before creation.", width))
 	}
@@ -1538,7 +1543,9 @@ func (m model) wizardLines(width int) []string {
 		lines = append(lines, truncate(step.Description, width))
 	}
 	if m.wizard.message != "" {
-		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.wizard.message, width)))
+		for _, line := range wrapText("Notice: "+m.wizard.message, width) {
+			lines = append(lines, styleWizardMessage(line))
+		}
 	}
 	lines = append(lines, "")
 
@@ -2156,6 +2163,62 @@ func truncate(input string, maxLen int) string {
 		return input[:maxLen]
 	}
 	return input[:maxLen-3] + "..."
+}
+
+func wrapText(input string, maxLen int) []string {
+	if maxLen <= 0 {
+		return nil
+	}
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return []string{""}
+	}
+
+	words := strings.Fields(input)
+	if len(words) == 0 {
+		return []string{""}
+	}
+
+	lines := make([]string, 0, len(words))
+	current := ""
+	appendChunked := func(word string) {
+		for len(word) > maxLen {
+			lines = append(lines, word[:maxLen])
+			word = word[maxLen:]
+		}
+		current = word
+	}
+
+	for _, word := range words {
+		if current == "" {
+			if len(word) <= maxLen {
+				current = word
+			} else {
+				appendChunked(word)
+			}
+			continue
+		}
+
+		candidate := current + " " + word
+		if len(candidate) <= maxLen {
+			current = candidate
+			continue
+		}
+
+		lines = append(lines, current)
+		current = ""
+		if len(word) <= maxLen {
+			current = word
+		} else {
+			appendChunked(word)
+		}
+	}
+
+	if current != "" {
+		lines = append(lines, current)
+	}
+
+	return lines
 }
 
 func min(a, b int) int {
