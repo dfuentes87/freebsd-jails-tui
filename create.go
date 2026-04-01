@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,13 @@ type JailCreationResult struct {
 	JailPath   string
 	Logs       []string
 	Warnings   []string
+	Err        error
+}
+
+type TemplateDatasetResult struct {
+	Dataset    string
+	Mountpoint string
+	Logs       []string
 	Err        error
 }
 
@@ -504,6 +512,77 @@ func hostArch() string {
 	return arch
 }
 
+func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
+	result := TemplateDatasetResult{}
+	logs := make([]string, 0, 24)
+	fail := func(err error) TemplateDatasetResult {
+		result.Logs = logs
+		result.Err = err
+		return result
+	}
+
+	sourceInput = strings.TrimSpace(sourceInput)
+	if sourceInput == "" {
+		return fail(fmt.Errorf("template/release is required before a template dataset can be created"))
+	}
+
+	parent, err := discoverTemplateDatasetParent()
+	if err != nil {
+		return fail(err)
+	}
+	templateName := suggestTemplateDatasetName(sourceInput)
+	if templateName == "" {
+		return fail(fmt.Errorf("could not derive a template dataset name from %q", sourceInput))
+	}
+
+	sourcePath, cleanup, err := resolveTemplateSource(sourceInput, &logs)
+	if err != nil {
+		return fail(err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	childDataset := parent.Name + "/" + templateName
+	childMountpoint := filepath.Join(parent.Mountpoint, templateName)
+	result.Dataset = childDataset
+	result.Mountpoint = childMountpoint
+
+	if _, err := runLoggedCommand(&logs, "zfs", "list", "-H", "-o", "name", childDataset); err == nil {
+		return fail(fmt.Errorf("template dataset %q already exists", childDataset))
+	}
+
+	if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+childMountpoint, childDataset); err != nil {
+		return fail(fmt.Errorf("failed to create template dataset %q: %w", childDataset, err))
+	}
+
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", childDataset)
+	}()
+
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return fail(fmt.Errorf("template source %q is not accessible: %w", sourcePath, err))
+	}
+	if info.IsDir() {
+		if _, err := runLoggedCommand(&logs, "cp", "-a", sourcePath+"/.", childMountpoint+"/"); err != nil {
+			return fail(fmt.Errorf("failed to copy template source into %q: %w", childDataset, err))
+		}
+	} else {
+		if _, err := runLoggedCommand(&logs, "tar", "-xf", sourcePath, "-C", childMountpoint); err != nil {
+			return fail(fmt.Errorf("failed to extract template archive into %q: %w", childDataset, err))
+		}
+	}
+
+	success = true
+	result.Logs = logs
+	return result
+}
+
 func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
 	values := jailWizardValues{}
 	for _, raw := range lines {
@@ -542,6 +621,109 @@ func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
 		}
 	}
 	return values
+}
+
+type templateDatasetParent struct {
+	Name       string
+	Mountpoint string
+}
+
+func discoverTemplateDatasetParent() (*templateDatasetParent, error) {
+	out, err := exec.Command("zfs", "list", "-H", "-o", "name,mountpoint", "-t", "filesystem").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover templates dataset: %w", err)
+	}
+
+	var fallback *templateDatasetParent
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			fields = strings.Fields(line)
+		}
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(fields[0])
+		mountpoint := strings.TrimSpace(fields[1])
+		if name == "" || mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
+			continue
+		}
+		parent := &templateDatasetParent{Name: name, Mountpoint: mountpoint}
+		if name == docDatasetTemplate || filepath.Clean(mountpoint) == filepath.Join(docJailsPath, "templates") {
+			return parent, nil
+		}
+		if filepath.Base(name) == "templates" || filepath.Base(mountpoint) == "templates" {
+			if fallback == nil {
+				fallback = parent
+			}
+		}
+	}
+	if fallback != nil {
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("no templates dataset found; create one first in the initial config check or under your jail dataset layout")
+}
+
+func suggestTemplateDatasetName(sourceInput string) string {
+	input := strings.TrimSpace(sourceInput)
+	if input == "" {
+		return ""
+	}
+	upper := strings.ToUpper(input)
+	if releaseValuePattern.MatchString(upper) {
+		return sanitizeTemplateDatasetName(strings.ToLower(input))
+	}
+	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
+		if parsed, err := neturl.Parse(input); err == nil {
+			base := pathBaseNoExt(parsed.Path)
+			parent := pathBaseNoExt(filepath.Dir(parsed.Path))
+			if strings.EqualFold(base, "base") && releaseValuePattern.MatchString(strings.ToUpper(parent)) {
+				return sanitizeTemplateDatasetName(strings.ToLower(parent))
+			}
+			return sanitizeTemplateDatasetName(strings.ToLower(base))
+		}
+	}
+	if source, ok := findNamedUserlandSource(defaultUserlandDir, input); ok {
+		return suggestTemplateDatasetName(source)
+	}
+	base := filepath.Base(input)
+	parent := filepath.Base(filepath.Dir(input))
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	if strings.EqualFold(base, "base") && parent != "." && parent != string(filepath.Separator) {
+		base = parent
+	}
+	return sanitizeTemplateDatasetName(strings.ToLower(base))
+}
+
+func sanitizeTemplateDatasetName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range name {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.'
+		if valid {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteRune('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func pathBaseNoExt(raw string) string {
+	base := filepath.Base(strings.TrimSpace(raw))
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 func ensureJailConfigDoesNotExist(configPath string) error {

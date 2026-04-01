@@ -188,6 +188,7 @@ Type-specific notes:
 - `thin`
   - requires the template source to resolve to an exact ZFS dataset mountpoint
   - supports `ctrl+t` to browse extracted template datasets
+  - supports `c` in the thin template selector to create a new template dataset from the current `Template/Release` value
   - creates `@freebsd-jails-tui-base` on that template dataset if missing
   - clones the template dataset into the destination dataset
 - `vnet`

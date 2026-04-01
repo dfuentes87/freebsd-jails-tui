@@ -77,6 +77,10 @@ type linuxBootstrapApplyMsg struct {
 	result linuxBootstrapResult
 }
 
+type templateDatasetApplyMsg struct {
+	result TemplateDatasetResult
+}
+
 type zfsOpenMsg struct {
 	result zfsOpenResult
 }
@@ -182,6 +186,13 @@ func linuxBootstrapCmd(detail JailDetail) tea.Cmd {
 	return func() tea.Msg {
 		result := ExecuteLinuxBootstrapAction(detail)
 		return linuxBootstrapApplyMsg{result: result}
+	}
+}
+
+func templateDatasetCreateCmd(sourceInput string) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteTemplateDatasetCreate(sourceInput)
+		return templateDatasetApplyMsg{result: result}
 	}
 }
 
@@ -335,6 +346,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.detailLoading = true
 		return m, detailCmd(jail)
+	case templateDatasetApplyMsg:
+		m.wizard.datasetCreateRunning = false
+		if msg.result.Err != nil {
+			m.wizard.message = msg.result.Err.Error()
+			return m, nil
+		}
+		m.wizard.values.TemplateRelease = msg.result.Mountpoint
+		m.wizard.endThinDatasetSelect()
+		m.wizard.message = fmt.Sprintf("Template dataset created: %s", msg.result.Dataset)
+		return m, nil
 	case zfsOpenMsg:
 		if msg.result.Detail.ZFS == nil || strings.TrimSpace(msg.result.Detail.ZFS.Name) == "" {
 			if msg.result.Err != nil {
@@ -593,6 +614,9 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.wizard.thinDatasetMode {
 		switch msg.String() {
 		case "esc", "left":
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
 			m.wizard.endThinDatasetSelect()
 			m.wizard.message = "Thin template dataset selection canceled."
 			return m, nil
@@ -605,12 +629,30 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "G", "end":
 			m.wizard.thinDatasetCursor = len(m.wizard.thinDatasetOpts) - 1
 		case "r", "R":
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
 			if err := m.wizard.beginThinDatasetSelect(); err != nil {
 				m.wizard.message = err.Error()
 				return m, nil
 			}
 			return m, nil
+		case "c", "C":
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
+			sourceInput := strings.TrimSpace(m.wizard.values.TemplateRelease)
+			if sourceInput == "" {
+				m.wizard.message = "Enter Template/Release first, then press c to create a template dataset."
+				return m, nil
+			}
+			m.wizard.datasetCreateRunning = true
+			m.wizard.message = "Creating template dataset..."
+			return m, templateDatasetCreateCmd(sourceInput)
 		case "enter":
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
 			option, ok := m.wizard.selectedThinDatasetOption()
 			if !ok {
 				m.wizard.message = "No thin template dataset selected."
@@ -957,6 +999,7 @@ func (m model) helpLines(width int) []string {
 		truncate("s/l on the confirmation step: save/load templates", width),
 		truncate("ctrl+u: open userland selector", width),
 		truncate("ctrl+t: open thin template dataset selector", width),
+		truncate("thin selector c: create a template dataset from current Template/Release", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
 	}
@@ -1137,7 +1180,10 @@ func (m model) renderWizardView() string {
 		hint = "Userland select: j/k choose | enter: apply | r: refresh options | esc: cancel"
 	}
 	if m.wizard.thinDatasetMode {
-		hint = "Thin template select: j/k choose | enter: apply | r: refresh options | esc: cancel"
+		hint = "Thin template select: j/k choose | enter: apply | c: create from Template/Release | r: refresh options | esc: cancel"
+	}
+	if m.wizard.datasetCreateRunning {
+		hint = "Creating template dataset... please wait | q: quit"
 	}
 	if m.wizardApplying {
 		hint = "Applying changes... please wait | q: quit"
@@ -1229,6 +1275,8 @@ func (m model) wizardLines(width int) []string {
 		lines = append(lines, sectionStyle.Render("Select Thin Template Dataset"))
 		if len(m.wizard.thinDatasetOpts) == 0 {
 			lines = append(lines, "No thin template datasets found.")
+			lines = append(lines, "")
+			lines = append(lines, truncate("Press c to create a template dataset from the current Template/Release value.", width))
 			return lines
 		}
 		for idx, option := range m.wizard.thinDatasetOpts {
@@ -1246,6 +1294,7 @@ func (m model) wizardLines(width int) []string {
 			lines = append(lines, sectionStyle.Render("Selected Value"))
 			lines = append(lines, truncate(option.Value, width))
 			lines = append(lines, truncate("Thin jails require an extracted template dataset mountpoint, not a release tag or archive.", width))
+			lines = append(lines, truncate("Press c to create a new template dataset from the current Template/Release value.", width))
 		}
 		return lines
 	}
@@ -1313,7 +1362,6 @@ func (m model) wizardLines(width int) []string {
 		}
 		if field.ID == "template_release" {
 			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
-			lines = append(lines, truncate("  custom https URL is supported and will be downloaded", width))
 			if normalizedJailType(m.wizard.values.JailType) == "thin" {
 				lines = append(lines, truncate("  ctrl+t: select an extracted ZFS template dataset mountpoint", width))
 			}

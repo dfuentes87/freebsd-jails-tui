@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"hash/fnv"
+	"net/netip"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,22 +125,23 @@ type mountPointSpec struct {
 }
 
 type jailCreationWizard struct {
-	step              int
-	field             int
-	values            jailWizardValues
-	templateMode      wizardTemplateMode
-	templateInput     string
-	templates         []wizardTemplate
-	templateCursor    int
-	userlandMode      bool
-	userlandOpts      []userlandOption
-	userlandCursor    int
-	thinDatasetMode   bool
-	thinDatasetOpts   []templateDatasetOption
-	thinDatasetCursor int
-	message           string
-	executionLogs     []string
-	executionError    string
+	step                 int
+	field                int
+	values               jailWizardValues
+	templateMode         wizardTemplateMode
+	templateInput        string
+	templates            []wizardTemplate
+	templateCursor       int
+	userlandMode         bool
+	userlandOpts         []userlandOption
+	userlandCursor       int
+	thinDatasetMode      bool
+	thinDatasetOpts      []templateDatasetOption
+	thinDatasetCursor    int
+	datasetCreateRunning bool
+	message              string
+	executionLogs        []string
+	executionError       string
 }
 
 func newJailCreationWizard(defaultDestination string) jailCreationWizard {
@@ -278,14 +281,12 @@ func (w *jailCreationWizard) beginThinDatasetSelect() error {
 	if err != nil {
 		return err
 	}
-	if len(options) == 0 {
-		return fmt.Errorf("no thin-jail template datasets found")
-	}
 	w.templateMode = wizardTemplateModeNone
 	w.userlandMode = false
 	w.thinDatasetMode = true
 	w.thinDatasetOpts = options
 	w.thinDatasetCursor = 0
+	w.datasetCreateRunning = false
 	w.message = ""
 	return nil
 }
@@ -294,6 +295,7 @@ func (w *jailCreationWizard) endThinDatasetSelect() {
 	w.thinDatasetMode = false
 	w.thinDatasetOpts = nil
 	w.thinDatasetCursor = 0
+	w.datasetCreateRunning = false
 }
 
 func (w *jailCreationWizard) boundUserlandCursor() {
@@ -598,6 +600,9 @@ func (w jailCreationWizard) validateCurrentStep() error {
 	if strings.TrimSpace(w.values.TemplateRelease) == "" {
 		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
 	}
+	if err := validateTemplateReleaseInput(w.values); err != nil {
+		return err
+	}
 	if hasConflictingJailConfig(w.values.Name) {
 		return fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
 	}
@@ -614,12 +619,23 @@ func (w jailCreationWizard) validateCurrentStep() error {
 	if strings.TrimSpace(w.values.IP4) == "" {
 		return fmt.Errorf("IPv4 is required")
 	}
+	if err := validateJailIPValue(strings.TrimSpace(w.values.IP4), true, "IPv4", jailType != "vnet"); err != nil {
+		return err
+	}
+	if err := validateJailIPValue(strings.TrimSpace(w.values.IP6), false, "IPv6", jailType != "vnet"); err != nil {
+		return err
+	}
 	if jailType == "vnet" {
 		if strings.EqualFold(strings.TrimSpace(w.values.IP4), "inherit") {
 			return fmt.Errorf("vnet jails cannot use IPv4 inherit; switch jail type or enter an explicit IPv4 address")
 		}
 		if strings.EqualFold(strings.TrimSpace(w.values.IP6), "inherit") {
 			return fmt.Errorf("vnet jails cannot use IPv6 inherit; switch jail type or enter an explicit IPv6 address")
+		}
+	}
+	if value := strings.TrimSpace(w.values.DefaultRouter); value != "" {
+		if _, err := netip.ParseAddr(value); err != nil {
+			return fmt.Errorf("default router must be a valid IPv4 or IPv6 address")
 		}
 	}
 	if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
@@ -639,6 +655,9 @@ func (w jailCreationWizard) validateCurrentStep() error {
 			return fmt.Errorf("max processes must be a positive integer")
 		}
 	}
+	if err := validateMountPointInput(w.values.MountPoints); err != nil {
+		return err
+	}
 	if jailType == "linux" {
 		distro := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
 		switch distro {
@@ -651,6 +670,134 @@ func (w jailCreationWizard) validateCurrentStep() error {
 		case "auto", "skip":
 		default:
 			return fmt.Errorf("bootstrap mode must be auto or skip")
+		}
+	}
+	return nil
+}
+
+func validateTemplateReleaseInput(values jailWizardValues) error {
+	input := strings.TrimSpace(values.TemplateRelease)
+	if input == "" {
+		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
+	}
+
+	if info, err := os.Stat(input); err == nil {
+		if normalizedJailType(values.JailType) == "thin" {
+			if !info.IsDir() {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+			if _, err := exactZFSDatasetForPath(input); err != nil {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+		}
+		return nil
+	}
+
+	if source, ok := findNamedUserlandSource(defaultUserlandDir, input); ok {
+		if normalizedJailType(values.JailType) == "thin" {
+			info, err := os.Stat(source)
+			if err != nil || !info.IsDir() {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+			if _, err := exactZFSDatasetForPath(source); err != nil {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+		}
+		return nil
+	}
+
+	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
+		if _, err := neturl.ParseRequestURI(input); err != nil {
+			return fmt.Errorf("template/release URL is invalid")
+		}
+		if normalizedJailType(values.JailType) == "thin" {
+			return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+		}
+		return nil
+	}
+
+	if releaseValuePattern.MatchString(strings.ToUpper(input)) {
+		if normalizedJailType(values.JailType) == "thin" {
+			return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+		}
+		return nil
+	}
+
+	if strings.HasPrefix(input, "/") {
+		return fmt.Errorf("template/release path %q was not found", input)
+	}
+	return fmt.Errorf("template/release %q not found; use a local path, an entry from %s, a release tag, or a custom URL", input, defaultUserlandDir)
+}
+
+func validateJailIPValue(value string, ipv4 bool, fieldName string, allowInherit bool) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if strings.EqualFold(value, "inherit") {
+		if allowInherit {
+			return nil
+		}
+		return fmt.Errorf("%s inherit is only valid for non-vnet jails", fieldName)
+	}
+
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		if ipv4 && prefix.Addr().Is4() {
+			return nil
+		}
+		if !ipv4 && prefix.Addr().Is6() {
+			return nil
+		}
+		return fmt.Errorf("%s must match the correct IP family", fieldName)
+	}
+	if addr, err := netip.ParseAddr(value); err == nil {
+		if ipv4 && addr.Is4() {
+			return nil
+		}
+		if !ipv4 && addr.Is6() {
+			return nil
+		}
+		return fmt.Errorf("%s must match the correct IP family", fieldName)
+	}
+
+	if ipv4 {
+		return fmt.Errorf("%s must be a valid IPv4 address, IPv4 CIDR, or 'inherit'", fieldName)
+	}
+	return fmt.Errorf("%s must be a valid IPv6 address, IPv6 CIDR, or 'inherit'", fieldName)
+}
+
+func validateMountPointInput(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	splitter := strings.NewReplacer("\n", ",", ";", ",")
+	chunks := strings.Split(splitter.Replace(raw), ",")
+	for _, chunk := range chunks {
+		item := strings.TrimSpace(chunk)
+		if item == "" {
+			continue
+		}
+		source, target, hasSeparator := strings.Cut(item, ":")
+		if hasSeparator {
+			source = strings.TrimSpace(source)
+			if source == "" {
+				return fmt.Errorf("mount source is required before ':'")
+			}
+			if !strings.HasPrefix(source, "/") {
+				return fmt.Errorf("mount source %q must be an absolute path", source)
+			}
+			if _, err := os.Stat(source); err != nil {
+				return fmt.Errorf("mount source %q is not accessible", source)
+			}
+			target = normalizeMountTarget(target)
+			if target == "" {
+				return fmt.Errorf("mount target must not be /")
+			}
+			continue
+		}
+		target = normalizeMountTarget(item)
+		if target == "" {
+			return fmt.Errorf("mount target must not be /")
 		}
 	}
 	return nil
