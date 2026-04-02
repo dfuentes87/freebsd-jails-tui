@@ -533,6 +533,12 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.notice = ""
 		return m, nil
+	case "i", "I":
+		m.mode = screenInitialCheck
+		m.initCheck = newInitialCheckState()
+		m.notice = ""
+		m.err = nil
+		return m, collectInitialConfigCmd()
 	case "t", "T":
 		m.mode = screenTemplateDatasetCreate
 		m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard)
@@ -965,6 +971,15 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if !m.templateCreate.applying && !m.templateCreate.parentApplying && msg.Type == tea.KeyRunes {
+		if m.templateCreate.parentEdit {
+			m.templateCreate.appendParentField(string(msg.Runes))
+			return m, nil
+		}
+		m.templateCreate.appendSource(string(msg.Runes))
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc", "left":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
@@ -999,7 +1014,7 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "e", "E":
+	case "ctrl+e":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
 		}
@@ -1050,7 +1065,7 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.templateCreate.logs = nil
 		m.templateCreate.applying = true
 		return m, templateDatasetCreateCmd(m.templateCreate.sourceInput, m.templateCreate.parentOverride())
-	case "r", "R":
+	case "ctrl+r":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
 		}
@@ -1066,15 +1081,6 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.templateCreate.backspaceSource()
-		return m, nil
-	}
-
-	if !m.templateCreate.applying && !m.templateCreate.parentApplying && msg.Type == tea.KeyRunes {
-		if m.templateCreate.parentEdit {
-			m.templateCreate.appendParentField(string(msg.Runes))
-			return m, nil
-		}
-		m.templateCreate.appendSource(string(msg.Runes))
 		return m, nil
 	}
 
@@ -1174,6 +1180,7 @@ func (m model) helpLines(width int) []string {
 		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
 		truncate("enter or d: open jail detail view", width),
 		truncate("c: open jail creation wizard", width),
+		truncate("i: re-run initial config check", width),
 		truncate("t: open template dataset creation", width),
 		truncate("s: start or stop selected jail", width),
 		truncate("z: open ZFS panel for selected jail", width),
@@ -1214,8 +1221,8 @@ func (m model) helpLines(width int) []string {
 		sectionStyle.Render("Template Dataset Create"),
 		truncate("type a source path, release tag, userland entry, or custom URL", width),
 		truncate("enter: create the previewed template dataset", width),
-		truncate("when parent templates dataset is missing: enter creates proposed parent, e edits parent values", width),
-		truncate("r: refresh preview", width),
+		truncate("when parent templates dataset is missing: enter creates proposed parent, ctrl+e edits parent values", width),
+		truncate("ctrl+r: refresh preview", width),
 		truncate("esc: return to dashboard", width),
 	}
 	return lines
@@ -1424,12 +1431,12 @@ func (m model) renderTemplateDatasetCreateView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "type source | enter: create | backspace: edit | r: refresh preview | ?: help | esc: back | ctrl+c: quit"
+	hint := "type source | enter: create | backspace: edit | ctrl+r: refresh preview | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.parentEdit {
 		hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
 	}
 	if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
-		hint = "enter: create proposed parent | e: edit parent values | r: refresh preview | ?: help | esc: back | q: quit | ctrl+c: quit"
+		hint = "type source | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | ?: help | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.parentApplying {
 		hint = "Creating template parent dataset... please wait | ctrl+c: quit"
@@ -1978,7 +1985,7 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | t: template dataset | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
+	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | i: initial config | t: template dataset | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
 	if m.notice != "" {
 		hint += " | " + m.notice
 	}
@@ -2070,6 +2077,7 @@ func (m model) renderDetailPanel(width, height int) string {
 			fmt.Sprintf("%s %s", detailKeyStyle.Render("JID:"), jidText),
 			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
 			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
+			"i: re-run initial config check.",
 			"t: create a reusable template dataset.",
 			"s: start/stop selected jail.",
 			"z: open ZFS panel for selected jail.",

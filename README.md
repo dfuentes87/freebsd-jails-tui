@@ -77,6 +77,7 @@ Data shown includes:
 Key actions from the dashboard include:
 
 - `c` to open the jail creation wizard
+- `i` to re-run the initial configuration check
 - `t` to open template dataset creation
 - `s` to start or stop the selected jail
 - `z` to open the selected jail's ZFS panel
@@ -104,6 +105,8 @@ It can optionally:
 - accept custom paths and custom dataset names
 
 After a successful first completion, the startup check is skipped on later runs.
+
+The dashboard also provides `i` to re-run the initial configuration check manually.
 
 Persistent state is stored in the user config directory:
 
@@ -233,6 +236,11 @@ If the parent `templates` dataset does not exist, the screen can:
 - propose a parent dataset and mountpoint derived from the current jail layout
 - create that parent dataset first
 - let you edit the parent dataset and mountpoint manually before creation
+
+Template dataset screen shortcuts:
+
+- `ctrl+r` refreshes the preview
+- `ctrl+e` switches into parent dataset edit mode when the parent is missing
 
 Supported sources:
 
