@@ -1477,27 +1477,35 @@ func (m model) templateDatasetCreateLines(width int) []string {
 		parentMountpoint = filepath.Clean(m.templateCreate.parentMountpoint)
 	}
 
-	if parentDataset != "" {
-		label := "Parent dataset"
+	showParentFields := preview.NeedsParentCreate || m.templateCreate.parentEdit || parentDataset != "" || parentMountpoint != ""
+	if showParentFields {
+		datasetLabel := "Parent dataset"
+		mountLabel := "Parent mountpoint"
 		if preview.NeedsParentCreate {
-			label = "Proposed parent dataset"
+			datasetLabel = "Proposed parent dataset"
+			mountLabel = "Proposed parent mountpoint"
 		}
+
+		datasetDisplay := parentDataset
+		if strings.TrimSpace(datasetDisplay) == "" {
+			datasetDisplay = "(enter dataset name)"
+		}
+		mountDisplay := parentMountpoint
+		if strings.TrimSpace(mountDisplay) == "" {
+			mountDisplay = "(enter absolute mountpoint)"
+		}
+
+		datasetLine := truncate(datasetLabel+": "+datasetDisplay, width)
 		if m.templateCreate.parentEdit && m.templateCreate.parentField == 0 {
-			lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> "+label+": "+parentDataset, width)))
-		} else {
-			lines = append(lines, truncate(label+": "+parentDataset, width))
+			datasetLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+datasetLabel+": "+datasetDisplay, width))
 		}
-	}
-	if parentMountpoint != "" {
-		label := "Parent mountpoint"
-		if preview.NeedsParentCreate {
-			label = "Proposed parent mountpoint"
-		}
+		lines = append(lines, datasetLine)
+
+		mountLine := truncate(mountLabel+": "+mountDisplay, width)
 		if m.templateCreate.parentEdit && m.templateCreate.parentField == 1 {
-			lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> "+label+": "+parentMountpoint, width)))
-		} else {
-			lines = append(lines, truncate(label+": "+parentMountpoint, width))
+			mountLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+mountLabel+": "+mountDisplay, width))
 		}
+		lines = append(lines, mountLine)
 	}
 	if preview.Dataset != "" {
 		lines = append(lines, truncate("Derived dataset: "+preview.Dataset, width))
