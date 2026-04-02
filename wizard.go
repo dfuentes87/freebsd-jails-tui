@@ -1023,8 +1023,12 @@ func parseMountPointSpecs(raw string) []mountPointSpec {
 }
 
 func normalizeMountTarget(target string) string {
-	target = "/" + strings.Trim(strings.TrimSpace(target), "/")
-	if target == "/" {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	target = filepath.Clean("/" + strings.TrimPrefix(target, "/"))
+	if target == "." || target == "/" {
 		return ""
 	}
 	return target
