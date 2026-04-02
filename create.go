@@ -648,7 +648,7 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 	result.Dataset = childDataset
 	result.Mountpoint = childMountpoint
 
-	if _, err := runLoggedCommand(&logs, "zfs", "list", "-H", "-o", "name", childDataset); err == nil {
+	if zfsDatasetExists(childDataset) {
 		return fail(fmt.Errorf("template dataset %q already exists", childDataset))
 	}
 
@@ -1286,4 +1286,12 @@ func runLoggedCommand(logs *[]string, name string, args ...string) (string, erro
 		return text, fmt.Errorf("%s: %w", command, err)
 	}
 	return text, nil
+}
+
+func zfsDatasetExists(dataset string) bool {
+	dataset = strings.TrimSpace(dataset)
+	if dataset == "" {
+		return false
+	}
+	return exec.Command("zfs", "list", "-H", "-o", "name", dataset).Run() == nil
 }
