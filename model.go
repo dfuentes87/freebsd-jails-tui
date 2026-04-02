@@ -2070,7 +2070,7 @@ func (m model) renderDetailPanel(width, height int) string {
 			fmt.Sprintf("%s %s", detailKeyStyle.Render("JID:"), jidText),
 			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
 			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
-			"i: re-run initial config check.",
+			"",
 			"t: create a reusable template dataset.",
 			"s: start/stop selected jail.",
 			"z: open ZFS panel for selected jail.",
