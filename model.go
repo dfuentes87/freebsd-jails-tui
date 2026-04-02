@@ -1587,20 +1587,20 @@ func (m model) renderJailDetailView() string {
 		hint += " | b: retry linux bootstrap"
 	}
 	hint += " | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
-	if m.detailLoading {
-		hint += " | loading detail..."
-	}
+	message := ""
 	footerRenderer := footerStyle
 	if m.detailErr != nil {
-		hint += " | warning: " + m.detailErr.Error()
+		message = "warning: " + m.detailErr.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	} else if m.detailNotice != "" {
-		hint += " | " + m.detailNotice
+		message = m.detailNotice
 		if looksLikeWarningText(m.detailNotice) {
 			footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 		}
+	} else if m.detailLoading {
+		message = "loading detail..."
 	}
-	footer := footerRenderer.Width(m.width).Render(hint)
+	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -1644,10 +1644,7 @@ func (m model) renderWizardView() string {
 	if m.wizardApplying {
 		hint = "Applying changes... please wait | ctrl+c: quit"
 	}
-	if m.wizard.message != "" {
-		hint += " | " + m.wizard.message
-	}
-	footer := footerStyle.Width(m.width).Render(hint)
+	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -1724,10 +1721,7 @@ func (m model) renderTemplateDatasetCreateView() string {
 			hint = "Creating template dataset... please wait | ctrl+c: quit"
 		}
 	}
-	if m.templateCreate.message != "" {
-		hint += " | " + m.templateCreate.message
-	}
-	footer := footerStyle.Width(m.width).Render(hint)
+	footer := m.renderFooterWithMessage(hint, m.templateCreate.message, footerStyle)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -2446,15 +2440,29 @@ func (m model) renderHeader() string {
 
 func (m model) renderFooter() string {
 	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | i: initial config | t: template manager | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
-	if m.notice != "" {
-		hint += " | " + m.notice
-	}
 	footerRenderer := footerStyle
+	message := m.notice
 	if m.err != nil {
-		hint += " | warning: " + m.err.Error()
+		message = "warning: " + m.err.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
-	return footerRenderer.Width(m.width).Render(hint)
+	return m.renderFooterWithMessage(hint, message, footerRenderer)
+}
+
+func (m model) renderFooterWithMessage(hint, message string, footerRenderer lipgloss.Style) string {
+	lines := make([]string, 0, 4)
+	width := max(1, m.width)
+
+	message = strings.TrimSpace(message)
+	if message != "" {
+		prefixed := ">> " + message
+		for _, line := range wrapText(prefixed, max(8, width-2)) {
+			lines = append(lines, styleWizardMessage(line))
+		}
+	}
+
+	lines = append(lines, footerRenderer.Width(width).Render(hint))
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderJailList(width, height int) string {

@@ -295,17 +295,15 @@ func (m model) renderZFSPanelView() string {
 	if m.zfsPanel.actionRunning {
 		hint = "Executing ZFS action... please wait | q: quit"
 	}
-	if m.zfsPanel.message != "" {
-		hint += " | " + m.zfsPanel.message
-	}
 	footerRenderer := footerStyle
+	message := m.zfsPanel.message
 	if m.zfsPanel.err != nil {
-		hint += " | error: " + m.zfsPanel.err.Error()
+		message = "error: " + m.zfsPanel.err.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	} else if looksLikeWarningText(m.zfsPanel.message) {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
-	footer := footerRenderer.Width(m.width).Render(hint)
+	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
