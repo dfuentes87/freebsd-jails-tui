@@ -282,6 +282,16 @@ func buildDestroyPreview(target Jail) []string {
 	return lines
 }
 
+func newDestroyState(target Jail, returnMode screenMode) destroyState {
+	target = buildDestroyTarget(target)
+	return destroyState{
+		returnMode: returnMode,
+		target:     target,
+		preview:    buildDestroyPreview(target),
+		message:    "Press enter to destroy this jail, or esc to cancel.",
+	}
+}
+
 func jailJIDText(target Jail) string {
 	if target.JID <= 0 {
 		return ""

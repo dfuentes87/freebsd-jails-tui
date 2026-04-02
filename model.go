@@ -108,6 +108,7 @@ const (
 type destroyState struct {
 	returnMode screenMode
 	target     Jail
+	preview    []string
 	applying   bool
 	logs       []string
 	err        error
@@ -568,11 +569,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		m.destroy = destroyState{
-			returnMode: screenDashboard,
-			target:     buildDestroyTarget(jail),
-			message:    "Press enter to destroy this jail, or esc to cancel.",
-		}
+		m.destroy = newDestroyState(jail, screenDashboard)
 		m.mode = screenDestroyConfirm
 		return m, nil
 	case "enter", "d", "right":
@@ -653,11 +650,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		m.destroy = destroyState{
-			returnMode: screenJailDetail,
-			target:     buildDestroyTarget(jail),
-			message:    "Press enter to destroy this jail, or esc to cancel.",
-		}
+		m.destroy = newDestroyState(jail, screenJailDetail)
 		m.mode = screenDestroyConfirm
 		return m, nil
 	}
@@ -1235,7 +1228,7 @@ func (m model) renderDestroyView() string {
 
 	bodyWidth := max(12, m.width-2)
 	lines := []string{"", sectionStyle.Render("Confirmation")}
-	for _, line := range buildDestroyPreview(m.destroy.target) {
+	for _, line := range m.destroy.preview {
 		lines = append(lines, truncate(line, bodyWidth))
 	}
 	if m.destroy.message != "" {
