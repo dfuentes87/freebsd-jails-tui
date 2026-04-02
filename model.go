@@ -1596,6 +1596,9 @@ func (m model) renderJailDetailView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	} else if m.detailNotice != "" {
 		hint += " | " + m.detailNotice
+		if looksLikeWarningText(m.detailNotice) {
+			footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+		}
 	}
 	footer := footerRenderer.Width(m.width).Render(hint)
 
@@ -2598,15 +2601,25 @@ func styleWizardMessage(message string) string {
 	if strings.Contains(lower, "applying creation plan") || strings.Contains(lower, "creating template dataset") || strings.Contains(lower, "creating template parent dataset") {
 		return wizardActionStyle.Render(message)
 	}
-	if strings.Contains(lower, "failed") ||
+	if looksLikeWarningText(message) {
+		return wizardErrorStyle.Render(message)
+	}
+	return summaryStyle.Render(message)
+}
+
+func looksLikeWarningText(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "warning") ||
+		strings.Contains(lower, "failed") ||
 		strings.Contains(lower, "required") ||
 		strings.Contains(lower, "invalid") ||
 		strings.Contains(lower, "must") ||
 		strings.Contains(lower, "already exists") ||
-		strings.Contains(lower, "error") {
-		return wizardErrorStyle.Render(message)
-	}
-	return summaryStyle.Render(message)
+		strings.Contains(lower, "error") ||
+		strings.Contains(lower, "unable") ||
+		strings.Contains(lower, "refusing") ||
+		strings.Contains(lower, "blocked") ||
+		strings.Contains(lower, "cannot")
 }
 
 func valueOrDash(value string) string {

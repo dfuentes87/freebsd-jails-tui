@@ -298,10 +298,14 @@ func (m model) renderZFSPanelView() string {
 	if m.zfsPanel.message != "" {
 		hint += " | " + m.zfsPanel.message
 	}
+	footerRenderer := footerStyle
 	if m.zfsPanel.err != nil {
 		hint += " | error: " + m.zfsPanel.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	} else if looksLikeWarningText(m.zfsPanel.message) {
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
-	footer := footerStyle.Width(m.width).Render(hint)
+	footer := footerRenderer.Width(m.width).Render(hint)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }

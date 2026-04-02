@@ -844,7 +844,7 @@ func (m model) initialCheckLines(width int) []string {
 		appendLine("")
 		lines = append(lines, sectionStyle.Render("Check warnings"))
 		for _, err := range m.initCheck.status.Errors {
-			appendLine("  - " + err)
+			lines = append(lines, wizardErrorStyle.Render(truncate("  - "+err, width)))
 		}
 	}
 
