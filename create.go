@@ -234,7 +234,7 @@ func ensureDestinationJailPath(destination string, logs *[]string) (string, func
 
 	// Backward compatibility: treat non-absolute values as ZFS dataset names.
 	createdDataset := false
-	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "name", destination); err != nil {
+	if !zfsDatasetExists(destination) {
 		if _, createErr := runLoggedCommand(logs, "zfs", "create", "-p", destination); createErr != nil {
 			return "", nil, fmt.Errorf("failed to ensure dataset %q: %w", destination, createErr)
 		}
@@ -364,14 +364,14 @@ func provisionThinJailRoot(values jailWizardValues, jailPath string, logs *[]str
 	}
 
 	snapshot := sourceDataset.Name + "@freebsd-jails-tui-base"
-	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-t", "snapshot", "-o", "name", snapshot); err != nil {
+	if !zfsSnapshotExists(snapshot) {
 		if _, snapshotErr := runLoggedCommand(logs, "zfs", "snapshot", snapshot); snapshotErr != nil {
 			return nil, fmt.Errorf("failed to create thin jail template snapshot %q: %w", snapshot, snapshotErr)
 		}
 	}
 
 	cloneDataset := parentDataset.Name + "/" + filepath.Base(jailPath)
-	if _, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "name", cloneDataset); err == nil {
+	if zfsDatasetExists(cloneDataset) {
 		return nil, fmt.Errorf("thin jail dataset %q already exists", cloneDataset)
 	}
 	if _, err := runLoggedCommand(logs, "zfs", "clone", snapshot, cloneDataset); err != nil {
@@ -475,7 +475,7 @@ func bootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]st
 	target := filepath.ToSlash(filepath.Join("/compat", distro))
 	mirror := linuxMirrorURL(values)
 
-	if _, err := runLoggedCommand(logs, "jexec", jailName, "test", "-x", filepath.ToSlash(filepath.Join(target, "bin", "sh"))); err == nil {
+	if jailExecutableExists(jailName, filepath.ToSlash(filepath.Join(target, "bin", "sh"))) {
 		*logs = append(*logs, "Linux userland already present under "+target+"; skipping debootstrap.")
 		return nil
 	}
@@ -1294,4 +1294,21 @@ func zfsDatasetExists(dataset string) bool {
 		return false
 	}
 	return exec.Command("zfs", "list", "-H", "-o", "name", dataset).Run() == nil
+}
+
+func zfsSnapshotExists(snapshot string) bool {
+	snapshot = strings.TrimSpace(snapshot)
+	if snapshot == "" {
+		return false
+	}
+	return exec.Command("zfs", "list", "-H", "-t", "snapshot", "-o", "name", snapshot).Run() == nil
+}
+
+func jailExecutableExists(jailName, path string) bool {
+	jailName = strings.TrimSpace(jailName)
+	path = strings.TrimSpace(path)
+	if jailName == "" || path == "" {
+		return false
+	}
+	return exec.Command("jexec", jailName, "test", "-x", path).Run() == nil
 }
