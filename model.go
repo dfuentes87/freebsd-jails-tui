@@ -82,6 +82,20 @@ type templateDatasetApplyMsg struct {
 	result TemplateDatasetResult
 }
 
+type templateManagerRefreshMsg struct {
+	items  []TemplateDatasetInfo
+	parent *templateDatasetParent
+	err    error
+}
+
+type templateDatasetRenameApplyMsg struct {
+	result TemplateDatasetRenameResult
+}
+
+type templateDatasetDestroyApplyMsg struct {
+	result TemplateDatasetDestroyResult
+}
+
 type templateParentApplyMsg struct {
 	result TemplateParentDatasetResult
 }
@@ -115,10 +129,28 @@ type destroyState struct {
 	message    string
 }
 
+type templateManagerMode int
+
+const (
+	templateManagerModeBrowse templateManagerMode = iota
+	templateManagerModeCreate
+	templateManagerModeRename
+	templateManagerModeDestroy
+)
+
 type templateDatasetCreateState struct {
 	returnMode       screenMode
+	selectMode       bool
+	mode             templateManagerMode
+	items            []TemplateDatasetInfo
+	cursor           int
+	parent           *templateDatasetParent
+	loading          bool
 	sourceInput      string
 	preview          TemplateDatasetPreview
+	renameInput      string
+	renamePreview    TemplateDatasetRenamePreview
+	destroyPreview   TemplateDatasetDestroyPreview
 	applying         bool
 	parentApplying   bool
 	logs             []string
@@ -167,7 +199,7 @@ func newModel() model {
 		initCheck: newInitialCheckState(),
 	}
 	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
-	m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard)
+	m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard, false)
 	return m
 }
 
@@ -217,6 +249,27 @@ func templateDatasetCreateCmd(sourceInput string, parentOverride *templateDatase
 	return func() tea.Msg {
 		result := ExecuteTemplateDatasetCreateWithParent(sourceInput, parentOverride)
 		return templateDatasetApplyMsg{result: result}
+	}
+}
+
+func templateManagerRefreshCmd(parentOverride *templateDatasetParent) tea.Cmd {
+	return func() tea.Msg {
+		items, parent, err := ListTemplateDatasets(parentOverride)
+		return templateManagerRefreshMsg{items: items, parent: parent, err: err}
+	}
+}
+
+func templateDatasetRenameCmd(dataset, newName string, parentOverride *templateDatasetParent) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteTemplateDatasetRename(dataset, newName, parentOverride)
+		return templateDatasetRenameApplyMsg{result: result}
+	}
+}
+
+func templateDatasetDestroyCmd(dataset string, parentOverride *templateDatasetParent) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteTemplateDatasetDestroy(dataset, parentOverride)
+		return templateDatasetDestroyApplyMsg{result: result}
 	}
 }
 
@@ -385,17 +438,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.templateCreate.message = msg.result.Err.Error()
 				return m, nil
 			}
-			if m.templateCreate.returnMode == screenCreateWizard {
+			m.templateCreate.message = fmt.Sprintf("Template dataset created: %s", msg.result.Dataset)
+			if m.templateCreate.selectMode && m.templateCreate.returnMode == screenCreateWizard {
 				m.wizard.datasetCreateRunning = false
 				m.wizard.values.TemplateRelease = msg.result.Mountpoint
-				m.wizard.endThinDatasetSelect()
 				m.wizard.executionLogs = append([]string(nil), msg.result.Logs...)
 				m.wizard.message = fmt.Sprintf("Template dataset created: %s", msg.result.Dataset)
 				m.mode = screenCreateWizard
 				return m, nil
 			}
-			m.templateCreate.message = fmt.Sprintf("Template dataset created: %s", msg.result.Dataset)
-			return m, nil
+			m.templateCreate.mode = templateManagerModeBrowse
+			m.templateCreate.renameInput = ""
+			return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
 		}
 		m.wizard.datasetCreateRunning = false
 		m.wizard.executionLogs = append([]string(nil), msg.result.Logs...)
@@ -423,7 +477,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateCreate.parentEdit = false
 		m.templateCreate.refreshPreview()
 		m.templateCreate.message = "Template parent dataset created. Press enter to create the template dataset."
+		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case templateManagerRefreshMsg:
+		if m.mode != screenTemplateDatasetCreate {
+			return m, nil
+		}
+		m.templateCreate.loading = false
+		m.templateCreate.items = append([]TemplateDatasetInfo(nil), msg.items...)
+		m.templateCreate.parent = msg.parent
+		m.templateCreate.boundCursor()
+		m.templateCreate.syncSelection()
+		if msg.err != nil {
+			m.templateCreate.message = msg.err.Error()
+			return m, nil
+		}
+		if m.templateCreate.message == "" && len(m.templateCreate.items) == 0 {
+			m.templateCreate.message = "No template datasets found."
+		}
 		return m, nil
+	case templateDatasetRenameApplyMsg:
+		if m.mode != screenTemplateDatasetCreate {
+			return m, nil
+		}
+		m.templateCreate.applying = false
+		m.templateCreate.logs = append([]string(nil), msg.result.Logs...)
+		if msg.result.Err != nil {
+			m.templateCreate.message = msg.result.Err.Error()
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeBrowse
+		m.templateCreate.renameInput = ""
+		m.templateCreate.message = fmt.Sprintf("Template dataset renamed to %s", msg.result.Dataset)
+		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case templateDatasetDestroyApplyMsg:
+		if m.mode != screenTemplateDatasetCreate {
+			return m, nil
+		}
+		m.templateCreate.applying = false
+		m.templateCreate.logs = append([]string(nil), msg.result.Logs...)
+		if msg.result.Err != nil {
+			m.templateCreate.message = msg.result.Err.Error()
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeBrowse
+		m.templateCreate.message = fmt.Sprintf("Template dataset destroyed: %s", msg.result.Dataset)
+		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
 	case zfsOpenMsg:
 		if msg.result.Detail.ZFS == nil || strings.TrimSpace(msg.result.Detail.ZFS.Name) == "" {
 			if msg.result.Err != nil {
@@ -505,7 +603,13 @@ func (m model) isTextEntryMode() bool {
 		}
 		return !m.wizard.isConfirmationStep()
 	case screenTemplateDatasetCreate:
-		return !m.templateCreate.applying && !m.templateCreate.parentApplying
+		if m.templateCreate.applying || m.templateCreate.parentApplying {
+			return false
+		}
+		if m.templateCreate.parentEdit {
+			return true
+		}
+		return m.templateCreate.mode == templateManagerModeCreate || m.templateCreate.mode == templateManagerModeRename
 	case screenZFSPanel:
 		return m.zfsPanel.inputMode
 	default:
@@ -542,10 +646,11 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, collectInitialConfigCmd()
 	case "t", "T":
 		m.mode = screenTemplateDatasetCreate
-		m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard)
+		m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard, false)
+		m.templateCreate.loading = true
 		m.notice = ""
 		m.err = nil
-		return m, nil
+		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
 	case "s", "S":
 		jail, ok := m.selectedJail()
 		if !ok {
@@ -723,10 +828,12 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.wizard.message = "Enter Template/Release first, then press c to create a template dataset."
 				return m, nil
 			}
-			m.templateCreate = newTemplateDatasetCreateState(sourceInput, m.initCheck.status, screenCreateWizard)
+			m.templateCreate = newTemplateDatasetCreateState(sourceInput, m.initCheck.status, screenCreateWizard, true)
+			m.templateCreate.mode = templateManagerModeCreate
 			m.templateCreate.message = "Review the template dataset preview, then press enter to create it."
 			m.mode = screenTemplateDatasetCreate
-			return m, nil
+			m.templateCreate.loading = true
+			return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
 		case "enter":
 			if m.wizard.datasetCreateRunning {
 				return m, nil
@@ -921,11 +1028,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.message = "Thin template dataset selector is only used for thin jails."
 			return m, nil
 		}
-		if err := m.wizard.beginThinDatasetSelect(); err != nil {
-			m.wizard.message = err.Error()
-			return m, nil
-		}
-		return m, nil
+		m.templateCreate = newTemplateDatasetCreateState(strings.TrimSpace(m.wizard.values.TemplateRelease), m.initCheck.status, screenCreateWizard, true)
+		m.mode = screenTemplateDatasetCreate
+		m.templateCreate.loading = true
+		m.templateCreate.message = "Select a template dataset or press c to create one."
+		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
 	case "enter":
 		if m.wizard.isConfirmationStep() {
 			if m.wizardApplying {
@@ -969,8 +1076,14 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.appendParentField(string(msg.Runes))
 			return m, nil
 		}
-		m.templateCreate.appendSource(string(msg.Runes))
-		return m, nil
+		switch m.templateCreate.mode {
+		case templateManagerModeCreate:
+			m.templateCreate.appendSource(string(msg.Runes))
+			return m, nil
+		case templateManagerModeRename:
+			m.templateCreate.appendRenameInput(string(msg.Runes))
+			return m, nil
+		}
 	}
 
 	switch msg.String() {
@@ -983,15 +1096,25 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Template parent edit canceled."
 			return m, nil
 		}
+		if m.templateCreate.mode != templateManagerModeBrowse {
+			m.templateCreate.mode = templateManagerModeBrowse
+			m.templateCreate.message = "Template manager action canceled."
+			return m, nil
+		}
 		m.mode = m.templateCreate.returnMode
 		if m.templateCreate.returnMode == screenDashboard {
-			m.notice = "Template dataset creation canceled."
+			m.notice = "Template manager closed."
 		} else {
 			m.wizard.datasetCreateRunning = false
-			m.wizard.message = "Template dataset creation canceled."
+			m.wizard.message = "Template selection canceled."
 		}
 		return m, nil
 	case "tab", "down":
+		if m.templateCreate.mode == templateManagerModeBrowse {
+			m.templateCreate.cursor++
+			m.templateCreate.boundCursor()
+			return m, nil
+		}
 		if m.templateCreate.parentEdit {
 			m.templateCreate.parentField++
 			if m.templateCreate.parentField > 1 {
@@ -1000,6 +1123,11 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "shift+tab", "up":
+		if m.templateCreate.mode == templateManagerModeBrowse {
+			m.templateCreate.cursor--
+			m.templateCreate.boundCursor()
+			return m, nil
+		}
 		if m.templateCreate.parentEdit {
 			m.templateCreate.parentField--
 			if m.templateCreate.parentField < 0 {
@@ -1007,8 +1135,70 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "ctrl+e":
+	case "g", "home":
+		if m.templateCreate.mode == templateManagerModeBrowse {
+			m.templateCreate.cursor = 0
+			m.templateCreate.boundCursor()
+		}
+		return m, nil
+	case "G", "end":
+		if m.templateCreate.mode == templateManagerModeBrowse {
+			m.templateCreate.cursor = len(m.templateCreate.items) - 1
+			m.templateCreate.boundCursor()
+		}
+		return m, nil
+	case "c", "C":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeBrowse {
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeCreate
+		m.templateCreate.logs = nil
+		if strings.TrimSpace(m.templateCreate.sourceInput) == "" {
+			if m.templateCreate.selectMode {
+				m.templateCreate.sourceInput = strings.TrimSpace(m.wizard.values.TemplateRelease)
+			}
+		}
+		m.templateCreate.refreshPreview()
+		m.templateCreate.message = "Review the template dataset preview, then press enter to create it."
+		return m, nil
+	case "r":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
+			return m, nil
+		}
+		if m.templateCreate.mode == templateManagerModeBrowse {
+			item, ok := m.templateCreate.selectedItem()
+			if !ok {
+				m.templateCreate.message = "No template dataset selected."
+				return m, nil
+			}
+			m.templateCreate.mode = templateManagerModeRename
+			m.templateCreate.renameInput = filepath.Base(item.Name)
+			m.templateCreate.logs = nil
+			m.templateCreate.refreshRenamePreview()
+			m.templateCreate.message = "Edit the template name, then press enter to rename it."
+			return m, nil
+		}
+		return m, nil
+	case "x", "X":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeBrowse {
+			return m, nil
+		}
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			m.templateCreate.message = "No template dataset selected."
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeDestroy
+		m.templateCreate.logs = nil
+		m.templateCreate.destroyPreview = InspectTemplateDatasetDestroy(item.Name, m.templateCreate.parentOverride())
+		if m.templateCreate.destroyPreview.Err != nil {
+			m.templateCreate.message = m.templateCreate.destroyPreview.Err.Error()
+		} else {
+			m.templateCreate.message = "Press enter to destroy this template dataset."
+		}
+		return m, nil
+	case "ctrl+e":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeCreate {
 			return m, nil
 		}
 		m.templateCreate.parentEdit = true
@@ -1030,7 +1220,23 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
 		}
-		if m.templateCreate.parentEdit || m.templateCreate.preview.NeedsParentCreate {
+		if m.templateCreate.mode == templateManagerModeBrowse {
+			if !m.templateCreate.selectMode {
+				m.templateCreate.message = "Template details are shown on the right panel."
+				return m, nil
+			}
+			item, ok := m.templateCreate.selectedItem()
+			if !ok {
+				m.templateCreate.message = "No template dataset selected."
+				return m, nil
+			}
+			m.wizard.datasetCreateRunning = false
+			m.wizard.values.TemplateRelease = item.Mountpoint
+			m.wizard.message = fmt.Sprintf("Selected thin template dataset: %s", item.Name)
+			m.mode = screenCreateWizard
+			return m, nil
+		}
+		if m.templateCreate.mode == templateManagerModeCreate && (m.templateCreate.parentEdit || m.templateCreate.preview.NeedsParentCreate) {
 			dataset := strings.TrimSpace(m.templateCreate.parentDataset)
 			mountpoint := strings.TrimSpace(m.templateCreate.parentMountpoint)
 			if dataset == "" {
@@ -1046,25 +1252,52 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.logs = nil
 			return m, templateParentCreateCmd(dataset, mountpoint)
 		}
-		if strings.TrimSpace(m.templateCreate.sourceInput) == "" {
-			m.templateCreate.message = "template/release is required"
-			return m, nil
+		if m.templateCreate.mode == templateManagerModeCreate {
+			if strings.TrimSpace(m.templateCreate.sourceInput) == "" {
+				m.templateCreate.message = "template/release is required"
+				return m, nil
+			}
+			if m.templateCreate.preview.Err != nil {
+				m.templateCreate.message = m.templateCreate.preview.Err.Error()
+				return m, nil
+			}
+			m.templateCreate.message = "Creating template dataset..."
+			m.templateCreate.logs = nil
+			m.templateCreate.applying = true
+			return m, templateDatasetCreateCmd(m.templateCreate.sourceInput, m.templateCreate.parentOverride())
 		}
-		if m.templateCreate.preview.Err != nil {
-			m.templateCreate.message = m.templateCreate.preview.Err.Error()
-			return m, nil
+		if m.templateCreate.mode == templateManagerModeRename {
+			if m.templateCreate.renamePreview.Err != nil {
+				m.templateCreate.message = m.templateCreate.renamePreview.Err.Error()
+				return m, nil
+			}
+			m.templateCreate.message = "Renaming template dataset..."
+			m.templateCreate.logs = nil
+			m.templateCreate.applying = true
+			return m, templateDatasetRenameCmd(m.templateCreate.renamePreview.Current.Name, m.templateCreate.renameInput, m.templateCreate.parentOverride())
 		}
-		m.templateCreate.message = "Creating template dataset..."
-		m.templateCreate.logs = nil
-		m.templateCreate.applying = true
-		return m, templateDatasetCreateCmd(m.templateCreate.sourceInput, m.templateCreate.parentOverride())
+		if m.templateCreate.mode == templateManagerModeDestroy {
+			if m.templateCreate.destroyPreview.Err != nil {
+				m.templateCreate.message = m.templateCreate.destroyPreview.Err.Error()
+				return m, nil
+			}
+			m.templateCreate.message = "Destroying template dataset..."
+			m.templateCreate.logs = nil
+			m.templateCreate.applying = true
+			return m, templateDatasetDestroyCmd(m.templateCreate.destroyPreview.Current.Name, m.templateCreate.parentOverride())
+		}
 	case "ctrl+r":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
 		}
-		m.templateCreate.refreshPreview()
-		m.templateCreate.message = "Template dataset preview refreshed."
-		return m, nil
+		if m.templateCreate.mode == templateManagerModeCreate {
+			m.templateCreate.refreshPreview()
+			m.templateCreate.message = "Template dataset preview refreshed."
+			return m, nil
+		}
+		m.templateCreate.loading = true
+		m.templateCreate.message = "Template dataset list refreshed."
+		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
 	case "backspace", "delete":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
@@ -1073,7 +1306,12 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.backspaceParentField()
 			return m, nil
 		}
-		m.templateCreate.backspaceSource()
+		switch m.templateCreate.mode {
+		case templateManagerModeCreate:
+			m.templateCreate.backspaceSource()
+		case templateManagerModeRename:
+			m.templateCreate.backspaceRenameInput()
+		}
 		return m, nil
 	}
 
@@ -1174,7 +1412,7 @@ func (m model) helpLines(width int) []string {
 		truncate("enter or d: open jail detail view", width),
 		truncate("c: open jail creation wizard", width),
 		truncate("i: re-run initial config check", width),
-		truncate("t: open template dataset creation", width),
+		truncate("t: open template manager", width),
 		truncate("s: start or stop selected jail", width),
 		truncate("z: open ZFS panel for selected jail", width),
 		truncate("x: destroy selected jail (confirmation required)", width),
@@ -1206,16 +1444,16 @@ func (m model) helpLines(width int) []string {
 		truncate("left: previous step", width),
 		truncate("s/l on the confirmation step: save/load templates", width),
 		truncate("ctrl+u: open userland selector", width),
-		truncate("ctrl+t: open thin template dataset selector", width),
-		truncate("thin selector c: create a template dataset from current Template/Release", width),
+		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
 		"",
-		sectionStyle.Render("Template Dataset Create"),
-		truncate("type a source path, release tag, userland entry, or custom URL", width),
-		truncate("enter: create the previewed template dataset", width),
+		sectionStyle.Render("Template Manager"),
+		truncate("j/k: select | c: create | r: rename | x: destroy", width),
+		truncate("enter applies the selected mountpoint when opened from the thin-jail wizard", width),
+		truncate("create mode accepts a source path, release tag, userland entry, or custom URL", width),
 		truncate("when parent templates dataset is missing: enter creates proposed parent, ctrl+e edits parent values", width),
-		truncate("ctrl+r: refresh preview", width),
+		truncate("ctrl+r: refresh the template list, or refresh create preview while creating", width),
 		truncate("esc: return to dashboard", width),
 	}
 	return lines
@@ -1380,7 +1618,7 @@ func (m model) renderWizardView() string {
 
 	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	if normalizedJailType(m.wizard.values.JailType) == "thin" {
-		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: thin template selector | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
+		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	}
 	if m.wizard.isConfirmationStep() {
 		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
@@ -1412,30 +1650,76 @@ func (m model) renderWizardView() string {
 }
 
 func (m model) renderTemplateDatasetCreateView() string {
-	title := titleStyle.Render("Template Dataset Create")
+	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := max(4, m.height-3)
-	lines := m.templateDatasetCreateLines(max(12, m.width-2))
-	body := lipgloss.NewStyle().
-		Width(m.width).
+	bodyHeight := max(6, m.height-3)
+	leftWidth := max(30, m.width/3)
+	if leftWidth > m.width-28 {
+		leftWidth = m.width - 28
+	}
+	if leftWidth < 24 {
+		leftWidth = m.width
+	}
+	rightWidth := m.width - leftWidth - 1
+	if rightWidth < 0 {
+		rightWidth = 0
+	}
+
+	listPanel := lipgloss.NewStyle().
+		Width(leftWidth).
 		Height(bodyHeight).
 		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
+		Render(strings.Join(m.templateManagerListLines(max(12, leftWidth-2), bodyHeight), "\n"))
 
-	hint := "type source | enter: create | backspace: edit | ctrl+r: refresh preview | ?: help | esc: back | ctrl+c: quit"
-	if m.templateCreate.parentEdit {
-		hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
+	body := listPanel
+	if rightWidth > 0 {
+		detailPanel := lipgloss.NewStyle().
+			Width(rightWidth).
+			Height(bodyHeight).
+			Padding(0, 1).
+			Render(strings.Join(m.templateManagerDetailLines(max(12, rightWidth-2)), "\n"))
+		separator := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render(strings.Repeat("|\n", bodyHeight-1) + "|")
+		body = lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
 	}
-	if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
-		hint = "type source | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | ?: help | esc: back | ctrl+c: quit"
+
+	hint := "j/k: select | c: create | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
+		hint = "j/k: select | enter: apply mountpoint | c: create | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.mode == templateManagerModeCreate {
+		hint = "type source | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
+		if m.templateCreate.parentEdit {
+			hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
+		}
+		if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
+			hint = "type source | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | esc: back | ctrl+c: quit"
+		}
+	}
+	if m.templateCreate.mode == templateManagerModeRename {
+		hint = "type new name | enter: rename | backspace: edit | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.mode == templateManagerModeDestroy {
+		hint = "enter: destroy dataset | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.loading {
+		hint = "Refreshing template datasets... please wait | ctrl+c: quit"
 	}
 	if m.templateCreate.parentApplying {
 		hint = "Creating template parent dataset... please wait | ctrl+c: quit"
 	}
 	if m.templateCreate.applying {
-		hint = "Creating template dataset... please wait | ctrl+c: quit"
+		switch m.templateCreate.mode {
+		case templateManagerModeRename:
+			hint = "Renaming template dataset... please wait | ctrl+c: quit"
+		case templateManagerModeDestroy:
+			hint = "Destroying template dataset... please wait | ctrl+c: quit"
+		default:
+			hint = "Creating template dataset... please wait | ctrl+c: quit"
+		}
 	}
 	if m.templateCreate.message != "" {
 		hint += " | " + m.templateCreate.message
@@ -1445,94 +1729,206 @@ func (m model) renderTemplateDatasetCreateView() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
-func (m model) templateDatasetCreateLines(width int) []string {
-	lines := []string{
-		sectionStyle.Render("Source"),
-		truncate("Supported sources: local directory, local archive, release tag, custom https URL, or a named userland entry.", width),
+func (m model) templateManagerListLines(width, height int) []string {
+	lines := []string{panelTitleStyle.Render("Template Datasets")}
+	if m.templateCreate.parent != nil {
+		lines = append(lines, truncate("Parent: "+m.templateCreate.parent.Name, width))
+	} else {
+		lines = append(lines, truncate("Parent: (not discovered)", width))
 	}
-
-	sourceDisplay := m.templateCreate.sourceInput
-	if strings.TrimSpace(sourceDisplay) == "" {
-		sourceDisplay = "(15.0-RELEASE)"
-	}
-	sourceLine := truncate("> Template/Release: "+sourceDisplay, width)
-	lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(sourceLine))
-
-	if m.templateCreate.message != "" {
-		for _, line := range wrapText("Notice: "+m.templateCreate.message, width) {
-			lines = append(lines, styleWizardMessage(line))
-		}
-	}
-
 	lines = append(lines, "")
-	lines = append(lines, sectionStyle.Render("Preview"))
-	preview := m.templateCreate.preview
-
-	parentDataset := preview.ParentDataset
-	parentMountpoint := preview.ParentMountpoint
-	if parentDataset == "" && strings.TrimSpace(m.templateCreate.parentDataset) != "" {
-		parentDataset = m.templateCreate.parentDataset
+	if m.templateCreate.loading {
+		lines = append(lines, "Loading template datasets...")
+		return lines
 	}
-	if parentMountpoint == "" && strings.TrimSpace(m.templateCreate.parentMountpoint) != "" {
-		parentMountpoint = filepath.Clean(m.templateCreate.parentMountpoint)
+	if len(m.templateCreate.items) == 0 {
+		lines = append(lines, "No template datasets found.")
+		lines = append(lines, "Press c to create one.")
+		return lines
 	}
+	maxRows := max(1, height-4)
+	start := 0
+	if m.templateCreate.cursor >= maxRows {
+		start = m.templateCreate.cursor - maxRows + 1
+	}
+	end := min(len(m.templateCreate.items), start+maxRows)
+	for idx := start; idx < end; idx++ {
+		item := m.templateCreate.items[idx]
+		row := fmt.Sprintf("  %s", filepath.Base(item.Name))
+		if idx == m.templateCreate.cursor {
+			row = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+filepath.Base(item.Name), width))
+		} else {
+			row = truncate(row, width)
+		}
+		lines = append(lines, row)
+	}
+	return lines
+}
 
-	showParentFields := preview.NeedsParentCreate || m.templateCreate.parentEdit || parentDataset != "" || parentMountpoint != ""
-	if showParentFields {
-		datasetLabel := "Parent dataset"
-		mountLabel := "Parent mountpoint"
+func (m model) templateManagerDetailLines(width int) []string {
+	lines := []string{}
+	switch m.templateCreate.mode {
+	case templateManagerModeCreate:
+		lines = append(lines, sectionStyle.Render("Create Template Dataset"))
+		lines = append(lines, truncate("Supported sources: local directory, local archive, release tag, custom https URL, or a named userland entry.", width))
+		sourceDisplay := m.templateCreate.sourceInput
+		if strings.TrimSpace(sourceDisplay) == "" {
+			sourceDisplay = "(15.0-RELEASE)"
+		}
+		lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> Template/Release: "+sourceDisplay, width)))
+		if m.templateCreate.message != "" {
+			for _, line := range wrapText("Notice: "+m.templateCreate.message, width) {
+				lines = append(lines, styleWizardMessage(line))
+			}
+		}
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Preview"))
+		preview := m.templateCreate.preview
+		parentDataset := preview.ParentDataset
+		parentMountpoint := preview.ParentMountpoint
+		if parentDataset == "" && strings.TrimSpace(m.templateCreate.parentDataset) != "" {
+			parentDataset = m.templateCreate.parentDataset
+		}
+		if parentMountpoint == "" && strings.TrimSpace(m.templateCreate.parentMountpoint) != "" {
+			parentMountpoint = filepath.Clean(m.templateCreate.parentMountpoint)
+		}
+		showParentFields := preview.NeedsParentCreate || m.templateCreate.parentEdit || parentDataset != "" || parentMountpoint != ""
+		if showParentFields {
+			datasetLabel := "Parent dataset"
+			mountLabel := "Parent mountpoint"
+			if preview.NeedsParentCreate {
+				datasetLabel = "Proposed parent dataset"
+				mountLabel = "Proposed parent mountpoint"
+			}
+			datasetDisplay := parentDataset
+			if strings.TrimSpace(datasetDisplay) == "" {
+				datasetDisplay = "(enter dataset name)"
+			}
+			mountDisplay := parentMountpoint
+			if strings.TrimSpace(mountDisplay) == "" {
+				mountDisplay = "(enter absolute mountpoint)"
+			}
+			datasetLine := truncate(datasetLabel+": "+datasetDisplay, width)
+			if m.templateCreate.parentEdit && m.templateCreate.parentField == 0 {
+				datasetLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+datasetLabel+": "+datasetDisplay, width))
+			}
+			lines = append(lines, datasetLine)
+			mountLine := truncate(mountLabel+": "+mountDisplay, width)
+			if m.templateCreate.parentEdit && m.templateCreate.parentField == 1 {
+				mountLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+mountLabel+": "+mountDisplay, width))
+			}
+			lines = append(lines, mountLine)
+		}
+		if preview.Dataset != "" {
+			lines = append(lines, truncate("Derived dataset: "+preview.Dataset, width))
+		}
+		if preview.Mountpoint != "" {
+			lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
+		}
+		if preview.SourceKind != "" {
+			lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
+		}
+		if preview.ResolvedSource != "" {
+			lines = append(lines, truncate("Resolved source: "+preview.ResolvedSource, width))
+		}
+		if preview.Action != "" {
+			lines = append(lines, truncate("Create action: "+preview.Action, width))
+		}
 		if preview.NeedsParentCreate {
-			datasetLabel = "Proposed parent dataset"
-			mountLabel = "Proposed parent mountpoint"
+			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent dataset or edit the values first.", width))
+		} else if preview.Err != nil {
+			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
+				lines = append(lines, wizardErrorStyle.Render(line))
+			}
 		}
-
-		datasetDisplay := parentDataset
-		if strings.TrimSpace(datasetDisplay) == "" {
-			datasetDisplay = "(enter dataset name)"
+	case templateManagerModeRename:
+		lines = append(lines, sectionStyle.Render("Rename Template Dataset"))
+		preview := m.templateCreate.renamePreview
+		current := preview.Current
+		if current.Name == "" {
+			lines = append(lines, "No template dataset selected.")
+		} else {
+			lines = append(lines, truncate("Current dataset: "+current.Name, width))
+			lines = append(lines, truncate("Current mountpoint: "+current.Mountpoint, width))
+			lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.renameInput, filepath.Base(current.Name)), width)))
+			if preview.NewDataset != "" {
+				lines = append(lines, truncate("Renamed dataset: "+preview.NewDataset, width))
+			}
+			if preview.NewMountpoint != "" {
+				lines = append(lines, truncate("New mountpoint: "+preview.NewMountpoint, width))
+			}
+			if len(preview.UpdatedWizardTemplates) > 0 {
+				lines = append(lines, truncate("Saved wizard templates updated on rename: "+strings.Join(preview.UpdatedWizardTemplates, ", "), width))
+			}
+			if preview.Err != nil {
+				for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
+					lines = append(lines, wizardErrorStyle.Render(line))
+				}
+			}
 		}
-		mountDisplay := parentMountpoint
-		if strings.TrimSpace(mountDisplay) == "" {
-			mountDisplay = "(enter absolute mountpoint)"
+	case templateManagerModeDestroy:
+		lines = append(lines, sectionStyle.Render("Destroy Template Dataset"))
+		preview := m.templateCreate.destroyPreview
+		current := preview.Current
+		if current.Name == "" {
+			lines = append(lines, "No template dataset selected.")
+		} else {
+			lines = append(lines, truncate("Dataset: "+current.Name, width))
+			lines = append(lines, truncate("Mountpoint: "+current.Mountpoint, width))
+			lines = append(lines, truncate("Destroy scope: zfs destroy -r "+preview.DestroyScope, width))
+			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", current.SnapshotCount), width))
+			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(current.CloneDependents)), width))
+			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(preview.ReferencedTemplates)), width))
+			if len(current.CloneDependents) > 0 {
+				lines = append(lines, truncate("Dependents: "+strings.Join(current.CloneDependents, ", "), width))
+			}
+			if len(preview.ReferencedTemplates) > 0 {
+				lines = append(lines, truncate("Referenced by: "+strings.Join(preview.ReferencedTemplates, ", "), width))
+			}
+			if preview.Err != nil {
+				for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
+					lines = append(lines, wizardErrorStyle.Render(line))
+				}
+			}
 		}
-
-		datasetLine := truncate(datasetLabel+": "+datasetDisplay, width)
-		if m.templateCreate.parentEdit && m.templateCreate.parentField == 0 {
-			datasetLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+datasetLabel+": "+datasetDisplay, width))
+	default:
+		lines = append(lines, sectionStyle.Render("Inspect"))
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			lines = append(lines, "No template dataset selected.")
+		} else {
+			lines = append(lines, truncate("Dataset: "+item.Name, width))
+			lines = append(lines, truncate("Mountpoint: "+item.Mountpoint, width))
+			lines = append(lines, truncate("Used: "+item.Used+"  Avail: "+item.Avail, width))
+			lines = append(lines, truncate("Refer: "+item.Refer+"  Compression: "+item.Compression, width))
+			lines = append(lines, truncate("Quota: "+valueOrDash(item.Quota)+"  Reservation: "+valueOrDash(item.Reservation), width))
+			if strings.TrimSpace(item.Origin) != "" && item.Origin != "-" {
+				lines = append(lines, truncate("Origin: "+item.Origin, width))
+			}
+			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", item.SnapshotCount), width))
+			lines = append(lines, truncate(fmt.Sprintf("Child datasets: %d", len(item.ChildDatasets)), width))
+			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(item.CloneDependents)), width))
+			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(item.WizardTemplateRefs)), width))
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Safety"))
+			lines = append(lines, truncate("Rename allowed: "+yesNoText(item.RenameAllowed), width))
+			lines = append(lines, truncate("Destroy allowed: "+yesNoText(item.DestroyAllowed), width))
+			if len(item.SafetyIssues) > 0 {
+				for _, issue := range item.SafetyIssues {
+					lines = append(lines, wizardErrorStyle.Render(truncate("Issue: "+issue, width)))
+				}
+			}
+			if len(item.CloneDependents) > 0 {
+				lines = append(lines, truncate("Dependents: "+strings.Join(item.CloneDependents, ", "), width))
+			}
+			if len(item.ChildDatasets) > 0 {
+				lines = append(lines, truncate("Child datasets: "+strings.Join(item.ChildDatasets, ", "), width))
+			}
+			if len(item.WizardTemplateRefs) > 0 {
+				lines = append(lines, truncate("Saved template refs: "+strings.Join(item.WizardTemplateRefs, ", "), width))
+			}
 		}
-		lines = append(lines, datasetLine)
-
-		mountLine := truncate(mountLabel+": "+mountDisplay, width)
-		if m.templateCreate.parentEdit && m.templateCreate.parentField == 1 {
-			mountLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+mountLabel+": "+mountDisplay, width))
-		}
-		lines = append(lines, mountLine)
 	}
-	if preview.Dataset != "" {
-		lines = append(lines, truncate("Derived dataset: "+preview.Dataset, width))
-	}
-	if preview.Mountpoint != "" {
-		lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
-	}
-	if preview.SourceKind != "" {
-		lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
-	}
-	if preview.ResolvedSource != "" {
-		lines = append(lines, truncate("Resolved source: "+preview.ResolvedSource, width))
-	}
-	if preview.Action != "" {
-		lines = append(lines, truncate("Create action: "+preview.Action, width))
-	}
-
-	if preview.NeedsParentCreate {
-		lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent dataset or edit the values first.", width))
-	} else if preview.Err != nil {
-		for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-			lines = append(lines, wizardErrorStyle.Render(line))
-		}
-	} else if strings.TrimSpace(m.templateCreate.sourceInput) == "" {
-		lines = append(lines, truncate("Enter a source above to preview the dataset name and mountpoint before creation.", width))
-	}
-
 	if len(m.templateCreate.logs) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Execution output"))
@@ -1540,7 +1936,6 @@ func (m model) templateDatasetCreateLines(width int) []string {
 			lines = append(lines, truncate(line, width))
 		}
 	}
-
 	return lines
 }
 
@@ -1713,7 +2108,7 @@ func (m model) wizardLines(width int) []string {
 		if field.ID == "template_release" {
 			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
 			if normalizedJailType(m.wizard.values.JailType) == "thin" {
-				lines = append(lines, truncate("  ctrl+t: select an extracted ZFS template dataset mountpoint", width))
+				lines = append(lines, truncate("  ctrl+t: open the template manager and apply an extracted ZFS template dataset mountpoint", width))
 			}
 		}
 		if field.ID == "name" || field.ID == "interface" || field.ID == "uplink" || field.ID == "ip6" {
@@ -1869,9 +2264,10 @@ func (m model) selectedJail() (Jail, bool) {
 	return m.snapshot.Jails[idx], true
 }
 
-func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatus, returnMode screenMode) templateDatasetCreateState {
+func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatus, returnMode screenMode, selectMode bool) templateDatasetCreateState {
 	state := templateDatasetCreateState{
 		returnMode:  returnMode,
+		selectMode:  selectMode,
 		sourceInput: strings.TrimSpace(sourceInput),
 	}
 	if dataset, mountpoint, ok := suggestTemplateParentDataset(status); ok {
@@ -1889,6 +2285,15 @@ func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatu
 
 func (s *templateDatasetCreateState) refreshPreview() {
 	s.preview = InspectTemplateDatasetCreateWithParent(s.sourceInput, s.parentOverride())
+}
+
+func (s *templateDatasetCreateState) refreshRenamePreview() {
+	item, ok := s.selectedItem()
+	if !ok {
+		s.renamePreview = TemplateDatasetRenamePreview{}
+		return
+	}
+	s.renamePreview = InspectTemplateDatasetRename(item.Name, s.renameInput, s.parentOverride())
 }
 
 func (s *templateDatasetCreateState) appendSource(text string) {
@@ -1909,6 +2314,26 @@ func (s *templateDatasetCreateState) backspaceSource() {
 	s.logs = nil
 	s.message = ""
 	s.refreshPreview()
+}
+
+func (s *templateDatasetCreateState) appendRenameInput(text string) {
+	if text == "" {
+		return
+	}
+	s.renameInput += text
+	s.logs = nil
+	s.message = ""
+	s.refreshRenamePreview()
+}
+
+func (s *templateDatasetCreateState) backspaceRenameInput() {
+	if s.renameInput == "" {
+		return
+	}
+	s.renameInput = s.renameInput[:len(s.renameInput)-1]
+	s.logs = nil
+	s.message = ""
+	s.refreshRenamePreview()
 }
 
 func (s *templateDatasetCreateState) parentOverride() *templateDatasetParent {
@@ -1958,6 +2383,45 @@ func (s *templateDatasetCreateState) parentFieldRef() *string {
 	}
 }
 
+func (s *templateDatasetCreateState) selectedItem() (TemplateDatasetInfo, bool) {
+	if len(s.items) == 0 {
+		return TemplateDatasetInfo{}, false
+	}
+	if s.cursor < 0 {
+		s.cursor = 0
+	}
+	if s.cursor >= len(s.items) {
+		s.cursor = len(s.items) - 1
+	}
+	return s.items[s.cursor], true
+}
+
+func (s *templateDatasetCreateState) boundCursor() {
+	if len(s.items) == 0 {
+		s.cursor = 0
+		return
+	}
+	if s.cursor < 0 {
+		s.cursor = 0
+	}
+	if s.cursor >= len(s.items) {
+		s.cursor = len(s.items) - 1
+	}
+}
+
+func (s *templateDatasetCreateState) syncSelection() {
+	s.boundCursor()
+	if s.mode == templateManagerModeRename {
+		s.refreshRenamePreview()
+		return
+	}
+	if s.mode == templateManagerModeDestroy {
+		if item, ok := s.selectedItem(); ok {
+			s.destroyPreview = InspectTemplateDatasetDestroy(item.Name, s.parentOverride())
+		}
+	}
+}
+
 func (m model) renderHeader() string {
 	total := len(m.snapshot.Jails)
 	lastUpdated := "never"
@@ -1978,7 +2442,7 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | i: initial config | t: template dataset | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
+	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | i: initial config | t: template manager | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
 	if m.notice != "" {
 		hint += " | " + m.notice
 	}
@@ -2014,7 +2478,7 @@ func (m model) renderJailList(width, height int) string {
 
 func (m model) renderRows(maxRows, width int) string {
 	if len(m.snapshot.Jails) == 0 {
-		return "No jails discovered yet. Create one manually in jail.conf/jail.conf.d, press c to open the jail creation wizard, or press t to create a template dataset."
+		return "No jails discovered yet. Create one manually in jail.conf/jail.conf.d, press c to open the jail creation wizard, or press t to open the template manager."
 	}
 	start := m.offset
 	end := min(len(m.snapshot.Jails), start+maxRows)
@@ -2071,7 +2535,7 @@ func (m model) renderDetailPanel(width, height int) string {
 			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
 			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
 			"",
-			"t: create a reusable template dataset.",
+			"t: open the template manager.",
 			"s: start/stop selected jail.",
 			"z: open ZFS panel for selected jail.",
 			"Press enter for full detail view.",
@@ -2228,6 +2692,21 @@ func wrapText(input string, maxLen int) []string {
 	}
 
 	return lines
+}
+
+func valueOrPlaceholder(value, placeholder string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return placeholder
+	}
+	return value
+}
+
+func yesNoText(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
 }
 
 func min(a, b int) int {

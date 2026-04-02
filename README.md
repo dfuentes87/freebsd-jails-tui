@@ -16,7 +16,7 @@ The application is aimed at a FreeBSD host that already uses the base jail tooli
   - `rctl`
 - First-run initial configuration check
 - Jail creation wizard
-- Dedicated template dataset creation flow
+- Template manager for ZFS template datasets
 - Save/load wizard templates
 - ZFS integration panel for snapshot and rollback actions
 - Start/stop actions from the dashboard
@@ -78,7 +78,7 @@ Key actions from the dashboard include:
 
 - `c` to open the jail creation wizard
 - `i` to re-run the initial configuration check
-- `t` to open template dataset creation
+- `t` to open the template manager
 - `s` to start or stop the selected jail
 - `z` to open the selected jail's ZFS panel
 - `x` to destroy the selected jail
@@ -199,8 +199,7 @@ Type-specific notes:
   - seeds host `resolv.conf` and `localtime`
 - `thin`
   - requires the template source to resolve to an exact ZFS dataset mountpoint
-  - supports `ctrl+t` to browse extracted template datasets
-  - supports `c` in the thin template selector to create a new template dataset from the current `Template/Release` value
+  - supports `ctrl+t` to open the template manager in selection mode
   - creates `@freebsd-jails-tui-base` on that template dataset if missing
   - clones the template dataset into the destination dataset
 - `vnet`
@@ -216,13 +215,20 @@ Type-specific notes:
   - bootstraps the selected Linux userspace with `debootstrap` after the jail starts
   - adds Linux-oriented mount and permission directives from the FreeBSD Handbook
 
-### Template Dataset Create
+### Template Manager
 
-The TUI includes a dedicated top-level workflow for creating reusable ZFS template datasets for later thin-jail cloning.
+The TUI includes a dedicated template manager for reusable ZFS template datasets used by thin-jail cloning.
 
-It is opened from the dashboard with `t`.
+It is opened from the dashboard with `t`. From the thin-jail wizard, `ctrl+t` opens the same manager in selection mode so the chosen mountpoint is written back into `Template/Release`.
 
-The screen shows:
+The manager provides:
+
+- a scrollable template dataset list
+- inline inspect/details for the selected template dataset
+- create, rename, and destroy actions
+- cached list/detail state that refreshes after lifecycle actions
+
+Create mode shows:
 
 - source input
 - detected parent `templates` dataset
@@ -231,26 +237,27 @@ The screen shows:
 - source type and whether the create step will copy or extract
 - execution output after creation
 
-If the parent `templates` dataset does not exist, the screen can:
+If the parent `templates` dataset does not exist, create mode can:
 
 - propose a parent dataset and mountpoint derived from the current jail layout
 - create that parent dataset first
 - let you edit the parent dataset and mountpoint manually before creation
 
-Template dataset screen shortcuts:
+Manager shortcuts:
 
-- `ctrl+r` refreshes the preview
-- `ctrl+e` switches into parent dataset edit mode when the parent is missing
+- `c` create a new template dataset
+- `r` rename the selected template dataset
+- `x` destroy the selected template dataset
+- `ctrl+r` refresh the list, or refresh create preview while creating
+- `ctrl+e` edit parent dataset values in create mode when needed
 
-Supported sources:
+Supported create sources:
 
 - local directory
 - local archive
 - named entry from `/usr/local/jails/media`
 - release tag such as `15.0-RELEASE`
 - custom `https://...` URL
-
-The existing thin-jail `ctrl+t` selector still supports `c` to create a template dataset from the current `Template/Release` value, and it uses the same backend creation path as the dedicated screen.
 
 ### Destroy Confirmation
 

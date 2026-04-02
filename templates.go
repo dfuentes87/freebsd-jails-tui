@@ -53,31 +53,7 @@ func saveWizardTemplate(name string, values jailWizardValues) error {
 	sort.Slice(templates, func(i, j int) bool {
 		return strings.ToLower(templates[i].Name) < strings.ToLower(templates[j].Name)
 	})
-
-	path, err := wizardTemplateFilePath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("failed to create template directory: %w", err)
-	}
-
-	store := wizardTemplateStore{Templates: templates}
-	payload, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to serialize templates: %w", err)
-	}
-	payload = append(payload, '\n')
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
-		return fmt.Errorf("failed to write template file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to finalize template file: %w", err)
-	}
-	return nil
+	return writeWizardTemplates(templates)
 }
 
 func loadWizardTemplates() ([]wizardTemplate, error) {
@@ -133,6 +109,95 @@ func wizardTemplateFilePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(configDir, "templates.json"), nil
+}
+
+func writeWizardTemplates(templates []wizardTemplate) error {
+	path, err := wizardTemplateFilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create template directory: %w", err)
+	}
+
+	store := wizardTemplateStore{Templates: templates}
+	payload, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to serialize templates: %w", err)
+	}
+	payload = append(payload, '\n')
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
+		return fmt.Errorf("failed to write template file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("failed to finalize template file: %w", err)
+	}
+	return nil
+}
+
+func findWizardTemplateReleaseReferences(mountpoint string) ([]string, error) {
+	templates, err := loadWizardTemplates()
+	if err != nil {
+		return nil, err
+	}
+	target := filepath.Clean(strings.TrimSpace(mountpoint))
+	if target == "." || target == "" {
+		return nil, nil
+	}
+	refs := make([]string, 0)
+	for _, tmpl := range templates {
+		value := strings.TrimSpace(tmpl.Values.TemplateRelease)
+		if value == "" || !strings.HasPrefix(value, "/") {
+			continue
+		}
+		if filepath.Clean(value) == target {
+			refs = append(refs, tmpl.Name)
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return strings.ToLower(refs[i]) < strings.ToLower(refs[j])
+	})
+	return refs, nil
+}
+
+func rewriteWizardTemplateReleaseReferences(oldMountpoint, newMountpoint string) ([]string, error) {
+	templates, err := loadWizardTemplates()
+	if err != nil {
+		return nil, err
+	}
+	oldClean := filepath.Clean(strings.TrimSpace(oldMountpoint))
+	newClean := filepath.Clean(strings.TrimSpace(newMountpoint))
+	if oldClean == "." || oldClean == "" {
+		return nil, fmt.Errorf("old template mountpoint is required")
+	}
+	if newClean == "." || newClean == "" {
+		return nil, fmt.Errorf("new template mountpoint is required")
+	}
+	updated := make([]string, 0)
+	for idx := range templates {
+		value := strings.TrimSpace(templates[idx].Values.TemplateRelease)
+		if value == "" || !strings.HasPrefix(value, "/") {
+			continue
+		}
+		if filepath.Clean(value) != oldClean {
+			continue
+		}
+		templates[idx].Values.TemplateRelease = newClean
+		updated = append(updated, templates[idx].Name)
+	}
+	if len(updated) == 0 {
+		return nil, nil
+	}
+	if err := writeWizardTemplates(templates); err != nil {
+		return nil, err
+	}
+	sort.Slice(updated, func(i, j int) bool {
+		return strings.ToLower(updated[i]) < strings.ToLower(updated[j])
+	})
+	return updated, nil
 }
 
 func appConfigDir() (string, error) {
