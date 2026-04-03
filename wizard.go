@@ -128,6 +128,9 @@ type jailCreationWizard struct {
 	step                 int
 	field                int
 	values               jailWizardValues
+	linuxPrereqs         LinuxWizardPrereqs
+	linuxPrereqKey       string
+	linuxPrereqCached    bool
 	templateMode         wizardTemplateMode
 	templateInput        string
 	templates            []wizardTemplate
@@ -145,12 +148,14 @@ type jailCreationWizard struct {
 }
 
 func newJailCreationWizard(defaultDestination string) jailCreationWizard {
-	return jailCreationWizard{
+	w := jailCreationWizard{
 		values: jailWizardValues{
 			Dataset:   strings.TrimSpace(defaultDestination),
 			Interface: "em0",
 		},
 	}
+	w.refreshLinuxPrereqs()
+	return w
 }
 
 func (w jailCreationWizard) steps() []wizardStep {
@@ -209,6 +214,7 @@ func (w *jailCreationWizard) nextStep() error {
 		w.executionLogs = nil
 		w.executionError = ""
 	}
+	w.refreshLinuxPrereqs()
 	return nil
 }
 
@@ -220,6 +226,7 @@ func (w *jailCreationWizard) prevStep() {
 		w.executionLogs = nil
 		w.executionError = ""
 	}
+	w.refreshLinuxPrereqs()
 }
 
 func (w *jailCreationWizard) beginTemplateSave() {
@@ -389,6 +396,7 @@ func (w *jailCreationWizard) appendToActive(input string) {
 	}
 	*ref += input
 	w.message = ""
+	w.refreshLinuxPrereqs()
 }
 
 func (w *jailCreationWizard) backspaceActive() {
@@ -406,6 +414,7 @@ func (w *jailCreationWizard) backspaceActive() {
 	}
 	*ref = string(runes[:len(runes)-1])
 	w.message = ""
+	w.refreshLinuxPrereqs()
 }
 
 func (w jailCreationWizard) activeField() (wizardField, bool) {
@@ -435,6 +444,21 @@ func (w *jailCreationWizard) normalizeField() {
 	if w.field >= len(fields) {
 		w.field = len(fields) - 1
 	}
+}
+
+func (w *jailCreationWizard) refreshLinuxPrereqs() {
+	key := strings.Join([]string{
+		normalizedJailType(w.values.JailType),
+		effectiveLinuxDistro(w.values),
+		effectiveLinuxRelease(w.values),
+		effectiveLinuxBootstrapMode(w.values),
+	}, "|")
+	if w.linuxPrereqCached && w.linuxPrereqKey == key {
+		return
+	}
+	w.linuxPrereqs = collectLinuxWizardPrereqs(w.values)
+	w.linuxPrereqKey = key
+	w.linuxPrereqCached = true
 }
 
 func (w *jailCreationWizard) normalizeStep() {

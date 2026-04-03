@@ -53,6 +53,8 @@ type initialConfigStatus struct {
 	ParallelStartValue string
 	NeedsJailEnable    bool
 	NeedsParallelStart bool
+	JailEnableStatus   RCSettingStatus
+	ParallelStatus     RCSettingStatus
 
 	ExistingJailPaths []string
 	HasJailPath       bool
@@ -377,6 +379,8 @@ func collectInitialConfigStatus(now time.Time) (initialConfigStatus, error) {
 
 	status.NeedsJailEnable = !isEnabledRCValue(status.JailEnableValue)
 	status.NeedsParallelStart = !isEnabledRCValue(status.ParallelStartValue)
+	status.JailEnableStatus = collectRCSettingStatus("jail_enable", "YES")
+	status.ParallelStatus = collectRCSettingStatus("jail_parallel_start", "YES")
 
 	for _, path := range []string{"/jail", "/usr/jail", docJailsPath} {
 		info, statErr := os.Stat(path)
@@ -823,7 +827,13 @@ func (m model) initialCheckLines(width int) []string {
 	}
 	lines = append(lines, sectionStyle.Render("rc.conf checks"))
 	appendLine(fmt.Sprintf("jail_enable = %s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable)))
+	for _, line := range rcSettingDriftLines(m.initCheck.status.JailEnableStatus) {
+		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
+	}
 	appendLine(fmt.Sprintf("jail_parallel_start = %s (%s)", displayRCValue(m.initCheck.status.ParallelStartValue), checkStatusText(!m.initCheck.status.NeedsParallelStart)))
+	for _, line := range rcSettingDriftLines(m.initCheck.status.ParallelStatus) {
+		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
+	}
 	appendLine("")
 
 	lines = append(lines, sectionStyle.Render("Jail path checks"))
@@ -959,4 +969,18 @@ func checkStatusText(ok bool) string {
 		return "OK"
 	}
 	return "MISSING"
+}
+
+func rcSettingDriftLines(status RCSettingStatus) []string {
+	lines := make([]string, 0, 4)
+	for _, reason := range status.DriftReasons {
+		lines = append(lines, "drift: "+reason)
+	}
+	if len(status.DriftReasons) == 0 {
+		return lines
+	}
+	for _, source := range status.SourceValues {
+		lines = append(lines, fmt.Sprintf("%s => %s", source.Path, displayRCValue(source.Value)))
+	}
+	return lines
 }

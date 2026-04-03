@@ -324,9 +324,9 @@ func (m model) zfsPanelLines(width, height int) []string {
 				prefix = ">"
 			}
 			row := fmt.Sprintf(
-				"%s %-28s %-18s used:%s",
+				"%s %-24s created:%-18s used:%s",
 				prefix,
-				truncate(snapshotShortName(snapshot.Name), 28),
+				truncate(snapshotShortName(snapshot.Name), 24),
 				truncate(snapshot.Creation, 18),
 				snapshot.Used,
 			)
@@ -335,6 +335,20 @@ func (m model) zfsPanelLines(width, height int) []string {
 				row = selectedRowStyle.Width(max(1, width)).Render(row)
 			}
 			lines = append(lines, row)
+		}
+	}
+
+	if snapshot, ok := m.zfsPanel.selectedSnapshot(); ok {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Selected snapshot"))
+		lines = append(lines, truncate("Name: "+snapshot.Name, width))
+		lines = append(lines, truncate("Created: "+valueOrDash(snapshot.Creation), width))
+		lines = append(lines, truncate("Used: "+valueOrDash(snapshot.Used), width))
+
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Rollback implications"))
+		for _, line := range m.zfsRollbackImplicationLines(width, snapshot) {
+			lines = append(lines, line)
 		}
 	}
 
@@ -354,6 +368,7 @@ func (m model) zfsPanelLines(width, height int) []string {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Confirm rollback"))
 		lines = append(lines, truncate("Target: "+m.zfsPanel.rollbackTarget, width))
+		lines = append(lines, truncate("Command: zfs rollback -r "+m.zfsPanel.rollbackTarget, width))
 	}
 
 	if len(m.zfsPanel.logs) > 0 {
@@ -366,6 +381,45 @@ func (m model) zfsPanelLines(width, height int) []string {
 	}
 
 	return lines
+}
+
+func (m model) zfsRollbackImplicationLines(width int, snapshot ZFSSnapshot) []string {
+	newer := m.zfsNewerSnapshots(snapshot.Name)
+	lines := []string{
+		truncate("Rollback command: zfs rollback -r "+snapshot.Name, width),
+		truncate("Dataset contents will revert to the selected snapshot state.", width),
+	}
+	if len(newer) == 0 {
+		lines = append(lines, truncate("No newer snapshots will be destroyed.", width))
+		return lines
+	}
+	lines = append(lines, truncate(fmt.Sprintf("%d newer snapshot(s) will be destroyed on this dataset.", len(newer)), width))
+	maxNames := min(4, len(newer))
+	names := make([]string, 0, maxNames)
+	for _, item := range newer[:maxNames] {
+		names = append(names, snapshotShortName(item.Name))
+	}
+	lines = append(lines, truncate("Newer snapshots: "+strings.Join(names, ", "), width))
+	if len(newer) > maxNames {
+		lines = append(lines, truncate(fmt.Sprintf("...and %d more newer snapshot(s).", len(newer)-maxNames), width))
+	}
+	lines = append(lines, truncate("If newer snapshots have dependents, rollback may fail until those dependencies are cleared.", width))
+	return lines
+}
+
+func (m model) zfsNewerSnapshots(target string) []ZFSSnapshot {
+	if strings.TrimSpace(target) == "" {
+		return nil
+	}
+	for idx, snapshot := range m.zfsPanel.snapshots {
+		if snapshot.Name == target {
+			if idx+1 >= len(m.zfsPanel.snapshots) {
+				return nil
+			}
+			return append([]ZFSSnapshot(nil), m.zfsPanel.snapshots[idx+1:]...)
+		}
+	}
+	return nil
 }
 
 func (m model) zfsListHeight() int {

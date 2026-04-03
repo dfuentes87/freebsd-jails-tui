@@ -961,6 +961,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.wizard.values.Interface) == "" {
 				m.wizard.values.Interface = "em0"
 			}
+			m.wizard.refreshLinuxPrereqs()
 			m.wizard.normalizeStep()
 			m.wizard.endTemplateMode()
 			m.wizard.message = fmt.Sprintf("Template %q loaded.", template.Name)
@@ -1448,6 +1449,7 @@ func (m model) helpLines(width int) []string {
 		truncate("j/k: select snapshot", width),
 		truncate("c: create snapshot", width),
 		truncate("r: rollback selected snapshot (confirmation required)", width),
+		truncate("selected snapshot details show creation time, used size, and rollback implications", width),
 		truncate("x: refresh snapshot list", width),
 		truncate("esc: cancel prompt or return to detail", width),
 		"",
@@ -2051,7 +2053,7 @@ func (m model) wizardLines(width int) []string {
 		if normalizedJailType(m.wizard.values.JailType) == "linux" {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Linux prerequisites"))
-			for _, line := range linuxWizardPrereqLines(m.wizard.values) {
+			for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
 				lines = append(lines, truncate(line, width))
 			}
 		}
@@ -2125,7 +2127,7 @@ func (m model) wizardLines(width int) []string {
 	if normalizedJailType(m.wizard.values.JailType) == "linux" && wizardsShowsLinuxPrereqs(step) {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
-		for _, line := range linuxWizardPrereqLines(m.wizard.values) {
+		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
 			lines = append(lines, truncate(line, width))
 		}
 	}
@@ -2143,8 +2145,7 @@ func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 	return false
 }
 
-func linuxWizardPrereqLines(values jailWizardValues) []string {
-	prereqs := collectLinuxWizardPrereqs(values)
+func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 	lines := []string{
 		"Host Linux ABI will be enabled with: sysrc linux_enable=YES",
 		"Host Linux service will be started with: service linux start",
@@ -2158,6 +2159,9 @@ func linuxWizardPrereqLines(values jailWizardValues) []string {
 	}
 	if prereqs.Host.EnableReadError != "" {
 		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
+	}
+	for _, reason := range prereqs.Host.EnableDrift {
+		lines = append(lines, "Warning: linux_enable drift: "+reason)
 	}
 	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
 		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
@@ -2332,6 +2336,9 @@ func (m model) linuxReadinessLines() []string {
 	if readiness.Host.EnableReadError != "" {
 		lines = append(lines, "Warning: host ABI check failed: "+readiness.Host.EnableReadError)
 	}
+	for _, reason := range readiness.Host.EnableDrift {
+		lines = append(lines, "Warning: linux_enable drift: "+reason)
+	}
 	if readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
 		lines = append(lines, "Warning: linux service status check failed: "+readiness.Host.ServiceStatusErr)
 	}
@@ -2349,6 +2356,19 @@ func (m model) linuxReadinessLines() []string {
 	}
 	if readiness.RuntimeError != "" {
 		lines = append(lines, "Warning: "+readiness.RuntimeError)
+	}
+	if readiness.HealthChecked {
+		lines = append(lines,
+			fmt.Sprintf("Package manager works: %s", yesNoText(readiness.PackageManagerOK)),
+			"Package manager status: "+valueOrDash(readiness.PackageManagerStatus),
+			fmt.Sprintf("DNS works: %s", yesNoText(readiness.DNSWorks)),
+			"DNS status: "+valueOrDash(readiness.DNSStatus),
+			fmt.Sprintf("Init present: %s", yesNoText(readiness.InitPresent)),
+			"Init status: "+valueOrDash(readiness.InitStatus),
+			"Services status: "+valueOrDash(readiness.ServiceStatus),
+		)
+	} else if readiness.UserlandPresent {
+		lines = append(lines, "Post-bootstrap health checks run when the jail is running.")
 	}
 	if !readiness.UserlandPresent {
 		lines = append(lines, "Use b to retry Linux bootstrap after prerequisites are ready.")
