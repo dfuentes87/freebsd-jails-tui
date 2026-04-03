@@ -1462,7 +1462,7 @@ func (m model) helpLines(width int) []string {
 		truncate("s/l on the confirmation step: save/load templates", width),
 		truncate("ctrl+u: open userland selector", width),
 		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
-		truncate("vnet preflight checks bridge/uplink host state and can create a missing bridge before create", width),
+		truncate("vnet preflight checks bridge/uplink host state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
 		"",
@@ -2126,7 +2126,7 @@ func (m model) wizardLines(width int) []string {
 				lines = append(lines, truncate("  ctrl+t: open the template manager and apply an extracted ZFS template dataset mountpoint", width))
 			}
 		}
-		if field.ID == "name" || field.ID == "interface" || field.ID == "uplink" || field.ID == "ip6" {
+		if field.ID == "name" || field.ID == "interface" || field.ID == "bridge_policy" || field.ID == "uplink" || field.ID == "ip6" {
 			lines = append(lines, "")
 		}
 	}

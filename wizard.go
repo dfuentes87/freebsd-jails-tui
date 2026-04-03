@@ -71,7 +71,8 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Jail interface name for thick, thin, and linux jails"},
-			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails; missing bridges will be created automatically"},
+			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
+			{ID: "bridge_policy", Label: "Bridge policy", Placeholder: "auto-create", Help: "Options: auto-create or require-existing"},
 			{ID: "uplink", Label: "Uplink", Placeholder: "em0", Help: "Optional host uplink to attach to the bridge before jail start"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
@@ -105,6 +106,7 @@ type jailWizardValues struct {
 	TemplateRelease string
 	Interface       string
 	Bridge          string
+	BridgePolicy    string
 	Uplink          string
 	IP4             string
 	IP6             string
@@ -474,6 +476,7 @@ func (w *jailCreationWizard) refreshNetworkPrereqs() {
 		normalizedJailType(w.values.JailType),
 		strings.TrimSpace(w.values.Interface),
 		strings.TrimSpace(w.values.Bridge),
+		effectiveBridgePolicy(w.values),
 		strings.TrimSpace(w.values.Uplink),
 		strings.TrimSpace(w.values.IP4),
 		strings.TrimSpace(w.values.IP6),
@@ -513,7 +516,7 @@ func (w jailCreationWizard) visibleFields() []wizardField {
 			if jailType == "vnet" {
 				continue
 			}
-		case "bridge", "uplink":
+		case "bridge", "bridge_policy", "uplink":
 			if jailType != "vnet" {
 				continue
 			}
@@ -545,6 +548,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.Interface
 	case "bridge":
 		return &w.values.Bridge
+	case "bridge_policy":
+		return &w.values.BridgePolicy
 	case "uplink":
 		return &w.values.Uplink
 	case "ip4":
@@ -588,6 +593,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.Interface
 	case "bridge":
 		return w.values.Bridge
+	case "bridge_policy":
+		return w.values.BridgePolicy
 	case "uplink":
 		return w.values.Uplink
 	case "ip4":
@@ -670,6 +677,13 @@ func (w jailCreationWizard) validateCurrentStep() error {
 		}
 		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Bridge)), "bridge") {
 			return fmt.Errorf("vnet jails require a bridge such as bridge0")
+		}
+		policy := effectiveBridgePolicy(w.values)
+		switch policy {
+		case "auto-create", "require-existing":
+			w.values.BridgePolicy = policy
+		default:
+			return fmt.Errorf("bridge policy must be auto-create or require-existing")
 		}
 		if strings.TrimSpace(w.values.Uplink) != "" {
 			uplink, err := validateOptionalNetworkInterfaceName(w.values.Uplink, "uplink")
@@ -925,6 +939,7 @@ func (w jailCreationWizard) summaryLines() []string {
 	if normalizedJailType(w.values.JailType) == "vnet" {
 		lines = append(lines,
 			fmt.Sprintf("Bridge: %s", valueOrDash(w.values.Bridge)),
+			fmt.Sprintf("Bridge policy: %s", effectiveBridgePolicy(w.values)),
 			fmt.Sprintf("Uplink: %s", valueOrDash(w.values.Uplink)),
 		)
 	} else {
@@ -998,6 +1013,7 @@ func (w jailCreationWizard) commandPlanLines() []string {
 	switch jailType {
 	case "vnet":
 		addStep("Ensure VNET host bridge setup is ready:")
+		addDetail(fmt.Sprintf("   # bridge policy: %s", effectiveBridgePolicy(w.values)))
 		if w.networkPrereqs.BridgeCreateNeeded {
 			addDetail(fmt.Sprintf("   ifconfig %s create", strings.TrimSpace(w.values.Bridge)))
 		}
@@ -1311,6 +1327,14 @@ func effectiveLinuxDistro(values jailWizardValues) string {
 	return distro
 }
 
+func effectiveBridgePolicy(values jailWizardValues) string {
+	policy := strings.ToLower(strings.TrimSpace(values.BridgePolicy))
+	if policy == "" {
+		return "auto-create"
+	}
+	return policy
+}
+
 func effectiveLinuxRelease(values jailWizardValues) string {
 	release := strings.TrimSpace(values.LinuxRelease)
 	if release != "" {
@@ -1373,7 +1397,7 @@ func wizardSectionForField(id string) string {
 		return "1. Name & Destination"
 	case "template_release":
 		return "2. Template or release"
-	case "interface", "bridge", "uplink", "ip4", "ip6", "default_router", "hostname":
+	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router", "hostname":
 		return "3. Networking"
 	case "cpu_percent", "memory_limit", "process_limit":
 		return "4. Resource Limits (optional)"

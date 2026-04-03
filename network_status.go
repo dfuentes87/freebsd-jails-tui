@@ -28,6 +28,7 @@ type NetworkWizardPrereqs struct {
 	Interface          string
 	InterfaceExists    bool
 	Bridge             string
+	BridgePolicy       string
 	BridgeExists       bool
 	BridgeIsBridge     bool
 	BridgeCreateNeeded bool
@@ -37,8 +38,10 @@ type NetworkWizardPrereqs struct {
 	UplinkAttachNeeded bool
 	IP4                string
 	IP4Conflicts       []string
+	IP4OverlapWarnings []string
 	IP6                string
 	IP6Conflicts       []string
+	IP6OverlapWarnings []string
 	DefaultRouter      string
 	RouterStatus       string
 	Warnings           []string
@@ -140,13 +143,18 @@ func collectNetworkWizardPrereqs(values jailWizardValues) NetworkWizardPrereqs {
 		JailType:      normalizedJailType(values.JailType),
 		Interface:     strings.TrimSpace(values.Interface),
 		Bridge:        strings.TrimSpace(values.Bridge),
+		BridgePolicy:  effectiveBridgePolicy(values),
 		Uplink:        strings.TrimSpace(values.Uplink),
 		IP4:           strings.TrimSpace(values.IP4),
 		IP6:           strings.TrimSpace(values.IP6),
 		DefaultRouter: strings.TrimSpace(values.DefaultRouter),
 	}
 	state := collectHostNetworkState()
+	runningJails, runningErr := collectRunningJailNetworkState()
 	prereqs.InspectError = strings.TrimSpace(state.InspectError)
+	if prereqs.InspectError == "" && runningErr != nil {
+		prereqs.InspectError = runningErr.Error()
+	}
 	if prereqs.InspectError != "" {
 		prereqs.Errors = append(prereqs.Errors, "host network inspection failed: "+prereqs.InspectError)
 		return prereqs
@@ -162,8 +170,12 @@ func collectNetworkWizardPrereqs(values jailWizardValues) NetworkWizardPrereqs {
 					prereqs.Errors = append(prereqs.Errors, fmt.Sprintf("bridge %q exists but is not a bridge interface", prereqs.Bridge))
 				}
 			} else {
-				prereqs.BridgeCreateNeeded = true
-				prereqs.Warnings = append(prereqs.Warnings, fmt.Sprintf("bridge %q will be created on the host before jail start", prereqs.Bridge))
+				if prereqs.BridgePolicy == "require-existing" {
+					prereqs.Errors = append(prereqs.Errors, fmt.Sprintf("bridge %q does not exist and bridge policy requires an existing bridge", prereqs.Bridge))
+				} else {
+					prereqs.BridgeCreateNeeded = true
+					prereqs.Warnings = append(prereqs.Warnings, fmt.Sprintf("bridge %q will be created on the host before jail start", prereqs.Bridge))
+				}
 			}
 		}
 		if prereqs.Uplink != "" {
@@ -197,16 +209,165 @@ func collectNetworkWizardPrereqs(values jailWizardValues) NetworkWizardPrereqs {
 		}
 	}
 
-	prereqs.IP4Conflicts = hostAddressConflicts(state, prereqs.IP4)
+	prereqs.IP4Conflicts = append(prereqs.IP4Conflicts, hostAddressConflicts(state, prereqs.IP4)...)
+	prereqs.IP4Conflicts = append(prereqs.IP4Conflicts, runningJailAddressConflicts(runningJails, prereqs.IP4)...)
+	prereqs.IP4Conflicts = uniqueStrings(prereqs.IP4Conflicts)
 	if len(prereqs.IP4Conflicts) > 0 {
-		prereqs.Errors = append(prereqs.Errors, fmt.Sprintf("IPv4 %q is already assigned on host interface(s): %s", prereqs.IP4, strings.Join(prereqs.IP4Conflicts, ", ")))
+		prereqs.Errors = append(prereqs.Errors, fmt.Sprintf("IPv4 %q is already assigned on the host or a running jail: %s", prereqs.IP4, strings.Join(prereqs.IP4Conflicts, ", ")))
 	}
-	prereqs.IP6Conflicts = hostAddressConflicts(state, prereqs.IP6)
+	prereqs.IP4OverlapWarnings = runningJailSubnetOverlapWarnings(runningJails, prereqs.IP4, true)
+	if len(prereqs.IP4OverlapWarnings) > 0 {
+		prereqs.Warnings = append(prereqs.Warnings, fmt.Sprintf("IPv4 subnet %q overlaps running jail addresses/subnets: %s", prereqs.IP4, strings.Join(prereqs.IP4OverlapWarnings, ", ")))
+	}
+	prereqs.IP6Conflicts = append(prereqs.IP6Conflicts, hostAddressConflicts(state, prereqs.IP6)...)
+	prereqs.IP6Conflicts = append(prereqs.IP6Conflicts, runningJailAddressConflicts(runningJails, prereqs.IP6)...)
+	prereqs.IP6Conflicts = uniqueStrings(prereqs.IP6Conflicts)
 	if len(prereqs.IP6Conflicts) > 0 {
-		prereqs.Errors = append(prereqs.Errors, fmt.Sprintf("IPv6 %q is already assigned on host interface(s): %s", prereqs.IP6, strings.Join(prereqs.IP6Conflicts, ", ")))
+		prereqs.Errors = append(prereqs.Errors, fmt.Sprintf("IPv6 %q is already assigned on the host or a running jail: %s", prereqs.IP6, strings.Join(prereqs.IP6Conflicts, ", ")))
+	}
+	prereqs.IP6OverlapWarnings = runningJailSubnetOverlapWarnings(runningJails, prereqs.IP6, false)
+	if len(prereqs.IP6OverlapWarnings) > 0 {
+		prereqs.Warnings = append(prereqs.Warnings, fmt.Sprintf("IPv6 subnet %q overlaps running jail addresses/subnets: %s", prereqs.IP6, strings.Join(prereqs.IP6OverlapWarnings, ", ")))
 	}
 	prereqs.RouterStatus = evaluateDefaultRouterStatus(prereqs)
 	return prereqs
+}
+
+type runningJailNetworkState struct {
+	Name         string
+	IPv4         []netip.Addr
+	IPv6         []netip.Addr
+	IPv4Prefixes []netip.Prefix
+	IPv6Prefixes []netip.Prefix
+}
+
+func collectRunningJailNetworkState() ([]runningJailNetworkState, error) {
+	out, err := exec.Command("jls", "-n").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run jls -n: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	result := make([]runningJailNetworkState, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := parseKVFields(line)
+		name := strings.TrimSpace(fields["name"])
+		if name == "" {
+			continue
+		}
+		result = append(result, runningJailNetworkState{
+			Name:         name,
+			IPv4:         parseJailAddressField(fields["ip4.addr"], fields["ip4"]),
+			IPv6:         parseJailAddressField(fields["ip6.addr"], fields["ip6"]),
+			IPv4Prefixes: parseJailPrefixField(fields["ip4.addr"], fields["ip4"]),
+			IPv6Prefixes: parseJailPrefixField(fields["ip6.addr"], fields["ip6"]),
+		})
+	}
+	return result, nil
+}
+
+func parseJailAddressField(values ...string) []netip.Addr {
+	var result []netip.Addr
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.EqualFold(value, "inherit") {
+			continue
+		}
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			addr, ok := explicitJailAddr(part)
+			if !ok {
+				continue
+			}
+			result = append(result, addr)
+		}
+	}
+	return result
+}
+
+func parseJailPrefixField(values ...string) []netip.Prefix {
+	var result []netip.Prefix
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.EqualFold(value, "inherit") {
+			continue
+		}
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			prefix, ok := explicitJailPrefix(part)
+			if !ok {
+				continue
+			}
+			result = append(result, prefix)
+		}
+	}
+	return result
+}
+
+func runningJailAddressConflicts(jails []runningJailNetworkState, value string) []string {
+	addr, ok := explicitJailAddr(value)
+	if !ok {
+		return nil
+	}
+	conflicts := make([]string, 0, 2)
+	for _, jail := range jails {
+		for _, jailAddr := range jail.IPv4 {
+			if jailAddr == addr {
+				conflicts = append(conflicts, "jail:"+jail.Name)
+				goto nextJail
+			}
+		}
+		for _, jailAddr := range jail.IPv6 {
+			if jailAddr == addr {
+				conflicts = append(conflicts, "jail:"+jail.Name)
+				goto nextJail
+			}
+		}
+	nextJail:
+	}
+	return conflicts
+}
+
+func runningJailSubnetOverlapWarnings(jails []runningJailNetworkState, value string, ipv4 bool) []string {
+	requestedPrefix, hasRequestedPrefix := explicitJailPrefix(value)
+	if !hasRequestedPrefix {
+		return nil
+	}
+	warnings := make([]string, 0, 2)
+	for _, jail := range jails {
+		var jailAddrs []netip.Addr
+		var jailPrefixes []netip.Prefix
+		if ipv4 {
+			jailAddrs = jail.IPv4
+			jailPrefixes = jail.IPv4Prefixes
+		} else {
+			jailAddrs = jail.IPv6
+			jailPrefixes = jail.IPv6Prefixes
+		}
+		for _, jailPrefix := range jailPrefixes {
+			if prefixesOverlap(requestedPrefix, jailPrefix) {
+				warnings = append(warnings, fmt.Sprintf("jail:%s (%s)", jail.Name, jailPrefix.String()))
+				goto nextJail
+			}
+		}
+		for _, jailAddr := range jailAddrs {
+			if requestedPrefix.Contains(jailAddr) {
+				warnings = append(warnings, fmt.Sprintf("jail:%s (%s)", jail.Name, jailAddr.String()))
+				goto nextJail
+			}
+		}
+	nextJail:
+	}
+	return uniqueStrings(warnings)
+}
+
+func prefixesOverlap(a, b netip.Prefix) bool {
+	a = a.Masked()
+	b = b.Masked()
+	return a.Contains(b.Addr()) || b.Contains(a.Addr())
 }
 
 func infoIfBridgeMembers(state HostNetworkState, bridge string) []string {
@@ -323,6 +484,7 @@ func networkWizardPrereqLines(prereqs NetworkWizardPrereqs) []string {
 	if prereqs.JailType == "vnet" {
 		lines = append(lines,
 			fmt.Sprintf("Bridge: %s", valueOrDash(prereqs.Bridge)),
+			fmt.Sprintf("Bridge policy: %s", valueOrDash(prereqs.BridgePolicy)),
 			fmt.Sprintf("Bridge exists: %s", yesNoText(prereqs.BridgeExists)),
 		)
 		if prereqs.BridgeExists {

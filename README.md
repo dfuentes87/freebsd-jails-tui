@@ -188,6 +188,7 @@ Important behavior:
 - `inherit` is allowed for non-`vnet` networking
 - `inherit` is rejected for `vnet` jails
 - `vnet` uses dedicated `Bridge` and optional `Uplink` fields instead of `Interface`
+- `Bridge policy` controls whether a missing bridge is auto-created or must already exist
 - Linux bootstrap mode supports `auto` or `skip`
 - the wizard writes new configs into `/etc/jail.conf.d/<name>.conf`
 - the wizard refuses to overwrite an existing jail config file
@@ -204,8 +205,10 @@ Type-specific notes:
   - clones the template dataset into the destination dataset
 - `vnet`
   - uses `vnet`, `vnet.interface`, `devfs_ruleset = 5`, and generated `exec.prestart` / `exec.poststop` commands
-  - requires a bridge such as `bridge0`, validates bridge/uplink/IP host state before create, and can create a missing bridge automatically
+  - requires a bridge such as `bridge0`, validates bridge/uplink/IP host state before create, and honors the selected bridge policy
   - can attach an optional uplink to that bridge before jail start
+  - checks requested jail IPs against both host interfaces and already-running jails
+  - warns when the requested jail subnet overlaps the addresses or subnets of already-running jails
   - configures IP addresses inside the jail with `ifconfig`
 - `linux`
   - enables `linux_enable=YES` and starts the host `linux` service during creation
