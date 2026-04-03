@@ -120,10 +120,12 @@ The detail view shows a consolidated view of a single jail.
 Sections include:
 
 - Overview
-- `jls`
-- `jail.conf`
+- configured state
+- runtime state
+- network summary
 - ZFS dataset
 - `rctl`
+- Linux readiness, when applicable
 - Source errors, when present
 
 ### ZFS Integration Panel
@@ -135,6 +137,7 @@ Actions:
 - list snapshots
 - create snapshot
 - rollback snapshot
+- clone a selected snapshot into a new jail dataset/config
 - refresh snapshot list
 
 ### Jail Creation Wizard
@@ -229,7 +232,7 @@ The manager provides:
 
 - a scrollable template dataset list
 - inline inspect/details for the selected template dataset
-- create, rename, and destroy actions
+- create, clone-from-snapshot, rename, and destroy actions
 - cached list/detail state that refreshes after lifecycle actions
 
 Create mode shows:
@@ -250,6 +253,7 @@ If the parent `templates` dataset does not exist, create mode can:
 Manager shortcuts:
 
 - `c` create a new template dataset
+- `n` clone a selected template snapshot into a new template dataset
 - `r` rename the selected template dataset
 - `x` destroy the selected template dataset
 - `ctrl+r` refresh the list, or refresh create preview while creating

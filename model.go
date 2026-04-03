@@ -96,6 +96,19 @@ type templateDatasetDestroyApplyMsg struct {
 	result TemplateDatasetDestroyResult
 }
 
+type templateSnapshotListMsg struct {
+	snapshots []ZFSSnapshot
+	err       error
+}
+
+type templateSnapshotCloneApplyMsg struct {
+	result TemplateDatasetSnapshotCloneResult
+}
+
+type jailSnapshotCloneApplyMsg struct {
+	result JailSnapshotCloneResult
+}
+
 type templateParentApplyMsg struct {
 	result TemplateParentDatasetResult
 }
@@ -136,6 +149,7 @@ const (
 	templateManagerModeCreate
 	templateManagerModeRename
 	templateManagerModeDestroy
+	templateManagerModeClone
 )
 
 type templateDatasetCreateState struct {
@@ -151,6 +165,11 @@ type templateDatasetCreateState struct {
 	renameInput      string
 	renamePreview    TemplateDatasetRenamePreview
 	destroyPreview   TemplateDatasetDestroyPreview
+	cloneSnapshots   []ZFSSnapshot
+	cloneCursor      int
+	cloneName        string
+	clonePreview     TemplateDatasetSnapshotClonePreview
+	cloneLoading     bool
 	applying         bool
 	parentApplying   bool
 	logs             []string
@@ -271,6 +290,27 @@ func templateDatasetDestroyCmd(dataset string, parentOverride *templateDatasetPa
 	return func() tea.Msg {
 		result := ExecuteTemplateDatasetDestroy(dataset, parentOverride)
 		return templateDatasetDestroyApplyMsg{result: result}
+	}
+}
+
+func templateSnapshotListCmd(dataset string) tea.Cmd {
+	return func() tea.Msg {
+		snapshots, err := listZFSSnapshots(dataset)
+		return templateSnapshotListMsg{snapshots: snapshots, err: err}
+	}
+}
+
+func templateSnapshotCloneCmd(dataset, snapshot, newName string, parentOverride *templateDatasetParent) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteTemplateSnapshotClone(dataset, snapshot, newName, parentOverride)
+		return templateSnapshotCloneApplyMsg{result: result}
+	}
+}
+
+func jailSnapshotCloneCmd(detail JailDetail, snapshot, newName, destination string, writeConfig bool) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteJailSnapshotClone(detail, snapshot, newName, destination, writeConfig)
+		return jailSnapshotCloneApplyMsg{result: result}
 	}
 }
 
@@ -523,6 +563,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateCreate.mode = templateManagerModeBrowse
 		m.templateCreate.message = fmt.Sprintf("Template dataset destroyed: %s", msg.result.Dataset)
 		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case templateSnapshotListMsg:
+		if m.mode != screenTemplateDatasetCreate {
+			return m, nil
+		}
+		m.templateCreate.cloneLoading = false
+		m.templateCreate.cloneSnapshots = append([]ZFSSnapshot(nil), msg.snapshots...)
+		m.templateCreate.boundCloneCursor()
+		m.templateCreate.refreshClonePreview()
+		if msg.err != nil {
+			m.templateCreate.message = msg.err.Error()
+			return m, nil
+		}
+		if len(m.templateCreate.cloneSnapshots) == 0 {
+			m.templateCreate.message = "No snapshots found for this template dataset."
+		}
+		return m, nil
+	case templateSnapshotCloneApplyMsg:
+		if m.mode != screenTemplateDatasetCreate {
+			return m, nil
+		}
+		m.templateCreate.applying = false
+		m.templateCreate.logs = append([]string(nil), msg.result.Logs...)
+		if msg.result.Err != nil {
+			m.templateCreate.message = msg.result.Err.Error()
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeBrowse
+		m.templateCreate.cloneSnapshots = nil
+		m.templateCreate.cloneName = ""
+		m.templateCreate.message = fmt.Sprintf("Template dataset cloned: %s", msg.result.Dataset)
+		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case jailSnapshotCloneApplyMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		m.zfsPanel.actionRunning = false
+		m.zfsPanel.logs = append([]string(nil), msg.result.Logs...)
+		if msg.result.Err != nil {
+			m.zfsPanel.err = msg.result.Err
+			m.zfsPanel.message = msg.result.Err.Error()
+			return m, nil
+		}
+		m.zfsPanel.cloneMode = false
+		m.zfsPanel.cloneName = ""
+		m.zfsPanel.cloneDestination = ""
+		m.zfsPanel.cloneWriteConfig = true
+		m.zfsPanel.err = nil
+		m.zfsPanel.message = fmt.Sprintf("Jail clone created: %s", msg.result.Name)
+		return m, pollCmd()
 	case zfsOpenMsg:
 		if msg.result.Detail.ZFS == nil || strings.TrimSpace(msg.result.Detail.ZFS.Name) == "" {
 			if msg.result.Err != nil {
@@ -538,7 +627,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailErr = msg.result.Err
 		m.detailLoading = false
 		m.mode = screenZFSPanel
-		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenDashboard)
+		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenDashboard, m.detail)
 		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	case tickMsg:
 		return m, pollCmd()
@@ -610,9 +699,9 @@ func (m model) isTextEntryMode() bool {
 		if m.templateCreate.parentEdit {
 			return true
 		}
-		return m.templateCreate.mode == templateManagerModeCreate || m.templateCreate.mode == templateManagerModeRename
+		return m.templateCreate.mode == templateManagerModeCreate || m.templateCreate.mode == templateManagerModeRename || m.templateCreate.mode == templateManagerModeClone
 	case screenZFSPanel:
-		return m.zfsPanel.inputMode
+		return m.zfsPanel.inputMode || m.zfsPanel.cloneMode
 	default:
 		return false
 	}
@@ -761,7 +850,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = screenZFSPanel
-		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail)
+		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail, m.detail)
 		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
 	case "x", "X":
 		jail, ok := m.detailJail()
@@ -1098,6 +1187,9 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case templateManagerModeRename:
 			m.templateCreate.appendRenameInput(string(msg.Runes))
 			return m, nil
+		case templateManagerModeClone:
+			m.templateCreate.appendCloneName(string(msg.Runes))
+			return m, nil
 		}
 	}
 
@@ -1130,6 +1222,12 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.boundCursor()
 			return m, nil
 		}
+		if m.templateCreate.mode == templateManagerModeClone {
+			m.templateCreate.cloneCursor++
+			m.templateCreate.boundCloneCursor()
+			m.templateCreate.refreshClonePreview()
+			return m, nil
+		}
 		if m.templateCreate.parentEdit {
 			m.templateCreate.parentField++
 			if m.templateCreate.parentField > 1 {
@@ -1141,6 +1239,12 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.templateCreate.mode == templateManagerModeBrowse {
 			m.templateCreate.cursor--
 			m.templateCreate.boundCursor()
+			return m, nil
+		}
+		if m.templateCreate.mode == templateManagerModeClone {
+			m.templateCreate.cloneCursor--
+			m.templateCreate.boundCloneCursor()
+			m.templateCreate.refreshClonePreview()
 			return m, nil
 		}
 		if m.templateCreate.parentEdit {
@@ -1212,6 +1316,24 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Press enter to destroy this template dataset."
 		}
 		return m, nil
+	case "n", "N":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeBrowse {
+			return m, nil
+		}
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			m.templateCreate.message = "No template dataset selected."
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeClone
+		m.templateCreate.cloneLoading = true
+		m.templateCreate.cloneSnapshots = nil
+		m.templateCreate.cloneCursor = 0
+		m.templateCreate.cloneName = filepath.Base(item.Name) + "-clone"
+		m.templateCreate.clonePreview = TemplateDatasetSnapshotClonePreview{}
+		m.templateCreate.logs = nil
+		m.templateCreate.message = "Loading template snapshots..."
+		return m, templateSnapshotListCmd(item.Name)
 	case "ctrl+e":
 		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeCreate {
 			return m, nil
@@ -1301,6 +1423,16 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.applying = true
 			return m, templateDatasetDestroyCmd(m.templateCreate.destroyPreview.Current.Name, m.templateCreate.parentOverride())
 		}
+		if m.templateCreate.mode == templateManagerModeClone {
+			if m.templateCreate.clonePreview.Err != nil {
+				m.templateCreate.message = m.templateCreate.clonePreview.Err.Error()
+				return m, nil
+			}
+			m.templateCreate.message = "Cloning template snapshot..."
+			m.templateCreate.logs = nil
+			m.templateCreate.applying = true
+			return m, templateSnapshotCloneCmd(m.templateCreate.clonePreview.Current.Name, m.templateCreate.clonePreview.Snapshot, m.templateCreate.cloneName, m.templateCreate.parentOverride())
+		}
 	case "ctrl+r":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
@@ -1309,6 +1441,16 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.refreshPreview()
 			m.templateCreate.message = "Template dataset preview refreshed."
 			return m, nil
+		}
+		if m.templateCreate.mode == templateManagerModeClone {
+			item, ok := m.templateCreate.selectedItem()
+			if !ok {
+				m.templateCreate.message = "No template dataset selected."
+				return m, nil
+			}
+			m.templateCreate.cloneLoading = true
+			m.templateCreate.message = "Refreshing template snapshots..."
+			return m, templateSnapshotListCmd(item.Name)
 		}
 		m.templateCreate.loading = true
 		m.templateCreate.message = "Template dataset list refreshed."
@@ -1326,6 +1468,8 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.backspaceSource()
 		case templateManagerModeRename:
 			m.templateCreate.backspaceRenameInput()
+		case templateManagerModeClone:
+			m.templateCreate.backspaceCloneName()
 		}
 		return m, nil
 	}
@@ -1436,6 +1580,7 @@ func (m model) helpLines(width int) []string {
 		sectionStyle.Render("Jail Detail"),
 		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
 		truncate("a: toggle advanced runtime/default parameters", width),
+		truncate("network summary shows configured/runtime network state plus host validation", width),
 		truncate("r: refresh selected jail details", width),
 		truncate("b: retry linux bootstrap for a running linux jail", width),
 		truncate("z: open ZFS integration panel", width),
@@ -1450,6 +1595,7 @@ func (m model) helpLines(width int) []string {
 		truncate("j/k: select snapshot", width),
 		truncate("c: create snapshot", width),
 		truncate("r: rollback selected snapshot (confirmation required)", width),
+		truncate("n: clone selected snapshot as a new jail", width),
 		truncate("selected snapshot details show creation time, used size, and rollback implications", width),
 		truncate("x: refresh snapshot list", width),
 		truncate("esc: cancel prompt or return to detail", width),
@@ -1467,9 +1613,10 @@ func (m model) helpLines(width int) []string {
 		truncate("confirmation enter: execute create actions", width),
 		"",
 		sectionStyle.Render("Template Manager"),
-		truncate("j/k: select | c: create | r: rename | x: destroy", width),
+		truncate("j/k: select | c: create | n: clone snapshot | r: rename | x: destroy", width),
 		truncate("enter applies the selected mountpoint when opened from the thin-jail wizard", width),
 		truncate("create mode accepts a source path, release tag, userland entry, or custom URL", width),
+		truncate("clone mode lets you pick a snapshot and clone it into a new template dataset", width),
 		truncate("when parent templates dataset is missing: enter creates proposed parent, ctrl+e edits parent values", width),
 		truncate("ctrl+r: refresh the template list, or refresh create preview while creating", width),
 		truncate("esc: return to dashboard", width),
@@ -1702,9 +1849,9 @@ func (m model) renderTemplateDatasetCreateView() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
 	}
 
-	hint := "j/k: select | c: create | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	hint := "j/k: select | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
-		hint = "j/k: select | enter: apply mountpoint | c: create | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.mode == templateManagerModeCreate {
 		hint = "type source | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
@@ -1721,8 +1868,14 @@ func (m model) renderTemplateDatasetCreateView() string {
 	if m.templateCreate.mode == templateManagerModeDestroy {
 		hint = "enter: destroy dataset | esc: back | ctrl+c: quit"
 	}
+	if m.templateCreate.mode == templateManagerModeClone {
+		hint = "type clone name | j/k: snapshot | enter: clone | backspace: edit | ctrl+r: refresh snapshots | esc: back | ctrl+c: quit"
+	}
 	if m.templateCreate.loading {
 		hint = "Refreshing template datasets... please wait | ctrl+c: quit"
+	}
+	if m.templateCreate.cloneLoading {
+		hint = "Loading template snapshots... please wait | ctrl+c: quit"
 	}
 	if m.templateCreate.parentApplying {
 		hint = "Creating template parent dataset... please wait | ctrl+c: quit"
@@ -1733,6 +1886,8 @@ func (m model) renderTemplateDatasetCreateView() string {
 			hint = "Renaming template dataset... please wait | ctrl+c: quit"
 		case templateManagerModeDestroy:
 			hint = "Destroying template dataset... please wait | ctrl+c: quit"
+		case templateManagerModeClone:
+			hint = "Cloning template snapshot... please wait | ctrl+c: quit"
 		default:
 			hint = "Creating template dataset... please wait | ctrl+c: quit"
 		}
@@ -1897,6 +2052,51 @@ func (m model) templateManagerDetailLines(width int) []string {
 				for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
 					lines = append(lines, wizardErrorStyle.Render(line))
 				}
+			}
+		}
+	case templateManagerModeClone:
+		lines = append(lines, sectionStyle.Render("Clone Template Snapshot"))
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			lines = append(lines, "No template dataset selected.")
+			break
+		}
+		lines = append(lines, truncate("Dataset: "+item.Name, width))
+		lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.cloneName, filepath.Base(item.Name)+"-clone"), width)))
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Snapshots"))
+		if m.templateCreate.cloneLoading {
+			lines = append(lines, "Loading snapshots...")
+			break
+		}
+		if len(m.templateCreate.cloneSnapshots) == 0 {
+			lines = append(lines, "No snapshots found for this template dataset.")
+			break
+		}
+		for idx, snapshot := range m.templateCreate.cloneSnapshots {
+			row := fmt.Sprintf("  %s  %s  %s", truncate(snapshotShortName(snapshot.Name), 18), truncate(snapshot.Creation, 18), snapshot.Used)
+			if idx == m.templateCreate.cloneCursor {
+				row = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+fmt.Sprintf("%s  %s  %s", snapshotShortName(snapshot.Name), snapshot.Creation, snapshot.Used), width))
+			} else {
+				row = truncate(row, width)
+			}
+			lines = append(lines, row)
+		}
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Preview"))
+		preview := m.templateCreate.clonePreview
+		if preview.Snapshot != "" {
+			lines = append(lines, truncate("Snapshot: "+preview.Snapshot, width))
+		}
+		if preview.NewDataset != "" {
+			lines = append(lines, truncate("Clone dataset: "+preview.NewDataset, width))
+		}
+		if preview.NewMountpoint != "" {
+			lines = append(lines, truncate("Clone mountpoint: "+preview.NewMountpoint, width))
+		}
+		if preview.Err != nil {
+			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
+				lines = append(lines, wizardErrorStyle.Render(line))
 			}
 		}
 	default:
@@ -2264,6 +2464,26 @@ func (m model) detailLines(width int) []string {
 	}
 	appendLine("")
 
+	if m.detail.NetworkSummary != nil {
+		lines = append(lines, sectionStyle.Render("Network summary"))
+		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Configured) {
+			appendLine(fmt.Sprintf("Configured %s: %s", key, m.detail.NetworkSummary.Configured[key]))
+		}
+		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Runtime) {
+			appendLine(fmt.Sprintf("Runtime %s: %s", key, m.detail.NetworkSummary.Runtime[key]))
+		}
+		if len(m.detail.NetworkSummary.Validation) > 0 {
+			for _, line := range m.detail.NetworkSummary.Validation {
+				if looksLikeWarningText(line) {
+					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
+					continue
+				}
+				appendLine(line)
+			}
+		}
+		appendLine("")
+	}
+
 	if m.detailShowAdvanced {
 		lines = append(lines, sectionStyle.Render("Advanced runtime parameters"))
 		if len(m.detail.AdvancedRuntimeFields) == 0 {
@@ -2495,6 +2715,25 @@ func (s *templateDatasetCreateState) refreshRenamePreview() {
 	s.renamePreview = InspectTemplateDatasetRename(item.Name, s.renameInput, s.parentOverride())
 }
 
+func (s *templateDatasetCreateState) refreshClonePreview() {
+	item, ok := s.selectedItem()
+	if !ok {
+		s.clonePreview = TemplateDatasetSnapshotClonePreview{}
+		return
+	}
+	s.boundCloneCursor()
+	snapshot, ok := s.selectedCloneSnapshot()
+	if !ok {
+		s.clonePreview = TemplateDatasetSnapshotClonePreview{
+			Current: item,
+			NewName: strings.TrimSpace(s.cloneName),
+			Err:     fmt.Errorf("select a snapshot to clone"),
+		}
+		return
+	}
+	s.clonePreview = InspectTemplateSnapshotClone(item.Name, snapshot.Name, s.cloneName, s.parentOverride())
+}
+
 func (s *templateDatasetCreateState) appendSource(text string) {
 	if text == "" {
 		return
@@ -2533,6 +2772,26 @@ func (s *templateDatasetCreateState) backspaceRenameInput() {
 	s.logs = nil
 	s.message = ""
 	s.refreshRenamePreview()
+}
+
+func (s *templateDatasetCreateState) appendCloneName(text string) {
+	if text == "" {
+		return
+	}
+	s.cloneName += text
+	s.logs = nil
+	s.message = ""
+	s.refreshClonePreview()
+}
+
+func (s *templateDatasetCreateState) backspaceCloneName() {
+	if s.cloneName == "" {
+		return
+	}
+	s.cloneName = s.cloneName[:len(s.cloneName)-1]
+	s.logs = nil
+	s.message = ""
+	s.refreshClonePreview()
 }
 
 func (s *templateDatasetCreateState) parentOverride() *templateDatasetParent {
@@ -2605,6 +2864,27 @@ func (s *templateDatasetCreateState) boundCursor() {
 	}
 	if s.cursor >= len(s.items) {
 		s.cursor = len(s.items) - 1
+	}
+}
+
+func (s *templateDatasetCreateState) selectedCloneSnapshot() (ZFSSnapshot, bool) {
+	if len(s.cloneSnapshots) == 0 {
+		return ZFSSnapshot{}, false
+	}
+	s.boundCloneCursor()
+	return s.cloneSnapshots[s.cloneCursor], true
+}
+
+func (s *templateDatasetCreateState) boundCloneCursor() {
+	if len(s.cloneSnapshots) == 0 {
+		s.cloneCursor = 0
+		return
+	}
+	if s.cloneCursor < 0 {
+		s.cloneCursor = 0
+	}
+	if s.cloneCursor >= len(s.cloneSnapshots) {
+		s.cloneCursor = len(s.cloneSnapshots) - 1
 	}
 }
 

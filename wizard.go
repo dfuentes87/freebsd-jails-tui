@@ -1193,6 +1193,9 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 
 	switch jailType {
 	case "vnet":
+		lines = append(lines,
+			fmt.Sprintf("  # freebsd-jails-tui: bridge=%s bridge_policy=%s uplink=%s default_router=%s;", strings.TrimSpace(values.Bridge), effectiveBridgePolicy(values), strings.TrimSpace(values.Uplink), strings.TrimSpace(values.DefaultRouter)),
+		)
 		lines = append(lines, buildVNETJailConfig(values)...)
 	case "linux":
 		lines = append(lines,

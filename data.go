@@ -41,6 +41,7 @@ type JailDetail struct {
 	JLSFields             map[string]string
 	RuntimeValues         map[string]string
 	AdvancedRuntimeFields map[string]string
+	NetworkSummary        *JailNetworkSummary
 	JailConfSource        string
 	JailConfRaw           []string
 	JailConfValues        map[string]string
@@ -210,6 +211,7 @@ func CollectJailDetail(name string, jid int, pathHint string, now time.Time) (Ja
 	addErr("rctl", rctlErr)
 	detail.RctlRules = rules
 	detail.RuntimeValues, detail.AdvancedRuntimeFields = classifyDetailRuntime(detail.JLSFields, detail.JailConfValues)
+	detail.NetworkSummary = collectJailNetworkSummary(detail)
 	detail.LinuxReadiness = collectLinuxReadiness(detail)
 
 	detail.LastUpdated = now
