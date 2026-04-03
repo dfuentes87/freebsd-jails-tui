@@ -1580,6 +1580,7 @@ func (m model) helpLines(width int) []string {
 		sectionStyle.Render("Jail Detail"),
 		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
 		truncate("a: toggle advanced runtime/default parameters", width),
+		truncate("startup policy shows jail_list order and configured depend values", width),
 		truncate("network summary shows configured/runtime network state plus host validation", width),
 		truncate("r: refresh selected jail details", width),
 		truncate("b: retry linux bootstrap for a running linux jail", width),
@@ -1608,6 +1609,7 @@ func (m model) helpLines(width int) []string {
 		truncate("s/l on the confirmation step: save/load templates", width),
 		truncate("ctrl+u: open userland selector", width),
 		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
+		truncate("startup order updates rc.conf jail_list; dependencies write depend in jail.conf", width),
 		truncate("vnet preflight checks bridge/uplink host state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
@@ -2326,7 +2328,7 @@ func (m model) wizardLines(width int) []string {
 				lines = append(lines, truncate("  ctrl+t: open the template manager and apply an extracted ZFS template dataset mountpoint", width))
 			}
 		}
-		if field.ID == "name" || field.ID == "interface" || field.ID == "bridge_policy" || field.ID == "uplink" || field.ID == "ip6" {
+		if field.ID == "name" || field.ID == "dependencies" || field.ID == "interface" || field.ID == "bridge_policy" || field.ID == "uplink" || field.ID == "ip6" {
 			lines = append(lines, "")
 		}
 	}
@@ -2444,6 +2446,27 @@ func (m model) detailLines(width int) []string {
 		}
 		for _, flag := range m.detail.JailConfFlags {
 			appendLine(flag)
+		}
+	}
+	appendLine("")
+
+	lines = append(lines, sectionStyle.Render("Startup policy"))
+	if m.detail.StartupConfig == nil {
+		appendLine("Startup policy unavailable.")
+	} else {
+		if m.detail.StartupConfig.InJailList {
+			appendLine(fmt.Sprintf("jail_list position: %d of %d", m.detail.StartupConfig.Position, len(m.detail.StartupConfig.JailList)))
+		} else if len(m.detail.StartupConfig.JailList) == 0 {
+			appendLine("jail_list: empty (all configured jails start unless depend changes the order)")
+		} else {
+			appendLine("jail_list: not present (manual start required when jail_list is used)")
+		}
+		appendLine("Dependencies: " + dependencySummary(strings.Join(m.detail.StartupConfig.Dependencies, " ")))
+		if len(m.detail.StartupConfig.JailList) > 0 {
+			appendLine("Effective jail_list: " + strings.Join(m.detail.StartupConfig.JailList, " "))
+		}
+		if m.detail.StartupConfig.ReadError != "" {
+			lines = append(lines, wizardErrorStyle.Render(truncate("jail_list read error: "+m.detail.StartupConfig.ReadError, max(1, width))))
 		}
 	}
 	appendLine("")

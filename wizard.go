@@ -78,6 +78,8 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
+			{ID: "startup_order", Label: "Startup order", Placeholder: "append", Help: "Optional rc.conf jail_list position; blank appends"},
+			{ID: "dependencies", Label: "Dependencies", Placeholder: "db01 cache01", Help: "Optional jail names; writes depend in jail.conf"},
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
 			{ID: "memory_limit", Label: "Memory", Placeholder: "2G"},
 			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: ""},
@@ -112,6 +114,8 @@ type jailWizardValues struct {
 	IP6             string
 	DefaultRouter   string
 	Hostname        string
+	StartupOrder    string
+	Dependencies    string
 	LinuxDistro     string
 	LinuxRelease    string
 	LinuxBootstrap  string
@@ -560,6 +564,10 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.DefaultRouter
 	case "hostname":
 		return &w.values.Hostname
+	case "startup_order":
+		return &w.values.StartupOrder
+	case "dependencies":
+		return &w.values.Dependencies
 	case "linux_distro":
 		return &w.values.LinuxDistro
 	case "linux_release":
@@ -605,6 +613,10 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.DefaultRouter
 	case "hostname":
 		return w.values.Hostname
+	case "startup_order":
+		return w.values.StartupOrder
+	case "dependencies":
+		return w.values.Dependencies
 	case "linux_distro":
 		return w.values.LinuxDistro
 	case "linux_release":
@@ -724,6 +736,14 @@ func (w jailCreationWizard) validateCurrentStep() error {
 			return fmt.Errorf("default router must be a valid IPv4 or IPv6 address")
 		}
 	}
+	if _, err := parseStartupOrderValue(w.values.StartupOrder); err != nil {
+		return err
+	}
+	dependencies, err := parseJailDependencyNames(w.values.Dependencies, w.values.Name)
+	if err != nil {
+		return err
+	}
+	w.values.Dependencies = strings.Join(dependencies, " ")
 	if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
 		cpu, err := strconv.Atoi(value)
 		if err != nil || cpu <= 0 || cpu > 100 {
@@ -932,6 +952,8 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
 		fmt.Sprintf("Hostname: %s", valueOrDash(w.values.Hostname)),
+		fmt.Sprintf("Startup order: %s", startupOrderSummary(w.values.StartupOrder)),
+		fmt.Sprintf("Dependencies: %s", dependencySummary(w.values.Dependencies)),
 		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
 		fmt.Sprintf("Memory limit: %s", valueOrDash(w.values.MemoryLimit)),
 		fmt.Sprintf("Process limit: %s", valueOrDash(w.values.ProcessLimit)),
@@ -1041,6 +1063,11 @@ func (w jailCreationWizard) commandPlanLines() []string {
 	}
 
 	addStep("Write jail config: " + jailConfigPathForName(w.values.Name))
+	jailListAction := startupOrderPlanLine(w.values)
+	if jailListAction != "" {
+		addStep("Update rc.conf jail_list for startup order:")
+		addDetail("   " + jailListAction)
+	}
 	addStep(fmt.Sprintf("Start jail: service jail start %s", w.values.Name))
 
 	if strings.TrimSpace(w.values.CPUPercent) != "" ||
@@ -1220,6 +1247,9 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	if strings.TrimSpace(fstabPath) != "" {
 		lines = append(lines, fmt.Sprintf("  mount.fstab = %q;", fstabPath))
 	}
+	if dependencies := strings.Join(mustParseJailDependencyNames(values.Dependencies), ", "); dependencies != "" {
+		lines = append(lines, fmt.Sprintf("  depend = %s;", dependencies))
+	}
 	lines = append(lines, "  persist;")
 	lines = append(lines, "}")
 	return lines
@@ -1338,6 +1368,74 @@ func effectiveBridgePolicy(values jailWizardValues) string {
 	return policy
 }
 
+func parseStartupOrderValue(raw string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	position, err := strconv.Atoi(value)
+	if err != nil || position <= 0 {
+		return 0, fmt.Errorf("startup order must be a positive integer or blank to append")
+	}
+	return position, nil
+}
+
+func parseJailDependencyNames(raw, self string) ([]string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	replacer := strings.NewReplacer(",", " ", "\n", " ", ";", " ", "\t", " ")
+	tokens := strings.Fields(replacer.Replace(value))
+	deps := make([]string, 0, len(tokens))
+	seen := map[string]struct{}{}
+	self = strings.TrimSpace(self)
+	for _, token := range tokens {
+		if !jailNamePattern.MatchString(token) {
+			return nil, fmt.Errorf("dependency %q is not a valid jail name", token)
+		}
+		if self != "" && token == self {
+			return nil, fmt.Errorf("dependency %q cannot reference the jail itself", token)
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		deps = append(deps, token)
+	}
+	sort.Strings(deps)
+	return deps, nil
+}
+
+func mustParseJailDependencyNames(raw string) []string {
+	deps, _ := parseJailDependencyNames(raw, "")
+	return deps
+}
+
+func startupOrderSummary(raw string) string {
+	position, err := parseStartupOrderValue(raw)
+	if err != nil || position == 0 {
+		return "append to jail_list"
+	}
+	return fmt.Sprintf("position %d in jail_list", position)
+}
+
+func dependencySummary(raw string) string {
+	deps := mustParseJailDependencyNames(raw)
+	if len(deps) == 0 {
+		return "-"
+	}
+	return strings.Join(deps, " ")
+}
+
+func startupOrderPlanLine(values jailWizardValues) string {
+	position, _ := parseStartupOrderValue(values.StartupOrder)
+	if position <= 0 {
+		return fmt.Sprintf("if jail_list is already set: append %s; otherwise keep implicit 'start all configured jails' behavior", strings.TrimSpace(values.Name))
+	}
+	return fmt.Sprintf("sysrc jail_list=\"... %s ...\"  # place %s at position %d", strings.TrimSpace(values.Name), strings.TrimSpace(values.Name), position)
+}
+
 func effectiveLinuxRelease(values jailWizardValues) string {
 	release := strings.TrimSpace(values.LinuxRelease)
 	if release != "" {
@@ -1396,7 +1494,7 @@ func wizardSectionForField(id string) string {
 	switch id {
 	case "jail_type":
 		return "0. Jail Type"
-	case "name", "dataset":
+	case "name", "dataset", "startup_order", "dependencies":
 		return "1. Name & Destination"
 	case "template_release":
 		return "2. Template or release"

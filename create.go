@@ -181,6 +181,11 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 			logs = append(logs, "rollback warning: "+err.Error())
 		}
 	})
+	startupCleanup, err := updateJailStartupConfig(result.Name, values, &logs)
+	if err != nil {
+		return fail(err)
+	}
+	addCleanup(startupCleanup)
 
 	if _, err := runLoggedCommand(&logs, "service", "jail", "start", result.Name); err != nil {
 		return fail(err)

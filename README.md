@@ -121,6 +121,7 @@ Sections include:
 
 - Overview
 - configured state
+- startup policy
 - runtime state
 - network summary
 - ZFS dataset
@@ -174,6 +175,8 @@ Wizard fields include:
 - IPv6
 - default router
 - hostname
+- startup order
+- dependencies
 - Linux distro
 - Linux release
 - Linux bootstrap mode
@@ -187,6 +190,8 @@ Important behavior:
 - `Destination` expects a full path, for example `/usr/local/jails/containers/web01`
 - `Destination` is prefilled from the initial config path when available
 - `Hostname` is optional; if empty, the jail name is used
+- `Startup order` updates `jail_list` in `rc.conf` when explicit list ordering is needed; if `jail_list` is currently empty and startup order is left blank, the TUI preserves the default “start all configured jails” behavior
+- `Dependencies` writes the jail's `depend` parameter in `jail.conf`, which can override plain `jail_list` ordering
 - `IPv6` is optional
 - `inherit` is allowed for non-`vnet` networking
 - `inherit` is rejected for `vnet` jails
