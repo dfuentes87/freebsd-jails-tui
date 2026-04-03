@@ -136,6 +136,12 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	}
 	logf("Starting jail creation for %s", result.Name)
 
+	hostNetworkCleanup, err := ensureHostNetworkReady(values, &logs)
+	if err != nil {
+		return fail(err)
+	}
+	addCleanup(hostNetworkCleanup)
+
 	jailPath, pathCleanup, err := prepareJailPath(values, destination, &logs)
 	if err != nil {
 		return fail(err)

@@ -9,7 +9,10 @@ import (
 	"unicode"
 )
 
-var zfsDatasetComponentPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
+var (
+	zfsDatasetComponentPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
+	networkInterfacePattern    = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
+)
 
 func normalizeAbsolutePath(value string) string {
 	value = strings.TrimSpace(value)
@@ -120,6 +123,28 @@ func validateTemplateRenameLeafName(value string) (string, error) {
 		return "", fmt.Errorf("new template name %q is invalid; allowed characters are letters, numbers, ., _, -", name)
 	}
 	return name, nil
+}
+
+func validateNetworkInterfaceName(value, field string) (string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	if containsControlOrNewline(raw) {
+		return "", fmt.Errorf("%s contains invalid control characters", field)
+	}
+	if !networkInterfacePattern.MatchString(raw) {
+		return "", fmt.Errorf("%s %q is invalid", field, raw)
+	}
+	return raw, nil
+}
+
+func validateOptionalNetworkInterfaceName(value, field string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	return validateNetworkInterfaceName(value, field)
 }
 
 func validateMountTarget(target string) (string, error) {

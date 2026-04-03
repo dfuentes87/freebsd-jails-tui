@@ -962,6 +962,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.wizard.values.Interface = "em0"
 			}
 			m.wizard.refreshLinuxPrereqs()
+			m.wizard.refreshNetworkPrereqs()
 			m.wizard.normalizeStep()
 			m.wizard.endTemplateMode()
 			m.wizard.message = fmt.Sprintf("Template %q loaded.", template.Name)
@@ -1461,6 +1462,7 @@ func (m model) helpLines(width int) []string {
 		truncate("s/l on the confirmation step: save/load templates", width),
 		truncate("ctrl+u: open userland selector", width),
 		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
+		truncate("vnet preflight checks bridge/uplink host state and can create a missing bridge before create", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
 		"",
@@ -2050,11 +2052,16 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.summaryLines() {
 			lines = append(lines, truncate(line, width))
 		}
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Network prerequisites"))
+		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
 		if normalizedJailType(m.wizard.values.JailType) == "linux" {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Linux prerequisites"))
 			for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
-				lines = append(lines, truncate(line, width))
+				appendStyledWizardLine(&lines, line, width)
 			}
 		}
 		lines = append(lines, "")
@@ -2124,11 +2131,19 @@ func (m model) wizardLines(width int) []string {
 		}
 	}
 
+	if wizardShowsNetworkPrereqs(step) {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Network prerequisites"))
+		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
+	}
+
 	if normalizedJailType(m.wizard.values.JailType) == "linux" && wizardsShowsLinuxPrereqs(step) {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
 		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
-			lines = append(lines, truncate(line, width))
+			appendStyledWizardLine(&lines, line, width)
 		}
 	}
 
@@ -2143,6 +2158,24 @@ func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 		}
 	}
 	return false
+}
+
+func wizardShowsNetworkPrereqs(step wizardStep) bool {
+	for _, field := range step.Fields {
+		switch field.ID {
+		case "interface", "bridge", "uplink", "ip4", "ip6", "default_router":
+			return true
+		}
+	}
+	return false
+}
+
+func appendStyledWizardLine(lines *[]string, text string, width int) {
+	if looksLikeWarningText(text) {
+		*lines = append(*lines, wizardErrorStyle.Render(truncate(text, width)))
+		return
+	}
+	*lines = append(*lines, truncate(text, width))
 }
 
 func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {

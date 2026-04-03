@@ -34,7 +34,7 @@ The application is aimed at a FreeBSD host that already uses the base jail tooli
 - The application assumes the host is using the standard FreeBSD jail tooling.
 - The type selector now changes provisioning and generated `jail.conf`, but it is still opinionated and intentionally scoped.
 - `thin` assumes an OpenZFS-backed template dataset and destination parent dataset.
-- `vnet` assumes a host bridge interface already exists.
+- `vnet` can create a missing bridge automatically, but it still depends on valid host networking choices.
 - `linux` bootstraps a Linux userspace under `/compat/<distro>` and still depends on working networking/package access inside the jail.
 - Linux bootstrap is treated as a second phase. If jail creation succeeds but Linux bootstrap preflight fails, the jail is kept and the TUI reports a warning instead of destroying or rolling back the new jail.
 - Detail view includes some raw runtime values from `jls`, which may show kernel defaults or module parameters in addition to explicit `jail.conf` settings.
@@ -204,7 +204,8 @@ Type-specific notes:
   - clones the template dataset into the destination dataset
 - `vnet`
   - uses `vnet`, `vnet.interface`, `devfs_ruleset = 5`, and generated `exec.prestart` / `exec.poststop` commands
-  - requires a bridge such as `bridge0` and can optionally add an uplink to that bridge during prestart
+  - requires a bridge such as `bridge0`, validates bridge/uplink/IP host state before create, and can create a missing bridge automatically
+  - can attach an optional uplink to that bridge before jail start
   - configures IP addresses inside the jail with `ifconfig`
 - `linux`
   - enables `linux_enable=YES` and starts the host `linux` service during creation
