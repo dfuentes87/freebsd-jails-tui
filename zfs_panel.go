@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,29 +30,39 @@ type zfsActionMsg struct {
 }
 
 type zfsPanelState struct {
-	returnMode      screenMode
-	dataset         string
-	snapshots       []ZFSSnapshot
-	cursor          int
-	offset          int
-	loading         bool
-	actionRunning   bool
-	inputMode       bool
-	inputValue      string
-	confirmRollback bool
-	rollbackTarget  string
-	message         string
-	logs            []string
-	err             error
+	returnMode       screenMode
+	dataset          string
+	sourceDetail     JailDetail
+	snapshots        []ZFSSnapshot
+	cursor           int
+	offset           int
+	loading          bool
+	actionRunning    bool
+	inputMode        bool
+	inputValue       string
+	confirmRollback  bool
+	rollbackTarget   string
+	cloneMode        bool
+	cloneField       int
+	cloneName        string
+	cloneDestination string
+	cloneWriteConfig bool
+	clonePreview     JailSnapshotClonePreview
+	message          string
+	logs             []string
+	err              error
 }
 
-func newZFSPanelState(dataset string, returnMode screenMode) zfsPanelState {
-	return zfsPanelState{
-		returnMode: returnMode,
-		dataset:    strings.TrimSpace(dataset),
-		loading:    true,
-		message:    "Loading snapshots...",
+func newZFSPanelState(dataset string, returnMode screenMode, sourceDetail JailDetail) zfsPanelState {
+	panel := zfsPanelState{
+		returnMode:       returnMode,
+		dataset:          strings.TrimSpace(dataset),
+		sourceDetail:     sourceDetail,
+		loading:          true,
+		cloneWriteConfig: true,
+		message:          "Loading snapshots...",
 	}
+	return panel
 }
 
 func listZFSSnapshotsCmd(dataset string) tea.Cmd {
@@ -176,6 +187,71 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.zfsPanel.cloneMode {
+		if m.zfsPanel.actionRunning {
+			return m, nil
+		}
+		switch msg.String() {
+		case "esc", "left":
+			m.zfsPanel.cloneMode = false
+			m.zfsPanel.message = "Jail snapshot clone canceled."
+			return m, nil
+		case "tab", "down":
+			m.zfsPanel.cloneField++
+			if m.zfsPanel.cloneField > 1 {
+				m.zfsPanel.cloneField = 0
+			}
+			return m, nil
+		case "shift+tab", "up":
+			m.zfsPanel.cloneField--
+			if m.zfsPanel.cloneField < 0 {
+				m.zfsPanel.cloneField = 1
+			}
+			return m, nil
+		case "j":
+			m.zfsPanel.cursor++
+			m.zfsPanel.boundCursor(m.zfsListHeight())
+			m.zfsPanel.refreshClonePreview()
+			return m, nil
+		case "k":
+			m.zfsPanel.cursor--
+			m.zfsPanel.boundCursor(m.zfsListHeight())
+			m.zfsPanel.refreshClonePreview()
+			return m, nil
+		case "g", "home":
+			m.zfsPanel.cursor = 0
+			m.zfsPanel.boundCursor(m.zfsListHeight())
+			m.zfsPanel.refreshClonePreview()
+			return m, nil
+		case "G", "end":
+			m.zfsPanel.cursor = len(m.zfsPanel.snapshots) - 1
+			m.zfsPanel.boundCursor(m.zfsListHeight())
+			m.zfsPanel.refreshClonePreview()
+			return m, nil
+		case "t":
+			m.zfsPanel.cloneWriteConfig = !m.zfsPanel.cloneWriteConfig
+			m.zfsPanel.refreshClonePreview()
+			return m, nil
+		case "enter":
+			if m.zfsPanel.clonePreview.Err != nil {
+				m.zfsPanel.message = m.zfsPanel.clonePreview.Err.Error()
+				return m, nil
+			}
+			m.zfsPanel.actionRunning = true
+			m.zfsPanel.logs = nil
+			m.zfsPanel.err = nil
+			m.zfsPanel.message = "Cloning jail snapshot..."
+			return m, jailSnapshotCloneCmd(m.zfsPanel.sourceDetail, m.zfsPanel.clonePreview.Snapshot, m.zfsPanel.cloneName, m.zfsPanel.cloneDestination, m.zfsPanel.cloneWriteConfig)
+		case "backspace", "delete":
+			m.zfsPanel.backspaceCloneField()
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			m.zfsPanel.appendCloneField(string(msg.Runes))
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc", "left":
 		if m.zfsPanel.actionRunning {
@@ -217,6 +293,31 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.zfsPanel.confirmRollback = true
 		m.zfsPanel.rollbackTarget = snapshot.Name
 		m.zfsPanel.message = "Press enter to confirm rollback to selected snapshot."
+		return m, nil
+	case "n", "N":
+		if m.zfsPanel.actionRunning {
+			return m, nil
+		}
+		snapshot, ok := m.zfsPanel.selectedSnapshot()
+		if !ok {
+			m.zfsPanel.message = "No snapshot selected."
+			return m, nil
+		}
+		baseName := strings.TrimSpace(m.zfsPanel.sourceDetail.Name)
+		if baseName == "" {
+			baseName = "cloned-jail"
+		}
+		parentDir := filepath.Dir(strings.TrimSpace(m.zfsPanel.sourceDetail.Path))
+		if parentDir == "." || parentDir == "" {
+			parentDir = "/usr/local/jails/containers"
+		}
+		m.zfsPanel.cloneMode = true
+		m.zfsPanel.cloneField = 0
+		m.zfsPanel.cloneName = baseName + "-clone"
+		m.zfsPanel.cloneDestination = filepath.Join(parentDir, m.zfsPanel.cloneName)
+		m.zfsPanel.cloneWriteConfig = true
+		m.zfsPanel.clonePreview = InspectJailSnapshotClone(m.zfsPanel.sourceDetail, snapshot.Name, m.zfsPanel.cloneName, m.zfsPanel.cloneDestination, m.zfsPanel.cloneWriteConfig)
+		m.zfsPanel.message = "Review the jail snapshot clone preview, then press enter to clone it."
 		return m, nil
 	case "enter":
 		if m.zfsPanel.actionRunning {
@@ -285,23 +386,28 @@ func (m model) renderZFSPanelView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	hint := "j/k: select snapshot | c: create snapshot | r: rollback selected | x: refresh | esc: back | q: quit"
+	hint := "j/k: select snapshot | c: create snapshot | r: rollback selected | n: clone as jail | x: refresh | esc: back | q: quit"
 	if m.zfsPanel.inputMode {
 		hint = "Type snapshot name | enter: create snapshot | backspace: edit | esc: cancel"
 	}
 	if m.zfsPanel.confirmRollback {
 		hint = "Rollback confirmation pending: enter to confirm | esc to cancel"
 	}
+	if m.zfsPanel.cloneMode {
+		hint = "type name/destination | tab/shift+tab: field | j/k: snapshot | t: toggle config | enter: clone | esc: cancel | ctrl+c: quit"
+	}
 	if m.zfsPanel.actionRunning {
-		hint = "Executing ZFS action... please wait | q: quit"
+		hint = "Executing ZFS action... please wait | ctrl+c: quit"
 	}
-	if m.zfsPanel.message != "" {
-		hint += " | " + m.zfsPanel.message
-	}
+	footerRenderer := footerStyle
+	message := m.zfsPanel.message
 	if m.zfsPanel.err != nil {
-		hint += " | error: " + m.zfsPanel.err.Error()
+		message = "error: " + m.zfsPanel.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	} else if looksLikeWarningText(m.zfsPanel.message) {
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
-	footer := footerStyle.Width(m.width).Render(hint)
+	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -322,9 +428,9 @@ func (m model) zfsPanelLines(width, height int) []string {
 				prefix = ">"
 			}
 			row := fmt.Sprintf(
-				"%s %-28s %-18s used:%s",
+				"%s %-24s created:%-18s used:%s",
 				prefix,
-				truncate(snapshotShortName(snapshot.Name), 28),
+				truncate(snapshotShortName(snapshot.Name), 24),
 				truncate(snapshot.Creation, 18),
 				snapshot.Used,
 			)
@@ -336,10 +442,25 @@ func (m model) zfsPanelLines(width, height int) []string {
 		}
 	}
 
+	if snapshot, ok := m.zfsPanel.selectedSnapshot(); ok {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Selected snapshot"))
+		lines = append(lines, truncate("Name: "+snapshot.Name, width))
+		lines = append(lines, truncate("Created: "+valueOrDash(snapshot.Creation), width))
+		lines = append(lines, truncate("Used: "+valueOrDash(snapshot.Used), width))
+
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Rollback implications"))
+		for _, line := range m.zfsRollbackImplicationLines(width, snapshot) {
+			lines = append(lines, line)
+		}
+	}
+
 	lines = append(lines, "")
 	lines = append(lines, sectionStyle.Render("Actions"))
 	lines = append(lines, "c: create snapshot")
 	lines = append(lines, "r: rollback selected snapshot")
+	lines = append(lines, "n: clone selected snapshot as a new jail")
 	lines = append(lines, "x: refresh snapshot list")
 
 	if m.zfsPanel.inputMode {
@@ -352,6 +473,40 @@ func (m model) zfsPanelLines(width, height int) []string {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Confirm rollback"))
 		lines = append(lines, truncate("Target: "+m.zfsPanel.rollbackTarget, width))
+		lines = append(lines, truncate("Command: zfs rollback -r "+m.zfsPanel.rollbackTarget, width))
+	}
+
+	if m.zfsPanel.cloneMode {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Clone jail from snapshot"))
+		if snapshot, ok := m.zfsPanel.selectedSnapshot(); ok {
+			lines = append(lines, truncate("Source snapshot: "+snapshot.Name, width))
+		}
+		nameLine := truncate("Clone name: "+valueOrDash(m.zfsPanel.cloneName), width)
+		if m.zfsPanel.cloneField == 0 {
+			nameLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> Clone name: "+valueOrDash(m.zfsPanel.cloneName), width))
+		}
+		lines = append(lines, nameLine)
+		destLine := truncate("Destination: "+valueOrDash(m.zfsPanel.cloneDestination), width)
+		if m.zfsPanel.cloneField == 1 {
+			destLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> Destination: "+valueOrDash(m.zfsPanel.cloneDestination), width))
+		}
+		lines = append(lines, destLine)
+		lines = append(lines, truncate("Write jail.conf clone: "+yesNoText(m.zfsPanel.cloneWriteConfig), width))
+		if m.zfsPanel.clonePreview.CloneDataset != "" {
+			lines = append(lines, truncate("Clone dataset: "+m.zfsPanel.clonePreview.CloneDataset, width))
+		}
+		if m.zfsPanel.clonePreview.ConfigPath != "" {
+			lines = append(lines, truncate("Config path: "+m.zfsPanel.clonePreview.ConfigPath, width))
+		}
+		if m.zfsPanel.clonePreview.FstabPath != "" {
+			lines = append(lines, truncate("Fstab path: "+m.zfsPanel.clonePreview.FstabPath, width))
+		}
+		if m.zfsPanel.clonePreview.Err != nil {
+			for _, line := range wrapText("Error: "+m.zfsPanel.clonePreview.Err.Error(), width) {
+				lines = append(lines, wizardErrorStyle.Render(line))
+			}
+		}
 	}
 
 	if len(m.zfsPanel.logs) > 0 {
@@ -364,6 +519,82 @@ func (m model) zfsPanelLines(width, height int) []string {
 	}
 
 	return lines
+}
+
+func (m model) zfsRollbackImplicationLines(width int, snapshot ZFSSnapshot) []string {
+	newer := m.zfsNewerSnapshots(snapshot.Name)
+	lines := []string{
+		truncate("Rollback command: zfs rollback -r "+snapshot.Name, width),
+		truncate("Dataset contents will revert to the selected snapshot state.", width),
+	}
+	if len(newer) == 0 {
+		lines = append(lines, truncate("No newer snapshots will be destroyed.", width))
+		return lines
+	}
+	lines = append(lines, truncate(fmt.Sprintf("%d newer snapshot(s) will be destroyed on this dataset.", len(newer)), width))
+	maxNames := min(4, len(newer))
+	names := make([]string, 0, maxNames)
+	for _, item := range newer[:maxNames] {
+		names = append(names, snapshotShortName(item.Name))
+	}
+	lines = append(lines, truncate("Newer snapshots: "+strings.Join(names, ", "), width))
+	if len(newer) > maxNames {
+		lines = append(lines, truncate(fmt.Sprintf("...and %d more newer snapshot(s).", len(newer)-maxNames), width))
+	}
+	lines = append(lines, truncate("If newer snapshots have dependents, rollback may fail until those dependencies are cleared.", width))
+	return lines
+}
+
+func (panel *zfsPanelState) refreshClonePreview() {
+	snapshot, ok := panel.selectedSnapshot()
+	if !ok {
+		panel.clonePreview = JailSnapshotClonePreview{Err: fmt.Errorf("select a snapshot to clone")}
+		return
+	}
+	panel.clonePreview = InspectJailSnapshotClone(panel.sourceDetail, snapshot.Name, panel.cloneName, panel.cloneDestination, panel.cloneWriteConfig)
+}
+
+func (panel *zfsPanelState) appendCloneField(text string) {
+	if text == "" {
+		return
+	}
+	switch panel.cloneField {
+	case 0:
+		panel.cloneName += text
+	case 1:
+		panel.cloneDestination += text
+	}
+	panel.refreshClonePreview()
+}
+
+func (panel *zfsPanelState) backspaceCloneField() {
+	var ref *string
+	switch panel.cloneField {
+	case 0:
+		ref = &panel.cloneName
+	case 1:
+		ref = &panel.cloneDestination
+	}
+	if ref == nil || *ref == "" {
+		return
+	}
+	*ref = (*ref)[:len(*ref)-1]
+	panel.refreshClonePreview()
+}
+
+func (m model) zfsNewerSnapshots(target string) []ZFSSnapshot {
+	if strings.TrimSpace(target) == "" {
+		return nil
+	}
+	for idx, snapshot := range m.zfsPanel.snapshots {
+		if snapshot.Name == target {
+			if idx+1 >= len(m.zfsPanel.snapshots) {
+				return nil
+			}
+			return append([]ZFSSnapshot(nil), m.zfsPanel.snapshots[idx+1:]...)
+		}
+	}
+	return nil
 }
 
 func (m model) zfsListHeight() int {

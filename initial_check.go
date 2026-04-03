@@ -53,6 +53,8 @@ type initialConfigStatus struct {
 	ParallelStartValue string
 	NeedsJailEnable    bool
 	NeedsParallelStart bool
+	JailEnableStatus   RCSettingStatus
+	ParallelStatus     RCSettingStatus
 
 	ExistingJailPaths []string
 	HasJailPath       bool
@@ -162,6 +164,85 @@ func initialWizardDestination(status initialConfigStatus) string {
 		return filepath.Join(containers, "new-jail")
 	}
 	return filepath.Join(base, "new-jail")
+}
+
+func suggestTemplateParentDataset(status initialConfigStatus) (string, string, bool) {
+	baseDataset := preferredBaseJailDataset(status.JailDatasets)
+	if baseDataset == "" {
+		return "", "", false
+	}
+
+	baseMountpoint := ""
+	if mp, err := zfsMountpointForDataset(baseDataset); err == nil {
+		baseMountpoint = mp
+	}
+	if baseMountpoint == "" {
+		for _, path := range status.ExistingJailPaths {
+			if path == docJailsPath {
+				baseMountpoint = path
+				break
+			}
+			if baseMountpoint == "" {
+				baseMountpoint = path
+			}
+		}
+	}
+	if baseMountpoint == "" || !strings.HasPrefix(baseMountpoint, "/") {
+		return "", "", false
+	}
+
+	return baseDataset + "/templates", filepath.Join(filepath.Clean(baseMountpoint), "templates"), true
+}
+
+func preferredBaseJailDataset(datasets []string) string {
+	if len(datasets) == 0 {
+		return ""
+	}
+	for _, dataset := range datasets {
+		if dataset == docDatasetBase {
+			return dataset
+		}
+	}
+	for _, dataset := range datasets {
+		if base := trimJailDatasetRole(dataset); base != "" {
+			return base
+		}
+	}
+	for _, dataset := range datasets {
+		if strings.Contains(strings.ToLower(filepath.Base(dataset)), "jail") {
+			return dataset
+		}
+	}
+	return ""
+}
+
+func trimJailDatasetRole(dataset string) string {
+	parts := strings.Split(strings.Trim(strings.TrimSpace(dataset), "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	for idx, part := range parts {
+		switch strings.ToLower(part) {
+		case "media", "templates", "containers":
+			if idx == 0 {
+				return ""
+			}
+			return strings.Join(parts[:idx], "/")
+		}
+	}
+	return ""
+}
+
+func zfsMountpointForDataset(dataset string) (string, error) {
+	out, err := exec.Command("zfs", "list", "-H", "-o", "mountpoint", dataset).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to read mountpoint for %q: %w", dataset, err)
+	}
+	mountpoint := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
+		return "", nil
+	}
+	return filepath.Clean(mountpoint), nil
 }
 
 func initialCheckCompleted() (bool, error) {
@@ -298,6 +379,8 @@ func collectInitialConfigStatus(now time.Time) (initialConfigStatus, error) {
 
 	status.NeedsJailEnable = !isEnabledRCValue(status.JailEnableValue)
 	status.NeedsParallelStart = !isEnabledRCValue(status.ParallelStartValue)
+	status.JailEnableStatus = collectRCSettingStatus("jail_enable", "YES")
+	status.ParallelStatus = collectRCSettingStatus("jail_parallel_start", "YES")
 
 	for _, path := range []string{"/jail", "/usr/jail", docJailsPath} {
 		info, statErr := os.Stat(path)
@@ -432,13 +515,14 @@ func enableRCDefaultsCmd(enableJail, enableParallel bool) tea.Cmd {
 
 func createJailLayoutCmd(basePath string) tea.Cmd {
 	return func() tea.Msg {
-		basePath = filepath.Clean(strings.TrimSpace(basePath))
-		if !strings.HasPrefix(basePath, "/") {
+		validatedPath, err := validateAbsolutePath(basePath, "base path")
+		if err != nil {
 			return initialActionMsg{
-				err:     fmt.Errorf("base path must be absolute"),
+				err:     err,
 				message: "Invalid jail path.",
 			}
 		}
+		basePath = validatedPath
 		paths := []string{
 			basePath,
 			filepath.Join(basePath, "media"),
@@ -476,17 +560,21 @@ func createDefaultDatasetLayoutCmd() tea.Cmd {
 
 func createDatasetLayoutCmd(baseDataset, mountpoint, media, templates, containers string) tea.Cmd {
 	return func() tea.Msg {
-		baseDataset = strings.TrimSpace(baseDataset)
-		mountpoint = strings.TrimSpace(mountpoint)
-		media = strings.TrimSpace(media)
-		templates = strings.TrimSpace(templates)
-		containers = strings.TrimSpace(containers)
-
-		if baseDataset == "" {
-			return initialActionMsg{err: fmt.Errorf("base dataset is required"), message: "Dataset creation failed."}
+		var err error
+		if baseDataset, err = validateZFSDatasetName(baseDataset, "base dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
 		}
-		if mountpoint == "" || !strings.HasPrefix(mountpoint, "/") {
-			return initialActionMsg{err: fmt.Errorf("mountpoint must be absolute"), message: "Dataset creation failed."}
+		if mountpoint, err = validateAbsolutePath(mountpoint, "mountpoint"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
+		}
+		if media, err = validateOptionalZFSDatasetName(media, "media dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
+		}
+		if templates, err = validateOptionalZFSDatasetName(templates, "templates dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
+		}
+		if containers, err = validateOptionalZFSDatasetName(containers, "containers dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
 		}
 
 		var logs []string
@@ -571,9 +659,9 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.initCheck.message = "Custom path canceled."
 			return m, nil
 		case "enter":
-			path := filepath.Clean(strings.TrimSpace(m.initCheck.customDirPath))
-			if path == "" || !strings.HasPrefix(path, "/") {
-				m.initCheck.err = fmt.Errorf("custom path must be absolute")
+			path, err := validateAbsolutePath(m.initCheck.customDirPath, "custom path")
+			if err != nil {
+				m.initCheck.err = err
 				m.initCheck.message = "Enter an absolute path like /usr/local/jails."
 				return m, nil
 			}
@@ -629,15 +717,15 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "G", "end":
 			m.initCheck.customDatasetField = 4
 		case "enter":
-			base := strings.TrimSpace(m.initCheck.customDatasetBase)
-			mountpoint := strings.TrimSpace(m.initCheck.customDatasetMountpoint)
-			if base == "" {
-				m.initCheck.err = fmt.Errorf("base dataset is required")
+			base, err := validateZFSDatasetName(m.initCheck.customDatasetBase, "base dataset")
+			if err != nil {
+				m.initCheck.err = err
 				m.initCheck.message = "Base dataset is required."
 				return m, nil
 			}
-			if mountpoint == "" || !strings.HasPrefix(mountpoint, "/") {
-				m.initCheck.err = fmt.Errorf("mountpoint must be absolute")
+			mountpoint, err := validateAbsolutePath(m.initCheck.customDatasetMountpoint, "mountpoint")
+			if err != nil {
+				m.initCheck.err = err
 				m.initCheck.message = "Mountpoint must be an absolute path."
 				return m, nil
 			}
@@ -717,7 +805,13 @@ func (m model) renderInitialCheckView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	footer := footerStyle.Width(m.width).Render(m.initialCheckFooterHint())
+	footerRenderer := footerStyle
+	message := m.initCheck.message
+	if m.initCheck.err != nil {
+		message = "error: " + m.initCheck.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	footer := m.renderFooterWithMessage(m.initialCheckFooterHint(), message, footerRenderer)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
@@ -731,13 +825,15 @@ func (m model) initialCheckLines(width int) []string {
 		appendLine("Running initial checks...")
 		return lines
 	}
-	if m.initCheck.applying {
-		appendLine("Applying selected setup action...")
-	}
-
 	lines = append(lines, sectionStyle.Render("rc.conf checks"))
 	appendLine(fmt.Sprintf("jail_enable = %s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable)))
+	for _, line := range rcSettingDriftLines(m.initCheck.status.JailEnableStatus) {
+		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
+	}
 	appendLine(fmt.Sprintf("jail_parallel_start = %s (%s)", displayRCValue(m.initCheck.status.ParallelStartValue), checkStatusText(!m.initCheck.status.NeedsParallelStart)))
+	for _, line := range rcSettingDriftLines(m.initCheck.status.ParallelStatus) {
+		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
+	}
 	appendLine("")
 
 	lines = append(lines, sectionStyle.Render("Jail path checks"))
@@ -765,17 +861,8 @@ func (m model) initialCheckLines(width int) []string {
 		appendLine("")
 		lines = append(lines, sectionStyle.Render("Check warnings"))
 		for _, err := range m.initCheck.status.Errors {
-			appendLine("  - " + err)
+			lines = append(lines, wizardErrorStyle.Render(truncate("  - "+err, width)))
 		}
-	}
-
-	if m.initCheck.message != "" {
-		appendLine("")
-		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.initCheck.message, width)))
-	}
-	if m.initCheck.err != nil {
-		appendLine("")
-		lines = append(lines, wizardErrorStyle.Render(truncate("Error: "+m.initCheck.err.Error(), width)))
 	}
 
 	appendLine("")
@@ -882,4 +969,18 @@ func checkStatusText(ok bool) string {
 		return "OK"
 	}
 	return "MISSING"
+}
+
+func rcSettingDriftLines(status RCSettingStatus) []string {
+	lines := make([]string, 0, 4)
+	for _, reason := range status.DriftReasons {
+		lines = append(lines, "drift: "+reason)
+	}
+	if len(status.DriftReasons) == 0 {
+		return lines
+	}
+	for _, source := range status.SourceValues {
+		lines = append(lines, fmt.Sprintf("%s => %s", source.Path, displayRCValue(source.Value)))
+	}
+	return lines
 }

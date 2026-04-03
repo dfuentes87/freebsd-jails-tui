@@ -16,6 +16,7 @@ The application is aimed at a FreeBSD host that already uses the base jail tooli
   - `rctl`
 - First-run initial configuration check
 - Jail creation wizard
+- Template manager for ZFS template datasets
 - Save/load wizard templates
 - ZFS integration panel for snapshot and rollback actions
 - Start/stop actions from the dashboard
@@ -33,7 +34,7 @@ The application is aimed at a FreeBSD host that already uses the base jail tooli
 - The application assumes the host is using the standard FreeBSD jail tooling.
 - The type selector now changes provisioning and generated `jail.conf`, but it is still opinionated and intentionally scoped.
 - `thin` assumes an OpenZFS-backed template dataset and destination parent dataset.
-- `vnet` assumes a host bridge interface already exists.
+- `vnet` can create a missing bridge automatically, but it still depends on valid host networking choices.
 - `linux` bootstraps a Linux userspace under `/compat/<distro>` and still depends on working networking/package access inside the jail.
 - Linux bootstrap is treated as a second phase. If jail creation succeeds but Linux bootstrap preflight fails, the jail is kept and the TUI reports a warning instead of destroying or rolling back the new jail.
 - Detail view includes some raw runtime values from `jls`, which may show kernel defaults or module parameters in addition to explicit `jail.conf` settings.
@@ -73,6 +74,15 @@ Data shown includes:
 - CPU usage
 - Memory usage
 
+Key actions from the dashboard include:
+
+- `c` to open the jail creation wizard
+- `i` to re-run the initial configuration check
+- `t` to open the template manager
+- `s` to start or stop the selected jail
+- `z` to open the selected jail's ZFS panel
+- `x` to destroy the selected jail
+
 ### Initial Config Check
 
 On first launch, the TUI runs an initial configuration check before opening the dashboard.
@@ -96,6 +106,8 @@ It can optionally:
 
 After a successful first completion, the startup check is skipped on later runs.
 
+The dashboard also provides `i` to re-run the initial configuration check manually.
+
 Persistent state is stored in the user config directory:
 
 - `$XDG_CONFIG_HOME/freebsd-jails-tui/initial-check.done`
@@ -108,10 +120,13 @@ The detail view shows a consolidated view of a single jail.
 Sections include:
 
 - Overview
-- `jls`
-- `jail.conf`
+- configured state
+- startup policy
+- runtime state
+- network summary
 - ZFS dataset
 - `rctl`
+- Linux readiness, when applicable
 - Source errors, when present
 
 ### ZFS Integration Panel
@@ -123,6 +138,7 @@ Actions:
 - list snapshots
 - create snapshot
 - rollback snapshot
+- clone a selected snapshot into a new jail dataset/config
 - refresh snapshot list
 
 ### Jail Creation Wizard
@@ -159,6 +175,8 @@ Wizard fields include:
 - IPv6
 - default router
 - hostname
+- startup order
+- dependencies
 - Linux distro
 - Linux release
 - Linux bootstrap mode
@@ -172,10 +190,13 @@ Important behavior:
 - `Destination` expects a full path, for example `/usr/local/jails/containers/web01`
 - `Destination` is prefilled from the initial config path when available
 - `Hostname` is optional; if empty, the jail name is used
+- `Startup order` updates `jail_list` in `rc.conf` when explicit list ordering is needed; if `jail_list` is currently empty and startup order is left blank, the TUI preserves the default “start all configured jails” behavior
+- `Dependencies` writes the jail's `depend` parameter in `jail.conf`, which can override plain `jail_list` ordering
 - `IPv6` is optional
 - `inherit` is allowed for non-`vnet` networking
 - `inherit` is rejected for `vnet` jails
 - `vnet` uses dedicated `Bridge` and optional `Uplink` fields instead of `Interface`
+- `Bridge policy` controls whether a missing bridge is auto-created or must already exist
 - Linux bootstrap mode supports `auto` or `skip`
 - the wizard writes new configs into `/etc/jail.conf.d/<name>.conf`
 - the wizard refuses to overwrite an existing jail config file
@@ -187,12 +208,15 @@ Type-specific notes:
   - seeds host `resolv.conf` and `localtime`
 - `thin`
   - requires the template source to resolve to an exact ZFS dataset mountpoint
-  - supports `ctrl+t` to browse extracted template datasets
+  - supports `ctrl+t` to open the template manager in selection mode
   - creates `@freebsd-jails-tui-base` on that template dataset if missing
   - clones the template dataset into the destination dataset
 - `vnet`
   - uses `vnet`, `vnet.interface`, `devfs_ruleset = 5`, and generated `exec.prestart` / `exec.poststop` commands
-  - requires a bridge such as `bridge0` and can optionally add an uplink to that bridge during prestart
+  - requires a bridge such as `bridge0`, validates bridge/uplink/IP host state before create, and honors the selected bridge policy
+  - can attach an optional uplink to that bridge before jail start
+  - checks requested jail IPs against both host interfaces and already-running jails
+  - warns when the requested jail subnet overlaps the addresses or subnets of already-running jails
   - configures IP addresses inside the jail with `ifconfig`
 - `linux`
   - enables `linux_enable=YES` and starts the host `linux` service during creation
@@ -202,6 +226,51 @@ Type-specific notes:
   - prepares compatibility mount targets under `$path/compat/<distro>`
   - bootstraps the selected Linux userspace with `debootstrap` after the jail starts
   - adds Linux-oriented mount and permission directives from the FreeBSD Handbook
+
+### Template Manager
+
+The TUI includes a dedicated template manager for reusable ZFS template datasets used by thin-jail cloning.
+
+It is opened from the dashboard with `t`. From the thin-jail wizard, `ctrl+t` opens the same manager in selection mode so the chosen mountpoint is written back into `Template/Release`.
+
+The manager provides:
+
+- a scrollable template dataset list
+- inline inspect/details for the selected template dataset
+- create, clone-from-snapshot, rename, and destroy actions
+- cached list/detail state that refreshes after lifecycle actions
+
+Create mode shows:
+
+- source input
+- detected parent `templates` dataset
+- derived child dataset name
+- target mountpoint
+- source type and whether the create step will copy or extract
+- execution output after creation
+
+If the parent `templates` dataset does not exist, create mode can:
+
+- propose a parent dataset and mountpoint derived from the current jail layout
+- create that parent dataset first
+- let you edit the parent dataset and mountpoint manually before creation
+
+Manager shortcuts:
+
+- `c` create a new template dataset
+- `n` clone a selected template snapshot into a new template dataset
+- `r` rename the selected template dataset
+- `x` destroy the selected template dataset
+- `ctrl+r` refresh the list, or refresh create preview while creating
+- `ctrl+e` edit parent dataset values in create mode when needed
+
+Supported create sources:
+
+- local directory
+- local archive
+- named entry from `/usr/local/jails/media`
+- release tag such as `15.0-RELEASE`
+- custom `https://...` URL
 
 ### Destroy Confirmation
 

@@ -16,12 +16,15 @@ type JailDestroyResult struct {
 }
 
 type jailDestroyPlan struct {
-	Name       string
-	JailPath   string
-	ConfigPath string
-	FstabPath  string
-	ZFSDataset string
-	Running    bool
+	Name             string
+	JailPath         string
+	ConfigPath       string
+	FstabPath        string
+	ZFSDataset       string
+	ZFSMatch         string
+	ZFSPrefixDataset string
+	ZFSPrefixMount   string
+	Running          bool
 }
 
 func ExecuteJailDestroy(target Jail) JailDestroyResult {
@@ -48,6 +51,9 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 	}
 	if plan.JailPath != "" {
 		if err := validateDestroyPath(plan.JailPath); err != nil {
+			return fail(err)
+		}
+		if err := validateFallbackDestroyPlan(plan); err != nil {
 			return fail(err)
 		}
 	}
@@ -121,7 +127,19 @@ func buildJailDestroyPlan(target Jail, logs *[]string) jailDestroyPlan {
 
 	if plan.JailPath != "" {
 		if zfsInfo, err := discoverZFSDataset(plan.JailPath); err == nil && zfsInfo != nil {
-			plan.ZFSDataset = strings.TrimSpace(zfsInfo.Name)
+			plan.ZFSMatch = strings.TrimSpace(zfsInfo.MatchType)
+			if strings.EqualFold(zfsInfo.MatchType, "exact") {
+				plan.ZFSDataset = strings.TrimSpace(zfsInfo.Name)
+			} else {
+				plan.ZFSPrefixDataset = strings.TrimSpace(zfsInfo.Name)
+				plan.ZFSPrefixMount = strings.TrimSpace(zfsInfo.Mountpoint)
+				*logs = append(*logs, fmt.Sprintf(
+					"warning: refusing recursive ZFS destroy because jail path %q only matched parent dataset %q (%s match)",
+					plan.JailPath,
+					strings.TrimSpace(zfsInfo.Name),
+					strings.TrimSpace(zfsInfo.MatchType),
+				))
+			}
 		} else if err != nil {
 			*logs = append(*logs, "warning: unable to inspect ZFS dataset: "+err.Error())
 		}
@@ -170,6 +188,44 @@ func validateDestroyPath(path string) error {
 	return nil
 }
 
+func validateFallbackDestroyPlan(plan jailDestroyPlan) error {
+	if plan.JailPath == "" || plan.ZFSDataset != "" || !strings.EqualFold(plan.ZFSMatch, "prefix") {
+		return nil
+	}
+
+	jailPath := filepath.Clean(strings.TrimSpace(plan.JailPath))
+	name := strings.TrimSpace(plan.Name)
+	if name == "" {
+		return fmt.Errorf("refusing fallback path destroy for %q: jail name is empty", jailPath)
+	}
+	if filepath.Base(jailPath) != name {
+		return fmt.Errorf("refusing fallback path destroy for %q: basename does not match jail name %q", jailPath, name)
+	}
+
+	prefixMount := filepath.Clean(strings.TrimSpace(plan.ZFSPrefixMount))
+	if prefixMount == "" || prefixMount == "." || prefixMount == "/" {
+		return fmt.Errorf("refusing fallback path destroy for %q: matched dataset mountpoint is not specific enough", jailPath)
+	}
+	if !strings.HasPrefix(jailPath, prefixMount+"/") {
+		return fmt.Errorf("refusing fallback path destroy for %q: path is not under matched dataset mountpoint %q", jailPath, prefixMount)
+	}
+
+	rel, err := filepath.Rel(prefixMount, jailPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("refusing fallback path destroy for %q: could not derive a safe relative path from %q", jailPath, prefixMount)
+	}
+	segments := strings.Split(filepath.ToSlash(rel), "/")
+	if len(segments) == 0 {
+		return fmt.Errorf("refusing fallback path destroy for %q: relative path is empty", jailPath)
+	}
+	switch strings.ToLower(segments[0]) {
+	case "media", "templates":
+		return fmt.Errorf("refusing fallback path destroy for %q: path is inside shared %q tree", jailPath, segments[0])
+	}
+
+	return nil
+}
+
 func removeJailRctlRules(name string, logs *[]string) {
 	if _, err := runLoggedCommand(logs, "rctl", "-r", "jail:"+name); err != nil {
 		*logs = append(*logs, "warning: unable to remove rctl rules: "+err.Error())
@@ -195,22 +251,45 @@ func removeFileIfExists(path string, logs *[]string) error {
 }
 
 func buildDestroyPreview(target Jail) []string {
+	plan := buildJailDestroyPlan(target, &[]string{})
 	lines := []string{
 		"Destroying a jail will make irreversible changes:",
 		"1. Stop the jail if it is currently running.",
 		"2. Remove jail-specific rctl rules if present.",
-		"3. Destroy the matching ZFS dataset recursively when detected.",
-		"4. Otherwise remove the jail root path recursively.",
+		"3. Destroy the ZFS dataset recursively only when the jail path matches a dataset mountpoint exactly.",
+		"4. Otherwise remove only the jail root path recursively.",
 		"5. Remove /etc/jail.conf.d/<name>.conf and /etc/fstab.<name> when present.",
 		"",
 		fmt.Sprintf("Selected jail: %s", target.Name),
 		fmt.Sprintf("Current JID: %s", valueOrDash(jailJIDText(target))),
 		fmt.Sprintf("Current path: %s", valueOrDash(strings.TrimSpace(target.Path))),
 	}
+	if plan.ZFSDataset != "" {
+		lines = append(lines, fmt.Sprintf("Matched ZFS dataset: %s (exact)", plan.ZFSDataset))
+	} else if plan.ZFSMatch != "" {
+		lines = append(lines, fmt.Sprintf("Matched ZFS dataset: prefix match only (%s); dataset destroy will be skipped", plan.ZFSMatch))
+		if err := validateFallbackDestroyPlan(plan); err != nil {
+			lines = append(lines, fmt.Sprintf("Fallback path removal: blocked (%s)", err.Error()))
+		} else {
+			lines = append(lines, "Fallback path removal: allowed for dedicated jail leaf path")
+		}
+	} else {
+		lines = append(lines, "Matched ZFS dataset: none")
+	}
 	if strings.TrimSpace(target.Hostname) != "" {
 		lines = append(lines, fmt.Sprintf("Current hostname: %s", target.Hostname))
 	}
 	return lines
+}
+
+func newDestroyState(target Jail, returnMode screenMode) destroyState {
+	target = buildDestroyTarget(target)
+	return destroyState{
+		returnMode: returnMode,
+		target:     target,
+		preview:    buildDestroyPreview(target),
+		message:    "Press enter to destroy this jail, or esc to cancel.",
+	}
 }
 
 func jailJIDText(target Jail) string {

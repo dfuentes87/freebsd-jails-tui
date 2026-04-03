@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"hash/fnv"
+	"net/netip"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,11 +72,14 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Jail interface name for thick, thin, and linux jails"},
 			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
-			{ID: "uplink", Label: "Uplink", Placeholder: "em0", Help: "Optional host uplink to attach to the bridge"},
+			{ID: "bridge_policy", Label: "Bridge policy", Placeholder: "auto-create", Help: "Options: auto-create or require-existing"},
+			{ID: "uplink", Label: "Uplink", Placeholder: "em0", Help: "Optional host uplink to attach to the bridge before jail start"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
+			{ID: "startup_order", Label: "Startup order", Placeholder: "append", Help: "Optional rc.conf jail_list position; blank appends"},
+			{ID: "dependencies", Label: "Dependencies", Placeholder: "db01 cache01", Help: "Optional jail names; writes depend in jail.conf"},
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
 			{ID: "memory_limit", Label: "Memory", Placeholder: "2G"},
 			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: ""},
@@ -103,11 +108,14 @@ type jailWizardValues struct {
 	TemplateRelease string
 	Interface       string
 	Bridge          string
+	BridgePolicy    string
 	Uplink          string
 	IP4             string
 	IP6             string
 	DefaultRouter   string
 	Hostname        string
+	StartupOrder    string
+	Dependencies    string
 	LinuxDistro     string
 	LinuxRelease    string
 	LinuxBootstrap  string
@@ -123,31 +131,41 @@ type mountPointSpec struct {
 }
 
 type jailCreationWizard struct {
-	step              int
-	field             int
-	values            jailWizardValues
-	templateMode      wizardTemplateMode
-	templateInput     string
-	templates         []wizardTemplate
-	templateCursor    int
-	userlandMode      bool
-	userlandOpts      []userlandOption
-	userlandCursor    int
-	thinDatasetMode   bool
-	thinDatasetOpts   []templateDatasetOption
-	thinDatasetCursor int
-	message           string
-	executionLogs     []string
-	executionError    string
+	step                 int
+	field                int
+	values               jailWizardValues
+	linuxPrereqs         LinuxWizardPrereqs
+	linuxPrereqKey       string
+	linuxPrereqCached    bool
+	networkPrereqs       NetworkWizardPrereqs
+	networkPrereqKey     string
+	networkPrereqCached  bool
+	templateMode         wizardTemplateMode
+	templateInput        string
+	templates            []wizardTemplate
+	templateCursor       int
+	userlandMode         bool
+	userlandOpts         []userlandOption
+	userlandCursor       int
+	thinDatasetMode      bool
+	thinDatasetOpts      []templateDatasetOption
+	thinDatasetCursor    int
+	datasetCreateRunning bool
+	message              string
+	executionLogs        []string
+	executionError       string
 }
 
 func newJailCreationWizard(defaultDestination string) jailCreationWizard {
-	return jailCreationWizard{
+	w := jailCreationWizard{
 		values: jailWizardValues{
 			Dataset:   strings.TrimSpace(defaultDestination),
 			Interface: "em0",
 		},
 	}
+	w.refreshLinuxPrereqs()
+	w.refreshNetworkPrereqs()
+	return w
 }
 
 func (w jailCreationWizard) steps() []wizardStep {
@@ -206,6 +224,8 @@ func (w *jailCreationWizard) nextStep() error {
 		w.executionLogs = nil
 		w.executionError = ""
 	}
+	w.refreshLinuxPrereqs()
+	w.refreshNetworkPrereqs()
 	return nil
 }
 
@@ -217,6 +237,8 @@ func (w *jailCreationWizard) prevStep() {
 		w.executionLogs = nil
 		w.executionError = ""
 	}
+	w.refreshLinuxPrereqs()
+	w.refreshNetworkPrereqs()
 }
 
 func (w *jailCreationWizard) beginTemplateSave() {
@@ -278,14 +300,12 @@ func (w *jailCreationWizard) beginThinDatasetSelect() error {
 	if err != nil {
 		return err
 	}
-	if len(options) == 0 {
-		return fmt.Errorf("no thin-jail template datasets found")
-	}
 	w.templateMode = wizardTemplateModeNone
 	w.userlandMode = false
 	w.thinDatasetMode = true
 	w.thinDatasetOpts = options
 	w.thinDatasetCursor = 0
+	w.datasetCreateRunning = false
 	w.message = ""
 	return nil
 }
@@ -294,6 +314,7 @@ func (w *jailCreationWizard) endThinDatasetSelect() {
 	w.thinDatasetMode = false
 	w.thinDatasetOpts = nil
 	w.thinDatasetCursor = 0
+	w.datasetCreateRunning = false
 }
 
 func (w *jailCreationWizard) boundUserlandCursor() {
@@ -387,6 +408,8 @@ func (w *jailCreationWizard) appendToActive(input string) {
 	}
 	*ref += input
 	w.message = ""
+	w.refreshLinuxPrereqs()
+	w.refreshNetworkPrereqs()
 }
 
 func (w *jailCreationWizard) backspaceActive() {
@@ -404,6 +427,8 @@ func (w *jailCreationWizard) backspaceActive() {
 	}
 	*ref = string(runes[:len(runes)-1])
 	w.message = ""
+	w.refreshLinuxPrereqs()
+	w.refreshNetworkPrereqs()
 }
 
 func (w jailCreationWizard) activeField() (wizardField, bool) {
@@ -435,6 +460,40 @@ func (w *jailCreationWizard) normalizeField() {
 	}
 }
 
+func (w *jailCreationWizard) refreshLinuxPrereqs() {
+	key := strings.Join([]string{
+		normalizedJailType(w.values.JailType),
+		effectiveLinuxDistro(w.values),
+		effectiveLinuxRelease(w.values),
+		effectiveLinuxBootstrapMode(w.values),
+	}, "|")
+	if w.linuxPrereqCached && w.linuxPrereqKey == key {
+		return
+	}
+	w.linuxPrereqs = collectLinuxWizardPrereqs(w.values)
+	w.linuxPrereqKey = key
+	w.linuxPrereqCached = true
+}
+
+func (w *jailCreationWizard) refreshNetworkPrereqs() {
+	key := strings.Join([]string{
+		normalizedJailType(w.values.JailType),
+		strings.TrimSpace(w.values.Interface),
+		strings.TrimSpace(w.values.Bridge),
+		effectiveBridgePolicy(w.values),
+		strings.TrimSpace(w.values.Uplink),
+		strings.TrimSpace(w.values.IP4),
+		strings.TrimSpace(w.values.IP6),
+		strings.TrimSpace(w.values.DefaultRouter),
+	}, "|")
+	if w.networkPrereqCached && w.networkPrereqKey == key {
+		return
+	}
+	w.networkPrereqs = collectNetworkWizardPrereqs(w.values)
+	w.networkPrereqKey = key
+	w.networkPrereqCached = true
+}
+
 func (w *jailCreationWizard) normalizeStep() {
 	steps := w.steps()
 	if len(steps) == 0 {
@@ -461,7 +520,7 @@ func (w jailCreationWizard) visibleFields() []wizardField {
 			if jailType == "vnet" {
 				continue
 			}
-		case "bridge", "uplink":
+		case "bridge", "bridge_policy", "uplink":
 			if jailType != "vnet" {
 				continue
 			}
@@ -493,6 +552,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.Interface
 	case "bridge":
 		return &w.values.Bridge
+	case "bridge_policy":
+		return &w.values.BridgePolicy
 	case "uplink":
 		return &w.values.Uplink
 	case "ip4":
@@ -503,6 +564,10 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.DefaultRouter
 	case "hostname":
 		return &w.values.Hostname
+	case "startup_order":
+		return &w.values.StartupOrder
+	case "dependencies":
+		return &w.values.Dependencies
 	case "linux_distro":
 		return &w.values.LinuxDistro
 	case "linux_release":
@@ -536,6 +601,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.Interface
 	case "bridge":
 		return w.values.Bridge
+	case "bridge_policy":
+		return w.values.BridgePolicy
 	case "uplink":
 		return w.values.Uplink
 	case "ip4":
@@ -546,6 +613,10 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.DefaultRouter
 	case "hostname":
 		return w.values.Hostname
+	case "startup_order":
+		return w.values.StartupOrder
+	case "dependencies":
+		return w.values.Dependencies
 	case "linux_distro":
 		return w.values.LinuxDistro
 	case "linux_release":
@@ -592,27 +663,65 @@ func (w jailCreationWizard) validateCurrentStep() error {
 	if strings.TrimSpace(w.values.Dataset) == "" {
 		return fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 	}
-	if !strings.HasPrefix(strings.TrimSpace(w.values.Dataset), "/") {
-		return fmt.Errorf("destination must be an absolute path, e.g. /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+	if _, err := validateJailDestinationPath(w.values.Dataset, w.values.Name); err != nil {
+		if strings.Contains(err.Error(), "is required") {
+			return fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+		}
+		return err
 	}
 	if strings.TrimSpace(w.values.TemplateRelease) == "" {
 		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
+	}
+	if err := validateTemplateReleaseInput(w.values); err != nil {
+		return err
 	}
 	if hasConflictingJailConfig(w.values.Name) {
 		return fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
 	}
 	if jailType == "vnet" {
+		bridge, err := validateNetworkInterfaceName(w.values.Bridge, "bridge")
+		if err != nil {
+			return err
+		}
+		w.values.Bridge = bridge
 		if strings.TrimSpace(w.values.Bridge) == "" {
 			return fmt.Errorf("bridge is required for vnet jails")
 		}
 		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Bridge)), "bridge") {
 			return fmt.Errorf("vnet jails require a bridge such as bridge0")
 		}
-	} else if strings.TrimSpace(w.values.Interface) == "" {
-		return fmt.Errorf("interface is required")
+		policy := effectiveBridgePolicy(w.values)
+		switch policy {
+		case "auto-create", "require-existing":
+			w.values.BridgePolicy = policy
+		default:
+			return fmt.Errorf("bridge policy must be auto-create or require-existing")
+		}
+		if strings.TrimSpace(w.values.Uplink) != "" {
+			uplink, err := validateOptionalNetworkInterfaceName(w.values.Uplink, "uplink")
+			if err != nil {
+				return err
+			}
+			w.values.Uplink = uplink
+		}
+	} else {
+		iface, err := validateNetworkInterfaceName(w.values.Interface, "interface")
+		if err != nil {
+			return err
+		}
+		w.values.Interface = iface
+		if strings.TrimSpace(w.values.Interface) == "" {
+			return fmt.Errorf("interface is required")
+		}
 	}
 	if strings.TrimSpace(w.values.IP4) == "" {
 		return fmt.Errorf("IPv4 is required")
+	}
+	if err := validateJailIPValue(strings.TrimSpace(w.values.IP4), true, "IPv4", jailType != "vnet"); err != nil {
+		return err
+	}
+	if err := validateJailIPValue(strings.TrimSpace(w.values.IP6), false, "IPv6", jailType != "vnet"); err != nil {
+		return err
 	}
 	if jailType == "vnet" {
 		if strings.EqualFold(strings.TrimSpace(w.values.IP4), "inherit") {
@@ -622,6 +731,19 @@ func (w jailCreationWizard) validateCurrentStep() error {
 			return fmt.Errorf("vnet jails cannot use IPv6 inherit; switch jail type or enter an explicit IPv6 address")
 		}
 	}
+	if value := strings.TrimSpace(w.values.DefaultRouter); value != "" {
+		if _, err := netip.ParseAddr(value); err != nil {
+			return fmt.Errorf("default router must be a valid IPv4 or IPv6 address")
+		}
+	}
+	if _, err := parseStartupOrderValue(w.values.StartupOrder); err != nil {
+		return err
+	}
+	dependencies, err := parseJailDependencyNames(w.values.Dependencies, w.values.Name)
+	if err != nil {
+		return err
+	}
+	w.values.Dependencies = strings.Join(dependencies, " ")
 	if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
 		cpu, err := strconv.Atoi(value)
 		if err != nil || cpu <= 0 || cpu > 100 {
@@ -639,6 +761,13 @@ func (w jailCreationWizard) validateCurrentStep() error {
 			return fmt.Errorf("max processes must be a positive integer")
 		}
 	}
+	if err := validateMountPointInput(w.values.MountPoints); err != nil {
+		return err
+	}
+	w.refreshNetworkPrereqs()
+	if err := w.networkPrereqs.blockingError(); err != nil {
+		return err
+	}
 	if jailType == "linux" {
 		distro := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
 		switch distro {
@@ -652,6 +781,150 @@ func (w jailCreationWizard) validateCurrentStep() error {
 		default:
 			return fmt.Errorf("bootstrap mode must be auto or skip")
 		}
+	}
+	return nil
+}
+
+func validateTemplateReleaseInput(values jailWizardValues) error {
+	input := strings.TrimSpace(values.TemplateRelease)
+	if input == "" {
+		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
+	}
+
+	if strings.HasPrefix(input, "/") {
+		cleanInput, err := validateAbsolutePath(input, "template/release path")
+		if err != nil {
+			return err
+		}
+		input = cleanInput
+	}
+
+	if info, err := os.Stat(input); err == nil {
+		if normalizedJailType(values.JailType) == "thin" {
+			if !info.IsDir() {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+			if _, err := exactZFSDatasetForPath(input); err != nil {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+		}
+		return nil
+	}
+
+	if source, ok := findNamedUserlandSource(defaultUserlandDir, input); ok {
+		if normalizedJailType(values.JailType) == "thin" {
+			info, err := os.Stat(source)
+			if err != nil || !info.IsDir() {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+			if _, err := exactZFSDatasetForPath(source); err != nil {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+		}
+		return nil
+	}
+
+	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
+		if _, err := neturl.ParseRequestURI(input); err != nil {
+			return fmt.Errorf("template/release URL is invalid")
+		}
+		if normalizedJailType(values.JailType) == "thin" {
+			return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+		}
+		return nil
+	}
+
+	if releaseValuePattern.MatchString(strings.ToUpper(input)) {
+		if normalizedJailType(values.JailType) == "thin" {
+			return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+		}
+		return nil
+	}
+
+	if strings.HasPrefix(input, "/") {
+		return fmt.Errorf("template/release path %q was not found", input)
+	}
+	return fmt.Errorf("template/release %q not found; use a local path, an entry from %s, a release tag, or a custom URL", input, defaultUserlandDir)
+}
+
+func validateJailIPValue(value string, ipv4 bool, fieldName string, allowInherit bool) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if strings.EqualFold(value, "inherit") {
+		if allowInherit {
+			return nil
+		}
+		return fmt.Errorf("%s inherit is only valid for non-vnet jails", fieldName)
+	}
+
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		if ipv4 && prefix.Addr().Is4() {
+			return nil
+		}
+		if !ipv4 && prefix.Addr().Is6() {
+			return nil
+		}
+		return fmt.Errorf("%s must match the correct IP family", fieldName)
+	}
+	if addr, err := netip.ParseAddr(value); err == nil {
+		if ipv4 && addr.Is4() {
+			return nil
+		}
+		if !ipv4 && addr.Is6() {
+			return nil
+		}
+		return fmt.Errorf("%s must match the correct IP family", fieldName)
+	}
+
+	if ipv4 {
+		return fmt.Errorf("%s must be a valid IPv4 address, IPv4 CIDR, or 'inherit'", fieldName)
+	}
+	return fmt.Errorf("%s must be a valid IPv6 address, IPv6 CIDR, or 'inherit'", fieldName)
+}
+
+func validateMountPointInput(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	splitter := strings.NewReplacer("\n", ",", ";", ",")
+	chunks := strings.Split(splitter.Replace(raw), ",")
+	targets := map[string]string{}
+	for _, chunk := range chunks {
+		item := strings.TrimSpace(chunk)
+		if item == "" {
+			continue
+		}
+		source, target, hasSeparator := strings.Cut(item, ":")
+		if hasSeparator {
+			source = strings.TrimSpace(source)
+			if source == "" {
+				return fmt.Errorf("mount source is required before ':'")
+			}
+			cleanSource, err := validateAccessibleAbsolutePath(source, "mount source")
+			if err != nil {
+				return err
+			}
+			source = cleanSource
+			cleanTarget, err := validateMountTarget(target)
+			if err != nil {
+				return err
+			}
+			if prior, exists := targets[cleanTarget]; exists {
+				return fmt.Errorf("mount target %q is duplicated (%s and %s)", cleanTarget, prior, item)
+			}
+			targets[cleanTarget] = item
+			continue
+		}
+		cleanTarget, err := validateMountTarget(item)
+		if err != nil {
+			return err
+		}
+		if prior, exists := targets[cleanTarget]; exists {
+			return fmt.Errorf("mount target %q is duplicated (%s and %s)", cleanTarget, prior, item)
+		}
+		targets[cleanTarget] = item
 	}
 	return nil
 }
@@ -679,6 +952,8 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
 		fmt.Sprintf("Hostname: %s", valueOrDash(w.values.Hostname)),
+		fmt.Sprintf("Startup order: %s", startupOrderSummary(w.values.StartupOrder)),
+		fmt.Sprintf("Dependencies: %s", dependencySummary(w.values.Dependencies)),
 		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
 		fmt.Sprintf("Memory limit: %s", valueOrDash(w.values.MemoryLimit)),
 		fmt.Sprintf("Process limit: %s", valueOrDash(w.values.ProcessLimit)),
@@ -686,6 +961,7 @@ func (w jailCreationWizard) summaryLines() []string {
 	if normalizedJailType(w.values.JailType) == "vnet" {
 		lines = append(lines,
 			fmt.Sprintf("Bridge: %s", valueOrDash(w.values.Bridge)),
+			fmt.Sprintf("Bridge policy: %s", effectiveBridgePolicy(w.values)),
 			fmt.Sprintf("Uplink: %s", valueOrDash(w.values.Uplink)),
 		)
 	} else {
@@ -756,15 +1032,18 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
 	}
 
-	addStep("Write jail config: " + jailConfigPathForName(w.values.Name))
-	addStep(fmt.Sprintf("Start jail: service jail start %s", w.values.Name))
-
 	switch jailType {
 	case "vnet":
-		addStep(fmt.Sprintf("VNET prestart config: create %s and attach it to %s", vnetEpairName(w.values.Name), strings.TrimSpace(w.values.Bridge)))
-		if strings.TrimSpace(w.values.Uplink) != "" {
+		addStep("Ensure VNET host bridge setup is ready:")
+		addDetail(fmt.Sprintf("   # bridge policy: %s", effectiveBridgePolicy(w.values)))
+		if w.networkPrereqs.BridgeCreateNeeded {
+			addDetail(fmt.Sprintf("   ifconfig %s create", strings.TrimSpace(w.values.Bridge)))
+		}
+		addDetail(fmt.Sprintf("   ifconfig %s up", strings.TrimSpace(w.values.Bridge)))
+		if w.networkPrereqs.UplinkAttachNeeded && strings.TrimSpace(w.values.Uplink) != "" {
 			addDetail(fmt.Sprintf("   ifconfig %s addm %s up", strings.TrimSpace(w.values.Bridge), strings.TrimSpace(w.values.Uplink)))
 		}
+		addStep(fmt.Sprintf("VNET jail hooks: create %s and attach it to %s", vnetEpairName(w.values.Name), strings.TrimSpace(w.values.Bridge)))
 		addStep(fmt.Sprintf("VNET start config: assign %s inside the jail", strings.TrimSpace(w.values.IP4)))
 	case "linux":
 		addStep(fmt.Sprintf("Linux compatibility mounts are configured under %s", linuxCompatRoot(destination, w.values)))
@@ -782,6 +1061,14 @@ func (w jailCreationWizard) commandPlanLines() []string {
 			addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxMirrorURL(w.values)))
 		}
 	}
+
+	addStep("Write jail config: " + jailConfigPathForName(w.values.Name))
+	jailListAction := startupOrderPlanLine(w.values)
+	if jailListAction != "" {
+		addStep("Update rc.conf jail_list for startup order:")
+		addDetail("   " + jailListAction)
+	}
+	addStep(fmt.Sprintf("Start jail: service jail start %s", w.values.Name))
 
 	if strings.TrimSpace(w.values.CPUPercent) != "" ||
 		strings.TrimSpace(w.values.MemoryLimit) != "" ||
@@ -859,14 +1146,14 @@ func parseMountPointSpecs(raw string) []mountPointSpec {
 		source, target, hasSeparator := strings.Cut(item, ":")
 		if hasSeparator {
 			source = strings.TrimSpace(source)
-			target = normalizeMountTarget(target)
+			target, _ = validateMountTarget(target)
 			if source == "" || target == "" {
 				continue
 			}
 			specs = append(specs, mountPointSpec{Source: source, Target: target})
 			continue
 		}
-		target = normalizeMountTarget(item)
+		target, _ = validateMountTarget(item)
 		if target == "" {
 			continue
 		}
@@ -876,11 +1163,11 @@ func parseMountPointSpecs(raw string) []mountPointSpec {
 }
 
 func normalizeMountTarget(target string) string {
-	target = "/" + strings.Trim(strings.TrimSpace(target), "/")
-	if target == "/" {
+	clean, err := validateMountTarget(target)
+	if err != nil {
 		return ""
 	}
-	return target
+	return clean
 }
 
 func jailConfigPathForName(name string) string {
@@ -933,6 +1220,9 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 
 	switch jailType {
 	case "vnet":
+		lines = append(lines,
+			fmt.Sprintf("  # freebsd-jails-tui: bridge=%s bridge_policy=%s uplink=%s default_router=%s;", strings.TrimSpace(values.Bridge), effectiveBridgePolicy(values), strings.TrimSpace(values.Uplink), strings.TrimSpace(values.DefaultRouter)),
+		)
 		lines = append(lines, buildVNETJailConfig(values)...)
 	case "linux":
 		lines = append(lines,
@@ -956,6 +1246,9 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	}
 	if strings.TrimSpace(fstabPath) != "" {
 		lines = append(lines, fmt.Sprintf("  mount.fstab = %q;", fstabPath))
+	}
+	if dependencies := strings.Join(mustParseJailDependencyNames(values.Dependencies), ", "); dependencies != "" {
+		lines = append(lines, fmt.Sprintf("  depend = %s;", dependencies))
 	}
 	lines = append(lines, "  persist;")
 	lines = append(lines, "}")
@@ -1004,9 +1297,6 @@ func buildVNETJailConfig(values jailWizardValues) []string {
 		fmt.Sprintf("  exec.prestart = \"/sbin/ifconfig %s create up\";", epair),
 		fmt.Sprintf("  exec.prestart += \"/sbin/ifconfig %sa up descr jail:${name}\";", epair),
 		fmt.Sprintf("  exec.prestart += \"/sbin/ifconfig %s addm %sa up\";", bridge, epair),
-	}
-	if uplink := strings.TrimSpace(values.Uplink); uplink != "" {
-		lines = append(lines, fmt.Sprintf("  exec.prestart += %q;", "/bin/sh -c '/sbin/ifconfig "+bridge+" addm "+uplink+" up >/dev/null 2>&1 || true'"))
 	}
 	if ip4 := strings.TrimSpace(values.IP4); ip4 != "" {
 		lines = append(lines, fmt.Sprintf("  exec.start = \"/sbin/ifconfig %sb inet %s up\";", epair, ip4))
@@ -1070,6 +1360,82 @@ func effectiveLinuxDistro(values jailWizardValues) string {
 	return distro
 }
 
+func effectiveBridgePolicy(values jailWizardValues) string {
+	policy := strings.ToLower(strings.TrimSpace(values.BridgePolicy))
+	if policy == "" {
+		return "auto-create"
+	}
+	return policy
+}
+
+func parseStartupOrderValue(raw string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	position, err := strconv.Atoi(value)
+	if err != nil || position <= 0 {
+		return 0, fmt.Errorf("startup order must be a positive integer or blank to append")
+	}
+	return position, nil
+}
+
+func parseJailDependencyNames(raw, self string) ([]string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	replacer := strings.NewReplacer(",", " ", "\n", " ", ";", " ", "\t", " ")
+	tokens := strings.Fields(replacer.Replace(value))
+	deps := make([]string, 0, len(tokens))
+	seen := map[string]struct{}{}
+	self = strings.TrimSpace(self)
+	for _, token := range tokens {
+		if !jailNamePattern.MatchString(token) {
+			return nil, fmt.Errorf("dependency %q is not a valid jail name", token)
+		}
+		if self != "" && token == self {
+			return nil, fmt.Errorf("dependency %q cannot reference the jail itself", token)
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		deps = append(deps, token)
+	}
+	sort.Strings(deps)
+	return deps, nil
+}
+
+func mustParseJailDependencyNames(raw string) []string {
+	deps, _ := parseJailDependencyNames(raw, "")
+	return deps
+}
+
+func startupOrderSummary(raw string) string {
+	position, err := parseStartupOrderValue(raw)
+	if err != nil || position == 0 {
+		return "append to jail_list"
+	}
+	return fmt.Sprintf("position %d in jail_list", position)
+}
+
+func dependencySummary(raw string) string {
+	deps := mustParseJailDependencyNames(raw)
+	if len(deps) == 0 {
+		return "-"
+	}
+	return strings.Join(deps, " ")
+}
+
+func startupOrderPlanLine(values jailWizardValues) string {
+	position, _ := parseStartupOrderValue(values.StartupOrder)
+	if position <= 0 {
+		return fmt.Sprintf("if jail_list is already set: append %s; otherwise keep implicit 'start all configured jails' behavior", strings.TrimSpace(values.Name))
+	}
+	return fmt.Sprintf("sysrc jail_list=\"... %s ...\"  # place %s at position %d", strings.TrimSpace(values.Name), strings.TrimSpace(values.Name), position)
+}
+
 func effectiveLinuxRelease(values jailWizardValues) string {
 	release := strings.TrimSpace(values.LinuxRelease)
 	if release != "" {
@@ -1128,11 +1494,11 @@ func wizardSectionForField(id string) string {
 	switch id {
 	case "jail_type":
 		return "0. Jail Type"
-	case "name", "dataset":
+	case "name", "dataset", "startup_order", "dependencies":
 		return "1. Name & Destination"
 	case "template_release":
 		return "2. Template or release"
-	case "interface", "bridge", "uplink", "ip4", "ip6", "default_router", "hostname":
+	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router", "hostname":
 		return "3. Networking"
 	case "cpu_percent", "memory_limit", "process_limit":
 		return "4. Resource Limits (optional)"
