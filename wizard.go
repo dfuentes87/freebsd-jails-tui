@@ -594,8 +594,11 @@ func (w jailCreationWizard) validateCurrentStep() error {
 	if strings.TrimSpace(w.values.Dataset) == "" {
 		return fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 	}
-	if !strings.HasPrefix(strings.TrimSpace(w.values.Dataset), "/") {
-		return fmt.Errorf("destination must be an absolute path, e.g. /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+	if _, err := validateJailDestinationPath(w.values.Dataset, w.values.Name); err != nil {
+		if strings.Contains(err.Error(), "is required") {
+			return fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+		}
+		return err
 	}
 	if strings.TrimSpace(w.values.TemplateRelease) == "" {
 		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
@@ -679,6 +682,14 @@ func validateTemplateReleaseInput(values jailWizardValues) error {
 	input := strings.TrimSpace(values.TemplateRelease)
 	if input == "" {
 		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
+	}
+
+	if strings.HasPrefix(input, "/") {
+		cleanInput, err := validateAbsolutePath(input, "template/release path")
+		if err != nil {
+			return err
+		}
+		input = cleanInput
 	}
 
 	if info, err := os.Stat(input); err == nil {
@@ -772,6 +783,7 @@ func validateMountPointInput(raw string) error {
 	}
 	splitter := strings.NewReplacer("\n", ",", ";", ",")
 	chunks := strings.Split(splitter.Replace(raw), ",")
+	targets := map[string]string{}
 	for _, chunk := range chunks {
 		item := strings.TrimSpace(chunk)
 		if item == "" {
@@ -783,22 +795,29 @@ func validateMountPointInput(raw string) error {
 			if source == "" {
 				return fmt.Errorf("mount source is required before ':'")
 			}
-			if !strings.HasPrefix(source, "/") {
-				return fmt.Errorf("mount source %q must be an absolute path", source)
+			cleanSource, err := validateAccessibleAbsolutePath(source, "mount source")
+			if err != nil {
+				return err
 			}
-			if _, err := os.Stat(source); err != nil {
-				return fmt.Errorf("mount source %q is not accessible", source)
+			source = cleanSource
+			cleanTarget, err := validateMountTarget(target)
+			if err != nil {
+				return err
 			}
-			target = normalizeMountTarget(target)
-			if target == "" {
-				return fmt.Errorf("mount target must not be /")
+			if prior, exists := targets[cleanTarget]; exists {
+				return fmt.Errorf("mount target %q is duplicated (%s and %s)", cleanTarget, prior, item)
 			}
+			targets[cleanTarget] = item
 			continue
 		}
-		target = normalizeMountTarget(item)
-		if target == "" {
-			return fmt.Errorf("mount target must not be /")
+		cleanTarget, err := validateMountTarget(item)
+		if err != nil {
+			return err
 		}
+		if prior, exists := targets[cleanTarget]; exists {
+			return fmt.Errorf("mount target %q is duplicated (%s and %s)", cleanTarget, prior, item)
+		}
+		targets[cleanTarget] = item
 	}
 	return nil
 }
@@ -1006,14 +1025,14 @@ func parseMountPointSpecs(raw string) []mountPointSpec {
 		source, target, hasSeparator := strings.Cut(item, ":")
 		if hasSeparator {
 			source = strings.TrimSpace(source)
-			target = normalizeMountTarget(target)
+			target, _ = validateMountTarget(target)
 			if source == "" || target == "" {
 				continue
 			}
 			specs = append(specs, mountPointSpec{Source: source, Target: target})
 			continue
 		}
-		target = normalizeMountTarget(item)
+		target, _ = validateMountTarget(item)
 		if target == "" {
 			continue
 		}
@@ -1023,15 +1042,11 @@ func parseMountPointSpecs(raw string) []mountPointSpec {
 }
 
 func normalizeMountTarget(target string) string {
-	target = strings.TrimSpace(target)
-	if target == "" {
+	clean, err := validateMountTarget(target)
+	if err != nil {
 		return ""
 	}
-	target = filepath.Clean("/" + strings.TrimPrefix(target, "/"))
-	if target == "." || target == "/" {
-		return ""
-	}
-	return target
+	return clean
 }
 
 func jailConfigPathForName(name string) string {

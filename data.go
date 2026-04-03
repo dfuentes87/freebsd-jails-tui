@@ -34,19 +34,22 @@ type DashboardSnapshot struct {
 }
 
 type JailDetail struct {
-	Name           string
-	JID            int
-	Path           string
-	Hostname       string
-	JLSFields      map[string]string
-	JailConfSource string
-	JailConfRaw    []string
-	JailConfValues map[string]string
-	JailConfFlags  []string
-	ZFS            *ZFSDatasetInfo
-	RctlRules      []string
-	SourceErrors   map[string]string
-	LastUpdated    time.Time
+	Name                  string
+	JID                   int
+	Path                  string
+	Hostname              string
+	JLSFields             map[string]string
+	RuntimeValues         map[string]string
+	AdvancedRuntimeFields map[string]string
+	JailConfSource        string
+	JailConfRaw           []string
+	JailConfValues        map[string]string
+	JailConfFlags         []string
+	ZFS                   *ZFSDatasetInfo
+	RctlRules             []string
+	LinuxReadiness        *LinuxReadiness
+	SourceErrors          map[string]string
+	LastUpdated           time.Time
 }
 
 type ZFSDatasetInfo struct {
@@ -148,12 +151,14 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 
 func CollectJailDetail(name string, jid int, pathHint string, now time.Time) (JailDetail, error) {
 	detail := JailDetail{
-		Name:           name,
-		JID:            jid,
-		Path:           strings.TrimSpace(pathHint),
-		JLSFields:      map[string]string{},
-		JailConfValues: map[string]string{},
-		SourceErrors:   map[string]string{},
+		Name:                  name,
+		JID:                   jid,
+		Path:                  strings.TrimSpace(pathHint),
+		JLSFields:             map[string]string{},
+		RuntimeValues:         map[string]string{},
+		AdvancedRuntimeFields: map[string]string{},
+		JailConfValues:        map[string]string{},
+		SourceErrors:          map[string]string{},
 	}
 
 	var errs []error
@@ -204,9 +209,90 @@ func CollectJailDetail(name string, jid int, pathHint string, now time.Time) (Ja
 	rules, rctlErr := discoverRctlRules(name, detail.JID)
 	addErr("rctl", rctlErr)
 	detail.RctlRules = rules
+	detail.RuntimeValues, detail.AdvancedRuntimeFields = classifyDetailRuntime(detail.JLSFields, detail.JailConfValues)
+	detail.LinuxReadiness = collectLinuxReadiness(detail)
 
 	detail.LastUpdated = now
 	return detail, errors.Join(errs...)
+}
+
+func classifyDetailRuntime(jlsFields, confValues map[string]string) (map[string]string, map[string]string) {
+	runtime := map[string]string{}
+	advanced := map[string]string{}
+
+	get := func(key string) string {
+		return strings.TrimSpace(jlsFields[key])
+	}
+
+	if jid := get("jid"); jid != "" {
+		runtime["JID"] = jid
+	}
+	if path := get("path"); path != "" {
+		runtime["Live path"] = path
+	}
+	if host := get("host.hostname"); host != "" {
+		runtime["Live hostname"] = host
+	}
+
+	switch strings.ToLower(get("vnet")) {
+	case "new", "on", "true":
+		runtime["Network mode"] = "VNET"
+	case "inherit":
+		runtime["Network mode"] = "Shared stack"
+	}
+	if iface := strings.TrimSpace(firstNonEmpty(get("vnet.interface"), get("interface"))); iface != "" {
+		runtime["Interface"] = iface
+	}
+	if ip4 := strings.TrimSpace(firstNonEmpty(get("ip4.addr"), get("ip4"))); ip4 != "" {
+		runtime["IPv4"] = ip4
+	}
+	if ip6 := strings.TrimSpace(firstNonEmpty(get("ip6.addr"), get("ip6"))); ip6 != "" {
+		runtime["IPv6"] = ip6
+	}
+
+	curatedKeys := map[string]struct{}{
+		"name":           {},
+		"jid":            {},
+		"path":           {},
+		"host.hostname":  {},
+		"vnet":           {},
+		"vnet.interface": {},
+		"interface":      {},
+		"ip4":            {},
+		"ip4.addr":       {},
+		"ip6":            {},
+		"ip6.addr":       {},
+	}
+
+	configuredKeys := map[string]struct{}{}
+	for key := range confValues {
+		configuredKeys[strings.ToLower(strings.TrimSpace(key))] = struct{}{}
+	}
+
+	for key, value := range jlsFields {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := curatedKeys[key]; ok {
+			continue
+		}
+		if _, ok := configuredKeys[strings.ToLower(key)]; ok {
+			continue
+		}
+		advanced[key] = value
+	}
+
+	return runtime, advanced
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func discoverConfiguredJails() []string {

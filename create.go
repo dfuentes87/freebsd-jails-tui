@@ -114,6 +114,21 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	if destination == "" {
 		return fail(fmt.Errorf("destination is required"))
 	}
+	if strings.HasPrefix(destination, "/") {
+		cleanDestination, err := validateJailDestinationPath(destination, result.Name)
+		if err != nil {
+			return fail(err)
+		}
+		destination = cleanDestination
+		values.Dataset = cleanDestination
+	} else {
+		cleanDataset, err := validateZFSDatasetName(destination, "destination dataset")
+		if err != nil {
+			return fail(err)
+		}
+		destination = cleanDataset
+		values.Dataset = cleanDataset
+	}
 
 	result.ConfigPath = jailConfigPathForName(result.Name)
 	if err := ensureJailConfigDoesNotExist(result.ConfigPath); err != nil {
@@ -199,7 +214,10 @@ func prepareJailPath(values jailWizardValues, destination string, logs *[]string
 func ensureDestinationJailPath(destination string, logs *[]string) (string, func(), error) {
 	destination = strings.TrimSpace(destination)
 	if strings.HasPrefix(destination, "/") {
-		jailPath := filepath.Clean(destination)
+		jailPath, err := validateAbsolutePath(destination, "destination")
+		if err != nil {
+			return "", nil, err
+		}
 		info, err := os.Stat(jailPath)
 		existed := err == nil && info.IsDir()
 		existedEmpty := false
@@ -233,6 +251,11 @@ func ensureDestinationJailPath(destination string, logs *[]string) (string, func
 	}
 
 	// Backward compatibility: treat non-absolute values as ZFS dataset names.
+	var err error
+	destination, err = validateZFSDatasetName(destination, "destination dataset")
+	if err != nil {
+		return "", nil, err
+	}
 	createdDataset := false
 	if !zfsDatasetExists(destination) {
 		if _, createErr := runLoggedCommand(logs, "zfs", "create", "-p", destination); createErr != nil {
@@ -644,16 +667,24 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 
 	childDataset := parent.Name + "/" + templateName
 	childMountpoint := filepath.Join(parent.Mountpoint, templateName)
+	validatedChildDataset, err := validateZFSDatasetName(childDataset, "template dataset")
+	if err != nil {
+		return fail(err)
+	}
+	validatedChildMountpoint, err := validateAbsolutePath(childMountpoint, "template mountpoint")
+	if err != nil {
+		return fail(err)
+	}
 	result.Parent = parent.Name
-	result.Dataset = childDataset
-	result.Mountpoint = childMountpoint
+	result.Dataset = validatedChildDataset
+	result.Mountpoint = validatedChildMountpoint
 
-	if zfsDatasetExists(childDataset) {
-		return fail(fmt.Errorf("template dataset %q already exists", childDataset))
+	if zfsDatasetExists(result.Dataset) {
+		return fail(fmt.Errorf("template dataset %q already exists", result.Dataset))
 	}
 
-	if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+childMountpoint, childDataset); err != nil {
-		return fail(fmt.Errorf("failed to create template dataset %q: %w", childDataset, err))
+	if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+result.Mountpoint, result.Dataset); err != nil {
+		return fail(fmt.Errorf("failed to create template dataset %q: %w", result.Dataset, err))
 	}
 
 	success := false
@@ -661,7 +692,7 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		if success {
 			return
 		}
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", childDataset)
+		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", result.Dataset)
 	}()
 
 	info, err := os.Stat(sourcePath)
@@ -669,12 +700,12 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		return fail(fmt.Errorf("template source %q is not accessible: %w", sourcePath, err))
 	}
 	if info.IsDir() {
-		if _, err := runLoggedCommand(&logs, "cp", "-a", sourcePath+"/.", childMountpoint+"/"); err != nil {
-			return fail(fmt.Errorf("failed to copy template source into %q: %w", childDataset, err))
+		if _, err := runLoggedCommand(&logs, "cp", "-a", sourcePath+"/.", result.Mountpoint+"/"); err != nil {
+			return fail(fmt.Errorf("failed to copy template source into %q: %w", result.Dataset, err))
 		}
 	} else {
-		if _, err := runLoggedCommand(&logs, "tar", "-xf", sourcePath, "-C", childMountpoint); err != nil {
-			return fail(fmt.Errorf("failed to extract template archive into %q: %w", childDataset, err))
+		if _, err := runLoggedCommand(&logs, "tar", "-xf", sourcePath, "-C", result.Mountpoint); err != nil {
+			return fail(fmt.Errorf("failed to extract template archive into %q: %w", result.Dataset, err))
 		}
 	}
 
@@ -714,6 +745,14 @@ func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 	}
 	preview.Dataset = parent.Name + "/" + templateName
 	preview.Mountpoint = filepath.Join(parent.Mountpoint, templateName)
+	if preview.Dataset, err = validateZFSDatasetName(preview.Dataset, "template dataset"); err != nil {
+		preview.Err = err
+		return preview
+	}
+	if preview.Mountpoint, err = validateAbsolutePath(preview.Mountpoint, "template mountpoint"); err != nil {
+		preview.Err = err
+		return preview
+	}
 
 	sourceKind, resolvedSource, action, err := inspectTemplateSourceInput(preview.SourceInput)
 	preview.SourceKind = sourceKind
@@ -734,7 +773,7 @@ func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 func ExecuteTemplateParentDatasetCreate(dataset, mountpoint string) TemplateParentDatasetResult {
 	result := TemplateParentDatasetResult{
 		Dataset:    strings.TrimSpace(dataset),
-		Mountpoint: filepath.Clean(strings.TrimSpace(mountpoint)),
+		Mountpoint: strings.TrimSpace(mountpoint),
 	}
 	var logs []string
 	fail := func(err error) TemplateParentDatasetResult {
@@ -743,11 +782,12 @@ func ExecuteTemplateParentDatasetCreate(dataset, mountpoint string) TemplatePare
 		return result
 	}
 
-	if result.Dataset == "" {
-		return fail(fmt.Errorf("parent dataset is required"))
+	var err error
+	if result.Dataset, err = validateZFSDatasetName(result.Dataset, "parent dataset"); err != nil {
+		return fail(err)
 	}
-	if result.Mountpoint == "." || result.Mountpoint == "" || !strings.HasPrefix(result.Mountpoint, "/") {
-		return fail(fmt.Errorf("parent mountpoint must be absolute"))
+	if result.Mountpoint, err = validateAbsolutePath(result.Mountpoint, "parent mountpoint"); err != nil {
+		return fail(err)
 	}
 
 	out, err := exec.Command("zfs", "list", "-H", "-o", "mountpoint", result.Dataset).CombinedOutput()
@@ -860,7 +900,15 @@ func resolveTemplateDatasetParent(parentOverride *templateDatasetParent) (*templ
 		name := strings.TrimSpace(parentOverride.Name)
 		mountpoint := strings.TrimSpace(parentOverride.Mountpoint)
 		if name != "" && mountpoint != "" {
-			return &templateDatasetParent{Name: name, Mountpoint: filepath.Clean(mountpoint)}, nil
+			validatedName, err := validateZFSDatasetName(name, "parent dataset")
+			if err != nil {
+				return nil, err
+			}
+			validatedMountpoint, err := validateAbsolutePath(mountpoint, "parent mountpoint")
+			if err != nil {
+				return nil, err
+			}
+			return &templateDatasetParent{Name: validatedName, Mountpoint: validatedMountpoint}, nil
 		}
 	}
 	return discoverTemplateDatasetParent()
@@ -873,10 +921,14 @@ func inspectTemplateSourceInput(input string) (string, string, string, error) {
 	}
 
 	if info, err := os.Stat(input); err == nil {
-		if info.IsDir() {
-			return "local directory", filepath.Clean(input), "copy directory contents into the new dataset", nil
+		cleanInput, pathErr := validateAbsolutePath(input, "template/release path")
+		if pathErr != nil {
+			return "", "", "", pathErr
 		}
-		return "local archive", filepath.Clean(input), "extract archive into the new dataset", nil
+		if info.IsDir() {
+			return "local directory", cleanInput, "copy directory contents into the new dataset", nil
+		}
+		return "local archive", cleanInput, "extract archive into the new dataset", nil
 	}
 
 	if source, ok := findNamedUserlandSource(defaultUserlandDir, input); ok {
@@ -995,7 +1047,11 @@ func resolveTemplateSource(input string, logs *[]string) (string, func(), error)
 
 	// Explicit filesystem path wins.
 	if _, err := os.Stat(input); err == nil {
-		return input, nil, nil
+		cleanInput, pathErr := validateAbsolutePath(input, "template/release path")
+		if pathErr != nil {
+			return "", nil, pathErr
+		}
+		return cleanInput, nil, nil
 	}
 
 	// Shortcut: entry name from userland media directory.
@@ -1168,14 +1224,19 @@ func configureMountPoints(name, jailPath string, specs []mountPointSpec, logs *[
 	}
 
 	fstabLines := make([]string, 0, len(specs))
+	seenTargets := map[string]struct{}{}
 	for _, spec := range specs {
 		if spec.Target == "" {
 			continue
 		}
-		targetPath, err := resolveMountTargetPath(jailPath, spec.Target)
+		cleanTarget, targetPath, err := validateMountTargetPath(jailPath, spec.Target)
 		if err != nil {
 			return "", err
 		}
+		if _, exists := seenTargets[cleanTarget]; exists {
+			return "", fmt.Errorf("mount target %q is duplicated", cleanTarget)
+		}
+		seenTargets[cleanTarget] = struct{}{}
 		*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", targetPath))
 		if err := os.MkdirAll(targetPath, 0o755); err != nil {
 			return "", fmt.Errorf("failed to create mount target %q: %w", targetPath, err)
@@ -1183,10 +1244,11 @@ func configureMountPoints(name, jailPath string, specs []mountPointSpec, logs *[
 		if spec.Source == "" {
 			continue
 		}
-		if _, err := os.Stat(spec.Source); err != nil {
-			return "", fmt.Errorf("mount source %q is not accessible: %w", spec.Source, err)
+		source, err := validateAccessibleAbsolutePath(spec.Source, "mount source")
+		if err != nil {
+			return "", err
 		}
-		fstabLines = append(fstabLines, fmt.Sprintf("%s %s nullfs rw 0 0", spec.Source, targetPath))
+		fstabLines = append(fstabLines, fmt.Sprintf("%s %s nullfs rw 0 0", source, targetPath))
 	}
 
 	if len(fstabLines) == 0 {
@@ -1206,14 +1268,9 @@ func configureMountPoints(name, jailPath string, specs []mountPointSpec, logs *[
 }
 
 func resolveMountTargetPath(jailPath, target string) (string, error) {
-	cleanTarget := normalizeMountTarget(target)
-	if cleanTarget == "" {
-		return "", fmt.Errorf("mount target must not be /")
-	}
-	cleanJailPath := filepath.Clean(strings.TrimSpace(jailPath))
-	targetPath := filepath.Clean(filepath.Join(cleanJailPath, strings.TrimPrefix(cleanTarget, "/")))
-	if targetPath == cleanJailPath || !strings.HasPrefix(targetPath, cleanJailPath+string(os.PathSeparator)) {
-		return "", fmt.Errorf("mount target %q escapes jail root %q", target, cleanJailPath)
+	_, targetPath, err := validateMountTargetPath(jailPath, target)
+	if err != nil {
+		return "", err
 	}
 	return targetPath, nil
 }

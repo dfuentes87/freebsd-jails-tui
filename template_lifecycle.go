@@ -160,14 +160,12 @@ func InspectTemplateDatasetRename(dataset, newName string, parentOverride *templ
 		preview.Err = fmt.Errorf("template dataset %q cannot be renamed: %s", info.Name, strings.Join(info.SafetyIssues, "; "))
 		return preview
 	}
-	if preview.NewName == "" {
-		preview.Err = fmt.Errorf("new template name is required")
+	validatedName, err := validateTemplateRenameLeafName(preview.NewName)
+	if err != nil {
+		preview.Err = err
 		return preview
 	}
-	if !templateDatasetLeafPattern.MatchString(preview.NewName) {
-		preview.Err = fmt.Errorf("new template name %q is invalid; allowed characters are letters, numbers, ., _, -", preview.NewName)
-		return preview
-	}
+	preview.NewName = validatedName
 	if preview.NewName == filepath.Base(info.Name) {
 		preview.Err = fmt.Errorf("new template name must differ from the current name")
 		return preview
@@ -175,6 +173,14 @@ func InspectTemplateDatasetRename(dataset, newName string, parentOverride *templ
 
 	preview.NewDataset = info.ParentDataset + "/" + preview.NewName
 	preview.NewMountpoint = filepath.Join(info.ParentMountpoint, preview.NewName)
+	if preview.NewDataset, err = validateZFSDatasetName(preview.NewDataset, "template dataset"); err != nil {
+		preview.Err = err
+		return preview
+	}
+	if preview.NewMountpoint, err = validateAbsolutePath(preview.NewMountpoint, "template mountpoint"); err != nil {
+		preview.Err = err
+		return preview
+	}
 	if _, err := exec.Command("zfs", "list", "-H", "-o", "name", preview.NewDataset).Output(); err == nil {
 		preview.Err = fmt.Errorf("template dataset %q already exists", preview.NewDataset)
 	}

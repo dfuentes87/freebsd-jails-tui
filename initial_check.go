@@ -511,13 +511,14 @@ func enableRCDefaultsCmd(enableJail, enableParallel bool) tea.Cmd {
 
 func createJailLayoutCmd(basePath string) tea.Cmd {
 	return func() tea.Msg {
-		basePath = filepath.Clean(strings.TrimSpace(basePath))
-		if !strings.HasPrefix(basePath, "/") {
+		validatedPath, err := validateAbsolutePath(basePath, "base path")
+		if err != nil {
 			return initialActionMsg{
-				err:     fmt.Errorf("base path must be absolute"),
+				err:     err,
 				message: "Invalid jail path.",
 			}
 		}
+		basePath = validatedPath
 		paths := []string{
 			basePath,
 			filepath.Join(basePath, "media"),
@@ -555,17 +556,21 @@ func createDefaultDatasetLayoutCmd() tea.Cmd {
 
 func createDatasetLayoutCmd(baseDataset, mountpoint, media, templates, containers string) tea.Cmd {
 	return func() tea.Msg {
-		baseDataset = strings.TrimSpace(baseDataset)
-		mountpoint = strings.TrimSpace(mountpoint)
-		media = strings.TrimSpace(media)
-		templates = strings.TrimSpace(templates)
-		containers = strings.TrimSpace(containers)
-
-		if baseDataset == "" {
-			return initialActionMsg{err: fmt.Errorf("base dataset is required"), message: "Dataset creation failed."}
+		var err error
+		if baseDataset, err = validateZFSDatasetName(baseDataset, "base dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
 		}
-		if mountpoint == "" || !strings.HasPrefix(mountpoint, "/") {
-			return initialActionMsg{err: fmt.Errorf("mountpoint must be absolute"), message: "Dataset creation failed."}
+		if mountpoint, err = validateAbsolutePath(mountpoint, "mountpoint"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
+		}
+		if media, err = validateOptionalZFSDatasetName(media, "media dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
+		}
+		if templates, err = validateOptionalZFSDatasetName(templates, "templates dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
+		}
+		if containers, err = validateOptionalZFSDatasetName(containers, "containers dataset"); err != nil {
+			return initialActionMsg{err: err, message: "Dataset creation failed."}
 		}
 
 		var logs []string
@@ -650,9 +655,9 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.initCheck.message = "Custom path canceled."
 			return m, nil
 		case "enter":
-			path := filepath.Clean(strings.TrimSpace(m.initCheck.customDirPath))
-			if path == "" || !strings.HasPrefix(path, "/") {
-				m.initCheck.err = fmt.Errorf("custom path must be absolute")
+			path, err := validateAbsolutePath(m.initCheck.customDirPath, "custom path")
+			if err != nil {
+				m.initCheck.err = err
 				m.initCheck.message = "Enter an absolute path like /usr/local/jails."
 				return m, nil
 			}
@@ -708,15 +713,15 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "G", "end":
 			m.initCheck.customDatasetField = 4
 		case "enter":
-			base := strings.TrimSpace(m.initCheck.customDatasetBase)
-			mountpoint := strings.TrimSpace(m.initCheck.customDatasetMountpoint)
-			if base == "" {
-				m.initCheck.err = fmt.Errorf("base dataset is required")
+			base, err := validateZFSDatasetName(m.initCheck.customDatasetBase, "base dataset")
+			if err != nil {
+				m.initCheck.err = err
 				m.initCheck.message = "Base dataset is required."
 				return m, nil
 			}
-			if mountpoint == "" || !strings.HasPrefix(mountpoint, "/") {
-				m.initCheck.err = fmt.Errorf("mountpoint must be absolute")
+			mountpoint, err := validateAbsolutePath(m.initCheck.customDatasetMountpoint, "mountpoint")
+			if err != nil {
+				m.initCheck.err = err
 				m.initCheck.message = "Mountpoint must be an absolute path."
 				return m, nil
 			}
@@ -796,7 +801,13 @@ func (m model) renderInitialCheckView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	footer := footerStyle.Width(m.width).Render(m.initialCheckFooterHint())
+	footerRenderer := footerStyle
+	message := m.initCheck.message
+	if m.initCheck.err != nil {
+		message = "error: " + m.initCheck.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	footer := m.renderFooterWithMessage(m.initialCheckFooterHint(), message, footerRenderer)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
@@ -810,10 +821,6 @@ func (m model) initialCheckLines(width int) []string {
 		appendLine("Running initial checks...")
 		return lines
 	}
-	if m.initCheck.applying {
-		appendLine("Applying selected setup action...")
-	}
-
 	lines = append(lines, sectionStyle.Render("rc.conf checks"))
 	appendLine(fmt.Sprintf("jail_enable = %s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable)))
 	appendLine(fmt.Sprintf("jail_parallel_start = %s (%s)", displayRCValue(m.initCheck.status.ParallelStartValue), checkStatusText(!m.initCheck.status.NeedsParallelStart)))
@@ -846,15 +853,6 @@ func (m model) initialCheckLines(width int) []string {
 		for _, err := range m.initCheck.status.Errors {
 			lines = append(lines, wizardErrorStyle.Render(truncate("  - "+err, width)))
 		}
-	}
-
-	if m.initCheck.message != "" {
-		appendLine("")
-		lines = append(lines, styleWizardMessage(truncate("Notice: "+m.initCheck.message, width)))
-	}
-	if m.initCheck.err != nil {
-		appendLine("")
-		lines = append(lines, wizardErrorStyle.Render(truncate("Error: "+m.initCheck.err.Error(), width)))
 	}
 
 	appendLine("")

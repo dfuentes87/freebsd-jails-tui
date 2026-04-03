@@ -172,21 +172,22 @@ type model struct {
 	snapshot DashboardSnapshot
 	err      error
 
-	mode           screenMode
-	detail         JailDetail
-	detailErr      error
-	detailLoading  bool
-	detailScroll   int
-	detailNotice   string
-	zfsPanel       zfsPanelState
-	wizard         jailCreationWizard
-	wizardApplying bool
-	templateCreate templateDatasetCreateState
-	destroy        destroyState
-	initCheck      initialCheckState
-	helpReturnMode screenMode
-	helpScroll     int
-	notice         string
+	mode               screenMode
+	detail             JailDetail
+	detailErr          error
+	detailLoading      bool
+	detailScroll       int
+	detailShowAdvanced bool
+	detailNotice       string
+	zfsPanel           zfsPanelState
+	wizard             jailCreationWizard
+	wizardApplying     bool
+	templateCreate     templateDatasetCreateState
+	destroy            destroyState
+	initCheck          initialCheckState
+	helpReturnMode     screenMode
+	helpScroll         int
+	notice             string
 }
 
 func newModel() model {
@@ -685,16 +686,19 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenJailDetail
 		m.detailLoading = true
 		m.detailScroll = 0
+		m.detailShowAdvanced = false
 		m.detailErr = nil
 		m.detailNotice = ""
 		m.detail = JailDetail{
-			Name:           jail.Name,
-			JID:            jail.JID,
-			Path:           jail.Path,
-			Hostname:       jail.Hostname,
-			JLSFields:      map[string]string{},
-			JailConfValues: map[string]string{},
-			SourceErrors:   map[string]string{},
+			Name:                  jail.Name,
+			JID:                   jail.JID,
+			Path:                  jail.Path,
+			Hostname:              jail.Hostname,
+			JLSFields:             map[string]string{},
+			RuntimeValues:         map[string]string{},
+			AdvancedRuntimeFields: map[string]string{},
+			JailConfValues:        map[string]string{},
+			SourceErrors:          map[string]string{},
 		}
 		return m, detailCmd(jail)
 	}
@@ -729,6 +733,15 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailErr = nil
 		m.detailNotice = ""
 		return m, detailCmd(jail)
+	case "a", "A":
+		m.detailShowAdvanced = !m.detailShowAdvanced
+		if m.detailShowAdvanced {
+			m.detailNotice = "Showing advanced runtime parameters."
+		} else {
+			m.detailNotice = "Advanced runtime parameters hidden."
+		}
+		m.detailErr = nil
+		return m, nil
 	case "b", "B":
 		if !detailLooksLikeLinuxJail(m.detail) {
 			m.detailErr = fmt.Errorf("linux bootstrap retry is only available for linux jails")
@@ -1391,7 +1404,7 @@ func (m model) renderHelpView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	footer := footerStyle.Width(m.width).Render("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit")
+	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
@@ -1420,6 +1433,7 @@ func (m model) helpLines(width int) []string {
 		"",
 		sectionStyle.Render("Jail Detail"),
 		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
+		truncate("a: toggle advanced runtime/default parameters", width),
 		truncate("r: refresh selected jail details", width),
 		truncate("b: retry linux bootstrap for a running linux jail", width),
 		truncate("z: open ZFS integration panel", width),
@@ -1469,14 +1483,6 @@ func (m model) renderDestroyView() string {
 	for _, line := range m.destroy.preview {
 		lines = append(lines, truncate(line, bodyWidth))
 	}
-	if m.destroy.message != "" {
-		lines = append(lines, "")
-		noticeText := truncate(m.destroy.message, max(1, bodyWidth-8))
-		lines = append(lines, detailKeyStyle.Render("Notice:")+" "+styleWizardMessage(noticeText))
-	}
-	if m.destroy.err != nil {
-		lines = append(lines, wizardErrorStyle.Render(truncate("Error: "+m.destroy.err.Error(), bodyWidth)))
-	}
 	if len(m.destroy.logs) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Execution output"))
@@ -1497,7 +1503,13 @@ func (m model) renderDestroyView() string {
 	if m.destroy.applying {
 		hint = "Destroying jail... please wait | q: quit"
 	}
-	footer := footerStyle.Width(m.width).Render(hint)
+	footerRenderer := footerStyle
+	message := m.destroy.message
+	if m.destroy.err != nil {
+		message = "error: " + m.destroy.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
@@ -1582,7 +1594,7 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | r: refresh detail"
+	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
 	if detailLooksLikeLinuxJail(m.detail) {
 		hint += " | b: retry linux bootstrap"
 	}
@@ -1773,11 +1785,6 @@ func (m model) templateManagerDetailLines(width int) []string {
 			sourceDisplay = "(15.0-RELEASE)"
 		}
 		lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> Template/Release: "+sourceDisplay, width)))
-		if m.templateCreate.message != "" {
-			for _, line := range wrapText("Notice: "+m.templateCreate.message, width) {
-				lines = append(lines, styleWizardMessage(line))
-			}
-		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Preview"))
 		preview := m.templateCreate.preview
@@ -1942,11 +1949,6 @@ func (m model) wizardLines(width int) []string {
 	if step.Description != "" {
 		lines = append(lines, truncate(step.Description, width))
 	}
-	if m.wizard.message != "" {
-		for _, line := range wrapText("Notice: "+m.wizard.message, width) {
-			lines = append(lines, styleWizardMessage(line))
-		}
-	}
 	lines = append(lines, "")
 
 	if m.wizard.templateMode == wizardTemplateModeSave {
@@ -2046,6 +2048,13 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.summaryLines() {
 			lines = append(lines, truncate(line, width))
 		}
+		if normalizedJailType(m.wizard.values.JailType) == "linux" {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Linux prerequisites"))
+			for _, line := range linuxWizardPrereqLines(m.wizard.values) {
+				lines = append(lines, truncate(line, width))
+			}
+		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("jail.conf preview"))
 		for _, line := range m.wizard.jailConfPreviewLines() {
@@ -2113,6 +2122,46 @@ func (m model) wizardLines(width int) []string {
 		}
 	}
 
+	if normalizedJailType(m.wizard.values.JailType) == "linux" && wizardsShowsLinuxPrereqs(step) {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
+		for _, line := range linuxWizardPrereqLines(m.wizard.values) {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+
+	return lines
+}
+
+func wizardsShowsLinuxPrereqs(step wizardStep) bool {
+	for _, field := range step.Fields {
+		switch field.ID {
+		case "linux_distro", "linux_release", "linux_bootstrap":
+			return true
+		}
+	}
+	return false
+}
+
+func linuxWizardPrereqLines(values jailWizardValues) []string {
+	prereqs := collectLinuxWizardPrereqs(values)
+	lines := []string{
+		"Host Linux ABI will be enabled with: sysrc linux_enable=YES",
+		"Host Linux service will be started with: service linux start",
+		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
+		fmt.Sprintf("Linux service present: %s", yesNoText(prereqs.Host.ServicePresent)),
+		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
+		fmt.Sprintf("Bootstrap mirror host: %s", valueOrDash(prereqs.MirrorHost)),
+		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
+		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
+		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
+	}
+	if prereqs.Host.EnableReadError != "" {
+		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
+	}
+	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
+		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
+	}
 	return lines
 }
 
@@ -2148,17 +2197,7 @@ func (m model) detailLines(width int) []string {
 	appendLine("Hostname: " + valueOrDash(m.detail.Hostname))
 	appendLine("")
 
-	lines = append(lines, sectionStyle.Render("jls"))
-	if len(m.detail.JLSFields) == 0 {
-		appendLine("No running jls record for this jail.")
-	} else {
-		for _, key := range sortedKeys(m.detail.JLSFields) {
-			appendLine(fmt.Sprintf("%s = %s", key, m.detail.JLSFields[key]))
-		}
-	}
-	appendLine("")
-
-	lines = append(lines, sectionStyle.Render("jail.conf"))
+	lines = append(lines, sectionStyle.Render("Configured state"))
 	appendLine("Source: " + valueOrDash(m.detail.JailConfSource))
 	if len(m.detail.JailConfValues) == 0 && len(m.detail.JailConfFlags) == 0 {
 		appendLine("No matching jail block found.")
@@ -2171,6 +2210,34 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 	appendLine("")
+
+	lines = append(lines, sectionStyle.Render("Runtime state"))
+	appendLine("State: " + state)
+	appendLine("CPU: " + cpuText)
+	appendLine("Memory: " + memText)
+	if len(m.detail.RuntimeValues) == 0 {
+		appendLine("No running runtime record for this jail.")
+	} else {
+		for _, key := range orderedRuntimeKeys(m.detail.RuntimeValues) {
+			appendLine(fmt.Sprintf("%s: %s", key, m.detail.RuntimeValues[key]))
+		}
+	}
+	if !m.detailShowAdvanced {
+		appendLine("Raw runtime/default parameters hidden; press a to show.")
+	}
+	appendLine("")
+
+	if m.detailShowAdvanced {
+		lines = append(lines, sectionStyle.Render("Advanced runtime parameters"))
+		if len(m.detail.AdvancedRuntimeFields) == 0 {
+			appendLine("No additional runtime/default parameters.")
+		} else {
+			for _, key := range sortedKeys(m.detail.AdvancedRuntimeFields) {
+				appendLine(fmt.Sprintf("%s = %s", key, m.detail.AdvancedRuntimeFields[key]))
+			}
+		}
+		appendLine("")
+	}
 
 	lines = append(lines, sectionStyle.Render("ZFS dataset"))
 	if m.detail.ZFS == nil {
@@ -2197,12 +2264,94 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 
+	if m.detail.LinuxReadiness != nil {
+		appendLine("")
+		lines = append(lines, sectionStyle.Render("Linux readiness"))
+		for _, line := range m.linuxReadinessLines() {
+			if looksLikeWarningText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
+				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
+				continue
+			}
+			appendLine(line)
+		}
+	}
+
 	if len(m.detail.SourceErrors) > 0 {
 		appendLine("")
 		lines = append(lines, sectionStyle.Render("Source errors"))
 		for _, source := range sortedKeys(m.detail.SourceErrors) {
 			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
 		}
+	}
+	return lines
+}
+
+func orderedRuntimeKeys(values map[string]string) []string {
+	order := []string{
+		"JID",
+		"Live path",
+		"Live hostname",
+		"Network mode",
+		"Interface",
+		"IPv4",
+		"IPv6",
+	}
+	keys := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, key := range order {
+		if _, ok := values[key]; ok {
+			keys = append(keys, key)
+			seen[key] = struct{}{}
+		}
+	}
+	for _, key := range sortedKeys(values) {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (m model) linuxReadinessLines() []string {
+	if m.detail.LinuxReadiness == nil {
+		return nil
+	}
+	readiness := m.detail.LinuxReadiness
+	lines := []string{
+		fmt.Sprintf("Host linux_enable: %s", valueOrDash(readiness.Host.EnableValue)),
+		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
+		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
+		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
+		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
+		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
+		fmt.Sprintf("Mirror host: %s", valueOrDash(readiness.MirrorHost)),
+		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
+		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
+	}
+	if readiness.Host.EnableReadError != "" {
+		lines = append(lines, "Warning: host ABI check failed: "+readiness.Host.EnableReadError)
+	}
+	if readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
+		lines = append(lines, "Warning: linux service status check failed: "+readiness.Host.ServiceStatusErr)
+	}
+	if readiness.RuntimeChecked {
+		lines = append(lines,
+			fmt.Sprintf("IPv4 route: %s", yesNoText(readiness.IPv4Route)),
+			fmt.Sprintf("IPv6 route: %s", yesNoText(readiness.IPv6Route)),
+			fmt.Sprintf("IPv4 DNS: %s", yesNoText(readiness.IPv4DNS)),
+			fmt.Sprintf("IPv6 DNS: %s", yesNoText(readiness.IPv6DNS)),
+			fmt.Sprintf("IPv4 fetch: %s", yesNoText(readiness.IPv4Fetch)),
+			fmt.Sprintf("IPv6 fetch: %s", yesNoText(readiness.IPv6Fetch)),
+		)
+	} else {
+		lines = append(lines, "Route/DNS/fetch checks run when the jail is running.")
+	}
+	if readiness.RuntimeError != "" {
+		lines = append(lines, "Warning: "+readiness.RuntimeError)
+	}
+	if !readiness.UserlandPresent {
+		lines = append(lines, "Use b to retry Linux bootstrap after prerequisites are ready.")
 	}
 	return lines
 }
@@ -2606,7 +2755,12 @@ func statusBadge(running bool) string {
 
 func styleWizardMessage(message string) string {
 	lower := strings.ToLower(message)
-	if strings.Contains(lower, "applying creation plan") || strings.Contains(lower, "creating template dataset") || strings.Contains(lower, "creating template parent dataset") {
+	if strings.Contains(lower, "applying") ||
+		strings.Contains(lower, "creating") ||
+		strings.Contains(lower, "refreshing") ||
+		strings.Contains(lower, "retrying") ||
+		strings.Contains(lower, "rolling back") ||
+		strings.Contains(lower, "loading detail") {
 		return wizardActionStyle.Render(message)
 	}
 	if looksLikeWarningText(message) {
