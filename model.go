@@ -1616,6 +1616,7 @@ func (m model) helpLines(width int) []string {
 		truncate("ctrl+u: open userland selector", width),
 		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
 		truncate("startup order updates rc.conf jail_list; dependencies write depend in jail.conf", width),
+		truncate("linux step supports default or custom bootstrap mirrors; retry uses the saved mirror choice", width),
 		truncate("vnet preflight checks bridge/uplink host state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
@@ -1782,14 +1783,6 @@ func (m model) renderWizardView() string {
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := max(4, m.height-3)
-	lines := m.wizardLines(max(12, m.width-2))
-	body := lipgloss.NewStyle().
-		Width(m.width).
-		Height(bodyHeight).
-		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
-
 	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	if normalizedJailType(m.wizard.values.JailType) == "thin" {
 		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
@@ -1816,6 +1809,13 @@ func (m model) renderWizardView() string {
 		hint = "Applying changes... please wait | ctrl+c: quit"
 	}
 	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
+	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	lines := m.wizardLines(max(12, m.width-2))
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -2367,7 +2367,7 @@ func (m model) wizardLines(width int) []string {
 func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
-		case "linux_distro", "linux_release", "linux_bootstrap":
+		case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
 			return true
 		}
 	}
@@ -2399,10 +2399,14 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(prereqs.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
+		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap mirror host: %s", valueOrDash(prereqs.MirrorHost)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
 		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
+	}
+	if prereqs.ResolveError != "" {
+		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
 	}
 	if prereqs.Host.EnableReadError != "" {
 		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
@@ -2617,9 +2621,13 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
+		fmt.Sprintf("Mirror URL: %s", valueOrDash(readiness.MirrorURL)),
 		fmt.Sprintf("Mirror host: %s", valueOrDash(readiness.MirrorHost)),
 		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
+	}
+	if readiness.MirrorResolveError != "" {
+		lines = append(lines, "Warning: mirror resolution failed: "+readiness.MirrorResolveError)
 	}
 	if readiness.Host.EnableReadError != "" {
 		lines = append(lines, "Warning: host ABI check failed: "+readiness.Host.EnableReadError)

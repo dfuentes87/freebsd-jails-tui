@@ -507,7 +507,11 @@ func bootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]st
 	distro := effectiveLinuxDistro(values)
 	release := effectiveLinuxRelease(values)
 	target := filepath.ToSlash(filepath.Join("/compat", distro))
-	mirror := linuxMirrorURL(values)
+	mirrorInfo, err := resolveLinuxMirror(values)
+	if err != nil {
+		return err
+	}
+	mirror := mirrorInfo.BaseURL
 
 	if jailExecutableExists(jailName, filepath.ToSlash(filepath.Join(target, "bin", "sh"))) {
 		*logs = append(*logs, "Linux userland already present under "+target+"; skipping debootstrap.")
@@ -539,12 +543,16 @@ func maybeBootstrapLinuxUserland(values jailWizardValues, jailName string, logs 
 }
 
 func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]string) error {
+	mirrorInfo, err := resolveLinuxMirror(values)
+	if err != nil {
+		return err
+	}
 	hasIPv4Route := checkLinuxRouteFamily(jailName, "inet", logs)
 	hasIPv6Route := checkLinuxRouteFamily(jailName, "inet6", logs)
 	if !hasIPv4Route && !hasIPv6Route {
 		return fmt.Errorf("linux bootstrap preflight failed: no IPv4 or IPv6 default route inside the jail")
 	}
-	host := linuxMirrorHost(values)
+	host := mirrorInfo.Host
 	if host == "" {
 		return fmt.Errorf("linux bootstrap preflight failed: could not determine mirror host")
 	}
@@ -561,7 +569,7 @@ func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]s
 	if hasIPv6Route && !hasIPv6DNS && !hasIPv4Route {
 		return fmt.Errorf("linux bootstrap preflight failed: DNS returned no IPv6 answers for %s", host)
 	}
-	if err := checkLinuxFetchReachability(values, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
+	if err := checkLinuxFetchReachability(mirrorInfo.PreflightURL, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
 		return err
 	}
 	return nil
@@ -580,8 +588,7 @@ func checkLinuxRouteFamily(jailName, family string, logs *[]string) bool {
 	return err == nil
 }
 
-func checkLinuxFetchReachability(values jailWizardValues, jailName string, hasIPv4Route, hasIPv6Route bool, logs *[]string) error {
-	preflightURL := linuxPreflightURL(values)
+func checkLinuxFetchReachability(preflightURL, jailName string, hasIPv4Route, hasIPv6Route bool, logs *[]string) error {
 	var failures []string
 	if hasIPv4Route {
 		if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-4", "-qo", "/dev/null", preflightURL); err == nil {
@@ -845,6 +852,12 @@ func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
 				values.LinuxRelease = strings.TrimSpace(value)
 			case "linux_bootstrap":
 				values.LinuxBootstrap = strings.TrimSpace(value)
+			case "linux_mirror_mode":
+				values.LinuxMirrorMode = strings.TrimSpace(value)
+			case "linux_mirror_url":
+				if strings.TrimSpace(value) != "-" {
+					values.LinuxMirrorURL = strings.TrimSpace(value)
+				}
 			}
 		}
 	}

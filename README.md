@@ -180,6 +180,8 @@ Wizard fields include:
 - Linux distro
 - Linux release
 - Linux bootstrap mode
+- Linux mirror mode
+- Linux mirror URL
 - CPU percentage limit
 - memory limit
 - max process limit
@@ -193,6 +195,7 @@ Important behavior:
 - `Startup order` updates `jail_list` in `rc.conf` when explicit list ordering is needed; if `jail_list` is currently empty and startup order is left blank, the TUI preserves the default “start all configured jails” behavior
 - `Dependencies` writes the jail's `depend` parameter in `jail.conf`, which can override plain `jail_list` ordering
 - `IPv6` is optional
+- Linux bootstrap can use either the built-in distro mirror or a custom mirror base URL
 - `inherit` is allowed for non-`vnet` networking
 - `inherit` is rejected for `vnet` jails
 - `vnet` uses dedicated `Bridge` and optional `Uplink` fields instead of `Interface`

@@ -93,6 +93,8 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "linux_distro", Label: "Linux distro", Placeholder: "ubuntu", Help: "Supported: ubuntu or debian"},
 			{ID: "linux_release", Label: "Linux release", Placeholder: "jammy", Help: "Ubuntu codename or Debian suite"},
 			{ID: "linux_bootstrap", Label: "Bootstrap mode", Placeholder: "auto", Help: "Options: auto or skip"},
+			{ID: "linux_mirror_mode", Label: "Mirror mode", Placeholder: "default", Help: "Options: default or custom"},
+			{ID: "linux_mirror_url", Label: "Mirror URL", Placeholder: "https://mirror.example.invalid/ubuntu", Help: "Custom Linux package mirror base URL"},
 		},
 	},
 	{
@@ -119,6 +121,8 @@ type jailWizardValues struct {
 	LinuxDistro     string
 	LinuxRelease    string
 	LinuxBootstrap  string
+	LinuxMirrorMode string
+	LinuxMirrorURL  string
 	CPUPercent      string
 	MemoryLimit     string
 	ProcessLimit    string
@@ -473,6 +477,8 @@ func (w *jailCreationWizard) refreshLinuxPrereqs() {
 		effectiveLinuxDistro(w.values),
 		effectiveLinuxRelease(w.values),
 		effectiveLinuxBootstrapMode(w.values),
+		effectiveLinuxMirrorMode(w.values),
+		strings.TrimSpace(w.values.LinuxMirrorURL),
 	}, "|")
 	if w.linuxPrereqCached && w.linuxPrereqKey == key {
 		return
@@ -531,12 +537,19 @@ func (w jailCreationWizard) visibleFields() []wizardField {
 			if jailType != "vnet" {
 				continue
 			}
-		case "linux_distro", "linux_release":
+		case "linux_distro", "linux_release", "linux_mirror_mode":
 			if jailType != "linux" {
 				continue
 			}
 		case "linux_bootstrap":
 			if jailType != "linux" {
+				continue
+			}
+		case "linux_mirror_url":
+			if jailType != "linux" {
+				continue
+			}
+			if effectiveLinuxMirrorMode(w.values) != "custom" {
 				continue
 			}
 		}
@@ -581,6 +594,10 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.LinuxRelease
 	case "linux_bootstrap":
 		return &w.values.LinuxBootstrap
+	case "linux_mirror_mode":
+		return &w.values.LinuxMirrorMode
+	case "linux_mirror_url":
+		return &w.values.LinuxMirrorURL
 	case "cpu_percent":
 		return &w.values.CPUPercent
 	case "memory_limit":
@@ -630,6 +647,10 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.LinuxRelease
 	case "linux_bootstrap":
 		return w.values.LinuxBootstrap
+	case "linux_mirror_mode":
+		return w.values.LinuxMirrorMode
+	case "linux_mirror_url":
+		return w.values.LinuxMirrorURL
 	case "cpu_percent":
 		return w.values.CPUPercent
 	case "memory_limit":
@@ -792,6 +813,18 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		case "auto", "skip":
 		default:
 			return "linux_bootstrap", fmt.Errorf("bootstrap mode must be auto or skip")
+		}
+		mirrorMode := effectiveLinuxMirrorMode(w.values)
+		switch mirrorMode {
+		case "default", "custom":
+		default:
+			return "linux_mirror_mode", fmt.Errorf("mirror mode must be default or custom")
+		}
+		if _, err := resolveLinuxMirror(w.values); err != nil {
+			if mirrorMode == "custom" {
+				return "linux_mirror_url", err
+			}
+			return "linux_mirror_mode", err
 		}
 	}
 	return "", nil
@@ -1037,6 +1070,8 @@ func (w jailCreationWizard) summaryLines() []string {
 			fmt.Sprintf("Linux distro: %s", effectiveLinuxDistro(w.values)),
 			fmt.Sprintf("Linux release: %s", effectiveLinuxRelease(w.values)),
 			fmt.Sprintf("Bootstrap mode: %s", effectiveLinuxBootstrapMode(w.values)),
+			fmt.Sprintf("Mirror mode: %s", effectiveLinuxMirrorMode(w.values)),
+			fmt.Sprintf("Mirror URL: %s", effectiveLinuxMirrorSummary(w.values)),
 		)
 	}
 	mounts := w.mountPointList()
@@ -1291,7 +1326,7 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 		lines = append(lines, buildVNETJailConfig(values)...)
 	case "linux":
 		lines = append(lines,
-			fmt.Sprintf("  # freebsd-jails-tui: linux_distro=%s linux_release=%s linux_bootstrap=%s;", effectiveLinuxDistro(values), effectiveLinuxRelease(values), effectiveLinuxBootstrapMode(values)),
+			fmt.Sprintf("  # freebsd-jails-tui: linux_distro=%s linux_release=%s linux_bootstrap=%s linux_mirror_mode=%s linux_mirror_url=%s;", effectiveLinuxDistro(values), effectiveLinuxRelease(values), effectiveLinuxBootstrapMode(values), effectiveLinuxMirrorMode(values), linuxMirrorMetadataValue(values)),
 		)
 		lines = append(lines, buildLinuxJailConfig(values, jailPath)...)
 	default:
@@ -1522,27 +1557,98 @@ func effectiveLinuxBootstrapMode(values jailWizardValues) string {
 	return mode
 }
 
-func linuxMirrorURL(values jailWizardValues) string {
-	switch effectiveLinuxDistro(values) {
-	case "debian":
-		return "https://deb.debian.org/debian"
-	default:
-		return "https://archive.ubuntu.com/ubuntu"
+func effectiveLinuxMirrorMode(values jailWizardValues) string {
+	mode := strings.ToLower(strings.TrimSpace(values.LinuxMirrorMode))
+	if mode == "" {
+		return "default"
 	}
+	return mode
+}
+
+type linuxMirrorInfo struct {
+	BaseURL      string
+	Host         string
+	PreflightURL string
+}
+
+func resolveLinuxMirror(values jailWizardValues) (linuxMirrorInfo, error) {
+	mode := effectiveLinuxMirrorMode(values)
+	baseURL := ""
+	switch mode {
+	case "default":
+		switch effectiveLinuxDistro(values) {
+		case "debian":
+			baseURL = "https://deb.debian.org/debian"
+		default:
+			baseURL = "https://archive.ubuntu.com/ubuntu"
+		}
+	case "custom":
+		raw := strings.TrimSpace(values.LinuxMirrorURL)
+		if raw == "" {
+			return linuxMirrorInfo{}, fmt.Errorf("mirror URL is required when mirror mode is custom")
+		}
+		parsed, err := neturl.ParseRequestURI(raw)
+		if err != nil {
+			return linuxMirrorInfo{}, fmt.Errorf("mirror URL must be a valid http or https URL")
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return linuxMirrorInfo{}, fmt.Errorf("mirror URL must use http or https")
+		}
+		if strings.TrimSpace(parsed.Host) == "" {
+			return linuxMirrorInfo{}, fmt.Errorf("mirror URL must include a host")
+		}
+		baseURL = strings.TrimRight(parsed.String(), "/")
+	default:
+		return linuxMirrorInfo{}, fmt.Errorf("mirror mode must be default or custom")
+	}
+
+	parsed, err := neturl.Parse(baseURL)
+	if err != nil || strings.TrimSpace(parsed.Host) == "" {
+		return linuxMirrorInfo{}, fmt.Errorf("failed to resolve effective Linux mirror URL")
+	}
+	info := linuxMirrorInfo{
+		BaseURL:      strings.TrimRight(baseURL, "/"),
+		Host:         parsed.Hostname(),
+		PreflightURL: strings.TrimRight(baseURL, "/") + "/dists/" + effectiveLinuxRelease(values) + "/Release",
+	}
+	return info, nil
+}
+
+func linuxMirrorMetadataValue(values jailWizardValues) string {
+	if effectiveLinuxMirrorMode(values) != "custom" {
+		return "-"
+	}
+	info, err := resolveLinuxMirror(values)
+	if err != nil {
+		return strings.TrimSpace(values.LinuxMirrorURL)
+	}
+	return info.BaseURL
+}
+
+func effectiveLinuxMirrorSummary(values jailWizardValues) string {
+	info, err := resolveLinuxMirror(values)
+	if err != nil {
+		if effectiveLinuxMirrorMode(values) == "custom" {
+			return valueOrDash(strings.TrimSpace(values.LinuxMirrorURL))
+		}
+		return "-"
+	}
+	return info.BaseURL
+}
+
+func linuxMirrorURL(values jailWizardValues) string {
+	mirror, _ := resolveLinuxMirror(values)
+	return mirror.BaseURL
 }
 
 func linuxMirrorHost(values jailWizardValues) string {
-	mirror := linuxMirrorURL(values)
-	mirror = strings.TrimPrefix(mirror, "https://")
-	mirror = strings.TrimPrefix(mirror, "http://")
-	if idx := strings.IndexByte(mirror, '/'); idx >= 0 {
-		mirror = mirror[:idx]
-	}
-	return mirror
+	mirror, _ := resolveLinuxMirror(values)
+	return mirror.Host
 }
 
 func linuxPreflightURL(values jailWizardValues) string {
-	return strings.TrimRight(linuxMirrorURL(values), "/") + "/dists/" + effectiveLinuxRelease(values) + "/Release"
+	mirror, _ := resolveLinuxMirror(values)
+	return mirror.PreflightURL
 }
 
 func linuxCompatRoot(jailPath string, values jailWizardValues) string {
@@ -1569,7 +1675,7 @@ func wizardSectionForField(id string) string {
 		return "4. Resource Limits (optional)"
 	case "mount_points":
 		return "5. Mount points"
-	case "linux_distro", "linux_release", "linux_bootstrap":
+	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
 		return "6. Linux Bootstrap"
 	default:
 		return ""
