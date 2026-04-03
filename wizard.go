@@ -151,6 +151,8 @@ type jailCreationWizard struct {
 	thinDatasetOpts      []templateDatasetOption
 	thinDatasetCursor    int
 	datasetCreateRunning bool
+	validationField      string
+	validationError      string
 	message              string
 	executionLogs        []string
 	executionError       string
@@ -213,13 +215,15 @@ func (w *jailCreationWizard) prevField() {
 }
 
 func (w *jailCreationWizard) nextStep() error {
-	if err := w.validateCurrentStep(); err != nil {
-		w.message = err.Error()
+	fieldID, err := w.validateCurrentStepDetailed()
+	if err != nil {
+		w.applyValidationError(fieldID, err)
 		return err
 	}
 	if w.step < len(w.steps())-1 {
 		w.step++
 		w.field = 0
+		w.clearValidationError()
 		w.message = ""
 		w.executionLogs = nil
 		w.executionError = ""
@@ -233,6 +237,7 @@ func (w *jailCreationWizard) prevStep() {
 	if w.step > 0 {
 		w.step--
 		w.field = 0
+		w.clearValidationError()
 		w.message = ""
 		w.executionLogs = nil
 		w.executionError = ""
@@ -407,6 +412,7 @@ func (w *jailCreationWizard) appendToActive(input string) {
 		return
 	}
 	*ref += input
+	w.clearValidationIfFieldMatches(field.ID)
 	w.message = ""
 	w.refreshLinuxPrereqs()
 	w.refreshNetworkPrereqs()
@@ -426,6 +432,7 @@ func (w *jailCreationWizard) backspaceActive() {
 		return
 	}
 	*ref = string(runes[:len(runes)-1])
+	w.clearValidationIfFieldMatches(field.ID)
 	w.message = ""
 	w.refreshLinuxPrereqs()
 	w.refreshNetworkPrereqs()
@@ -637,152 +644,157 @@ func (w jailCreationWizard) valueByID(id string) string {
 }
 
 func (w jailCreationWizard) validateCurrentStep() error {
+	_, err := w.validateCurrentStepDetailed()
+	return err
+}
+
+func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 	if w.isConfirmationStep() {
-		return nil
+		return "", nil
 	}
 	jailType := strings.ToLower(strings.TrimSpace(w.values.JailType))
 	if jailType == "" {
-		return fmt.Errorf("jail type is required (thick, thin, vnet, linux)")
+		return "jail_type", fmt.Errorf("jail type is required (thick, thin, vnet, linux)")
 	}
 	switch jailType {
 	case "thick", "thin", "vnet", "linux":
 	default:
-		return fmt.Errorf("jail type must be one of: thick, thin, vnet, linux")
+		return "jail_type", fmt.Errorf("jail type must be one of: thick, thin, vnet, linux")
 	}
 	w.values.JailType = jailType
 
 	if w.step == 0 {
-		return nil
+		return "", nil
 	}
 	if strings.TrimSpace(w.values.Name) == "" {
-		return fmt.Errorf("jail name is required")
+		return "name", fmt.Errorf("jail name is required")
 	}
 	if !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
-		return fmt.Errorf("invalid jail name")
+		return "name", fmt.Errorf("invalid jail name")
 	}
 	if strings.TrimSpace(w.values.Dataset) == "" {
-		return fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+		return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 	}
 	if _, err := validateJailDestinationPath(w.values.Dataset, w.values.Name); err != nil {
 		if strings.Contains(err.Error(), "is required") {
-			return fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+			return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 		}
-		return err
+		return "dataset", err
 	}
 	if strings.TrimSpace(w.values.TemplateRelease) == "" {
-		return fmt.Errorf("template/release is required (local path, release tag, or https URL)")
+		return "template_release", fmt.Errorf("template/release is required (local path, release tag, or https URL)")
 	}
 	if err := validateTemplateReleaseInput(w.values); err != nil {
-		return err
+		return "template_release", err
 	}
 	if hasConflictingJailConfig(w.values.Name) {
-		return fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
+		return "name", fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
 	}
 	if jailType == "vnet" {
 		bridge, err := validateNetworkInterfaceName(w.values.Bridge, "bridge")
 		if err != nil {
-			return err
+			return "bridge", err
 		}
 		w.values.Bridge = bridge
 		if strings.TrimSpace(w.values.Bridge) == "" {
-			return fmt.Errorf("bridge is required for vnet jails")
+			return "bridge", fmt.Errorf("bridge is required for vnet jails")
 		}
 		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Bridge)), "bridge") {
-			return fmt.Errorf("vnet jails require a bridge such as bridge0")
+			return "bridge", fmt.Errorf("vnet jails require a bridge such as bridge0")
 		}
 		policy := effectiveBridgePolicy(w.values)
 		switch policy {
 		case "auto-create", "require-existing":
 			w.values.BridgePolicy = policy
 		default:
-			return fmt.Errorf("bridge policy must be auto-create or require-existing")
+			return "bridge_policy", fmt.Errorf("bridge policy must be auto-create or require-existing")
 		}
 		if strings.TrimSpace(w.values.Uplink) != "" {
 			uplink, err := validateOptionalNetworkInterfaceName(w.values.Uplink, "uplink")
 			if err != nil {
-				return err
+				return "uplink", err
 			}
 			w.values.Uplink = uplink
 		}
 	} else {
 		iface, err := validateNetworkInterfaceName(w.values.Interface, "interface")
 		if err != nil {
-			return err
+			return "interface", err
 		}
 		w.values.Interface = iface
 		if strings.TrimSpace(w.values.Interface) == "" {
-			return fmt.Errorf("interface is required")
+			return "interface", fmt.Errorf("interface is required")
 		}
 	}
 	if strings.TrimSpace(w.values.IP4) == "" {
-		return fmt.Errorf("IPv4 is required")
+		return "ip4", fmt.Errorf("IPv4 is required")
 	}
 	if err := validateJailIPValue(strings.TrimSpace(w.values.IP4), true, "IPv4", jailType != "vnet"); err != nil {
-		return err
+		return "ip4", err
 	}
 	if err := validateJailIPValue(strings.TrimSpace(w.values.IP6), false, "IPv6", jailType != "vnet"); err != nil {
-		return err
+		return "ip6", err
 	}
 	if jailType == "vnet" {
 		if strings.EqualFold(strings.TrimSpace(w.values.IP4), "inherit") {
-			return fmt.Errorf("vnet jails cannot use IPv4 inherit; switch jail type or enter an explicit IPv4 address")
+			return "ip4", fmt.Errorf("vnet jails cannot use IPv4 inherit; switch jail type or enter an explicit IPv4 address")
 		}
 		if strings.EqualFold(strings.TrimSpace(w.values.IP6), "inherit") {
-			return fmt.Errorf("vnet jails cannot use IPv6 inherit; switch jail type or enter an explicit IPv6 address")
+			return "ip6", fmt.Errorf("vnet jails cannot use IPv6 inherit; switch jail type or enter an explicit IPv6 address")
 		}
 	}
 	if value := strings.TrimSpace(w.values.DefaultRouter); value != "" {
 		if _, err := netip.ParseAddr(value); err != nil {
-			return fmt.Errorf("default router must be a valid IPv4 or IPv6 address")
+			return "default_router", fmt.Errorf("default router must be a valid IPv4 or IPv6 address")
 		}
 	}
 	if _, err := parseStartupOrderValue(w.values.StartupOrder); err != nil {
-		return err
+		return "startup_order", err
 	}
 	dependencies, err := parseJailDependencyNames(w.values.Dependencies, w.values.Name)
 	if err != nil {
-		return err
+		return "dependencies", err
 	}
 	w.values.Dependencies = strings.Join(dependencies, " ")
 	if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
 		cpu, err := strconv.Atoi(value)
 		if err != nil || cpu <= 0 || cpu > 100 {
-			return fmt.Errorf("CPU %% must be between 1 and 100")
+			return "cpu_percent", fmt.Errorf("CPU %% must be between 1 and 100")
 		}
 	}
 	if value := strings.TrimSpace(w.values.MemoryLimit); value != "" {
 		if !memoryLimitPattern.MatchString(strings.ToUpper(value)) {
-			return fmt.Errorf("memory must look like 512M or 2G")
+			return "memory_limit", fmt.Errorf("memory must look like 512M or 2G")
 		}
 	}
 	if value := strings.TrimSpace(w.values.ProcessLimit); value != "" {
 		procs, err := strconv.Atoi(value)
 		if err != nil || procs <= 0 {
-			return fmt.Errorf("max processes must be a positive integer")
+			return "process_limit", fmt.Errorf("max processes must be a positive integer")
 		}
 	}
 	if err := validateMountPointInput(w.values.MountPoints); err != nil {
-		return err
+		return "mount_points", err
 	}
 	w.refreshNetworkPrereqs()
 	if err := w.networkPrereqs.blockingError(); err != nil {
-		return err
+		return blockingPrereqFieldID(w.values), err
 	}
 	if jailType == "linux" {
 		distro := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
 		switch distro {
 		case "", "ubuntu", "debian":
 		default:
-			return fmt.Errorf("linux distro must be ubuntu or debian")
+			return "linux_distro", fmt.Errorf("linux distro must be ubuntu or debian")
 		}
 		mode := effectiveLinuxBootstrapMode(w.values)
 		switch mode {
 		case "auto", "skip":
 		default:
-			return fmt.Errorf("bootstrap mode must be auto or skip")
+			return "linux_bootstrap", fmt.Errorf("bootstrap mode must be auto or skip")
 		}
 	}
-	return nil
+	return "", nil
 }
 
 func validateTemplateReleaseInput(values jailWizardValues) error {
@@ -930,16 +942,69 @@ func validateMountPointInput(raw string) error {
 }
 
 func (w jailCreationWizard) validateAll() error {
+	_, _, err := w.validateAllDetailed()
+	return err
+}
+
+func (w jailCreationWizard) validateAllDetailed() (int, string, error) {
 	steps := w.steps()
 	for idx := 0; idx < len(steps)-1; idx++ {
 		test := w
 		test.step = idx
 		test.normalizeField()
-		if err := test.validateCurrentStep(); err != nil {
-			return err
+		if fieldID, err := test.validateCurrentStepDetailed(); err != nil {
+			return idx, fieldID, err
 		}
 	}
-	return nil
+	return -1, "", nil
+}
+
+func (w *jailCreationWizard) clearValidationError() {
+	w.validationField = ""
+	w.validationError = ""
+}
+
+func (w *jailCreationWizard) clearValidationIfFieldMatches(fieldID string) {
+	if strings.TrimSpace(fieldID) == "" {
+		return
+	}
+	if w.validationField == fieldID {
+		w.clearValidationError()
+	}
+}
+
+func (w *jailCreationWizard) applyValidationError(fieldID string, err error) {
+	w.message = ""
+	if err == nil {
+		w.clearValidationError()
+		return
+	}
+	fieldID = strings.TrimSpace(fieldID)
+	if fieldID != "" {
+		w.focusField(fieldID)
+	}
+	w.validationField = fieldID
+	w.validationError = err.Error()
+}
+
+func (w *jailCreationWizard) focusField(fieldID string) {
+	fields := w.visibleFields()
+	for idx, field := range fields {
+		if field.ID == fieldID {
+			w.field = idx
+			return
+		}
+	}
+}
+
+func blockingPrereqFieldID(values jailWizardValues) string {
+	if normalizedJailType(values.JailType) == "vnet" {
+		if strings.TrimSpace(values.Bridge) != "" {
+			return "bridge"
+		}
+		return "ip4"
+	}
+	return "interface"
 }
 
 func (w jailCreationWizard) summaryLines() []string {

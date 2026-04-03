@@ -1050,6 +1050,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.wizard.values.Interface) == "" {
 				m.wizard.values.Interface = "em0"
 			}
+			m.wizard.clearValidationError()
 			m.wizard.refreshLinuxPrereqs()
 			m.wizard.refreshNetworkPrereqs()
 			m.wizard.normalizeStep()
@@ -1142,11 +1143,16 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.wizardApplying {
 				return m, nil
 			}
-			if err := m.wizard.validateAll(); err != nil {
-				m.wizard.message = err.Error()
+			if stepIdx, fieldID, err := m.wizard.validateAllDetailed(); err != nil {
+				if stepIdx >= 0 {
+					m.wizard.step = stepIdx
+				}
+				m.wizard.normalizeField()
+				m.wizard.applyValidationError(fieldID, err)
 				return m, nil
 			}
 			m.wizard.clearExecutionResult()
+			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
 			return m, createJailCmd(m.wizard.values)
@@ -2329,6 +2335,12 @@ func (m model) wizardLines(width int) []string {
 			}
 		}
 		if field.ID == "name" || field.ID == "dependencies" || field.ID == "interface" || field.ID == "bridge_policy" || field.ID == "uplink" || field.ID == "ip6" {
+			lines = append(lines, "")
+		}
+		if idx == m.wizard.field && field.ID == m.wizard.validationField && strings.TrimSpace(m.wizard.validationError) != "" {
+			for _, line := range wrapText("  error: "+m.wizard.validationError, max(8, width-2)) {
+				lines = append(lines, wizardErrorStyle.Render(truncate(line, width)))
+			}
 			lines = append(lines, "")
 		}
 	}
