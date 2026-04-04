@@ -1910,7 +1910,7 @@ func (m model) renderWizardView() string {
 		body = lipgloss.NewStyle().
 			Width(m.width).
 			Height(bodyHeight).
-			Padding(0, 1).
+			Padding(1, 1).
 			Render(strings.Join(lines[offset:end], "\n"))
 	}
 
@@ -2571,14 +2571,8 @@ func (m model) wizardFieldContextLines(width int) []string {
 		lines = append(lines, "Select a field to see accepted values and examples.")
 		return lines
 	}
-
-	displayValue := strings.TrimSpace(m.wizard.valueByID(field.ID))
-	if displayValue == "" {
-		displayValue = "(" + field.Placeholder + ")"
-	}
 	lines = append(lines, renderKeyValueLines(width,
 		[2]string{"Field", m.wizardFieldDisplayLabel(field)},
-		[2]string{"Current", displayValue},
 	)...)
 
 	guide := m.wizardFieldGuide(field)
@@ -2627,13 +2621,13 @@ func (m model) wizardFieldContextLines(width int) []string {
 	if wizardFieldUsesNetworkContext(field.ID) && shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
 		appendSection(&lines, width, "Host checks")
 		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
-			appendStyledWizardLine(&lines, line, width)
+			appendWrappedStyledWizardLine(&lines, line, width)
 		}
 	}
 	if wizardFieldUsesLinuxContext(field.ID) {
 		appendSection(&lines, width, "Linux prerequisites")
-		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
-			appendStyledWizardLine(&lines, line, width)
+		for _, line := range linuxWizardContextLines(m.wizard.linuxPrereqs) {
+			appendWrappedStyledWizardLine(&lines, line, width)
 		}
 	}
 
@@ -2972,6 +2966,16 @@ func appendStyledWizardLine(lines *[]string, text string, width int) {
 	*lines = append(*lines, truncate(text, width))
 }
 
+func appendWrappedStyledWizardLine(lines *[]string, text string, width int) {
+	for _, line := range wrapText(text, max(8, width)) {
+		if looksLikeWarningText(text) {
+			*lines = append(*lines, wizardErrorStyle.Render(line))
+			continue
+		}
+		*lines = append(*lines, line)
+	}
+}
+
 func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 	lines := []string{
 		"Host Linux ABI will be enabled with: sysrc linux_enable=YES",
@@ -2984,6 +2988,30 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
 		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
+	}
+	if prereqs.ResolveError != "" {
+		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
+	}
+	if prereqs.Host.EnableReadError != "" {
+		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
+	}
+	for _, reason := range prereqs.Host.EnableDrift {
+		lines = append(lines, "Warning: linux_enable drift: "+reason)
+	}
+	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
+		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
+	}
+	return lines
+}
+
+func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
+	lines := []string{
+		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
+		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
+		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
+		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
+		"Auto bootstrap requires route, DNS, and fetch access inside the running jail.",
+		"Skip mode creates the jail first; use b in jail detail to retry bootstrap later.",
 	}
 	if prereqs.ResolveError != "" {
 		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
