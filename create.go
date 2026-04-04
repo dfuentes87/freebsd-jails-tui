@@ -155,9 +155,11 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	}
 	addCleanup(rootCleanup)
 	if normalizedJailType(values.JailType) == "linux" {
-		if err := ensureLinuxHostReady(&logs); err != nil {
+		linuxCleanup, err := ensureLinuxHostReady(&logs)
+		if err != nil {
 			return fail(err)
 		}
+		addCleanup(linuxCleanup)
 	}
 
 	mountSpecs := parseMountPointSpecs(values.MountPoints)
@@ -474,14 +476,65 @@ func seedGuestBaseFiles(jailPath string, logs *[]string) error {
 	return nil
 }
 
-func ensureLinuxHostReady(logs *[]string) error {
-	if _, err := runLoggedCommand(logs, "sysrc", "linux_enable=YES"); err != nil {
-		return fmt.Errorf("failed to enable linux ABI on host: %w", err)
+func ensureLinuxHostReady(logs *[]string) (func(), error) {
+	if _, err := os.Stat("/etc/rc.d/linux"); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("linux ABI host service script /etc/rc.d/linux is not present")
+		}
+		return nil, fmt.Errorf("failed to inspect linux host service script: %w", err)
 	}
-	if _, err := runLoggedCommand(logs, "service", "linux", "start"); err != nil {
-		return fmt.Errorf("failed to start linux ABI service on host: %w", err)
+
+	previousEnable, err := readRCConfValue("linux_enable")
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect host linux_enable setting: %w", err)
 	}
-	return nil
+	previousEnable = strings.TrimSpace(previousEnable)
+	previouslyEnabled := isEnabledRCValue(previousEnable)
+	previouslyRunning := exec.Command("service", "linux", "onestatus").Run() == nil
+
+	changedEnable := false
+	if !previouslyEnabled {
+		if _, err := runLoggedCommand(logs, "sysrc", "linux_enable=YES"); err != nil {
+			return nil, fmt.Errorf("failed to enable linux ABI on host: %w", err)
+		}
+		changedEnable = true
+	}
+	startedService := false
+	if !previouslyRunning {
+		if _, err := runLoggedCommand(logs, "service", "linux", "start"); err != nil {
+			if changedEnable {
+				if previousEnable == "" {
+					_, _ = runLoggedCommand(logs, "sysrc", "-x", "linux_enable")
+				} else {
+					_, _ = runLoggedCommand(logs, "sysrc", "linux_enable="+previousEnable)
+				}
+			}
+			return nil, fmt.Errorf("failed to start linux ABI service on host: %w", err)
+		}
+		startedService = true
+	}
+
+	if !changedEnable && !startedService {
+		return nil, nil
+	}
+	return func() {
+		if startedService {
+			if _, err := runLoggedCommand(logs, "service", "linux", "stop"); err != nil {
+				*logs = append(*logs, "  rollback warning: failed to stop linux ABI service: "+err.Error())
+			}
+		}
+		if changedEnable {
+			if previousEnable == "" {
+				if _, err := runLoggedCommand(logs, "sysrc", "-x", "linux_enable"); err != nil {
+					*logs = append(*logs, "  rollback warning: failed to clear linux_enable: "+err.Error())
+				}
+			} else {
+				if _, err := runLoggedCommand(logs, "sysrc", "linux_enable="+previousEnable); err != nil {
+					*logs = append(*logs, "  rollback warning: failed to restore linux_enable: "+err.Error())
+				}
+			}
+		}
+	}, nil
 }
 
 func ensureLinuxCompatPaths(jailPath string, values jailWizardValues, logs *[]string) error {
@@ -693,6 +746,9 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 	if err != nil {
 		return fail(err)
 	}
+	if validatedChildMountpoint, err = validateUnusedMountpointPath(validatedChildMountpoint, "template mountpoint"); err != nil {
+		return fail(err)
+	}
 	result.Parent = parent.Name
 	result.Dataset = validatedChildDataset
 	result.Mountpoint = validatedChildMountpoint
@@ -768,6 +824,10 @@ func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		return preview
 	}
 	if preview.Mountpoint, err = validateAbsolutePath(preview.Mountpoint, "template mountpoint"); err != nil {
+		preview.Err = err
+		return preview
+	}
+	if preview.Mountpoint, err = validateUnusedMountpointPath(preview.Mountpoint, "template mountpoint"); err != nil {
 		preview.Err = err
 		return preview
 	}

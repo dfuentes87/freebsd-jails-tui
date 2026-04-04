@@ -200,6 +200,18 @@ func rewriteWizardTemplateReleaseReferences(oldMountpoint, newMountpoint string)
 	return updated, nil
 }
 
+func backupWizardTemplateStore(logs *[]string) (*fileMutationBackup, error) {
+	path, err := wizardTemplateFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return backupFileForMutation(path, "wizard-templates", logs)
+}
+
+func restoreWizardTemplateStoreBackup(backup *fileMutationBackup, logs *[]string) error {
+	return restoreFileMutationBackup(backup, logs)
+}
+
 func appConfigDir() (string, error) {
 	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
 		return filepath.Join(xdg, "freebsd-jails-tui"), nil

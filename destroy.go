@@ -57,6 +57,17 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 			return fail(err)
 		}
 	}
+	if err := preflightDestroyPlan(plan); err != nil {
+		return fail(err)
+	}
+
+	configBackup, err := backupFileForMutation(plan.ConfigPath, "destroy-"+result.Name, &logs)
+	if err != nil {
+		return fail(err)
+	}
+	if _, err := backupFileForMutation(plan.FstabPath, "destroy-"+result.Name, &logs); err != nil {
+		return fail(err)
+	}
 
 	if plan.Running {
 		if _, err := runLoggedCommand(&logs, "service", "jail", "stop", result.Name); err != nil {
@@ -77,10 +88,19 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 		}
 	}
 
+	configRemoved := false
 	if err := removeFileIfExists(plan.ConfigPath, &logs); err != nil {
 		return fail(err)
 	}
+	if configBackup != nil {
+		configRemoved = true
+	}
 	if err := removeFileIfExists(plan.FstabPath, &logs); err != nil {
+		if configRemoved {
+			if restoreErr := restoreFileMutationBackup(configBackup, &logs); restoreErr != nil {
+				logs = append(logs, "rollback warning: "+restoreErr.Error())
+			}
+		}
 		return fail(err)
 	}
 
@@ -223,6 +243,38 @@ func validateFallbackDestroyPlan(plan jailDestroyPlan) error {
 		return fmt.Errorf("refusing fallback path destroy for %q: path is inside shared %q tree", jailPath, segments[0])
 	}
 
+	return nil
+}
+
+func preflightDestroyPlan(plan jailDestroyPlan) error {
+	actionable := false
+	if dataset := strings.TrimSpace(plan.ZFSDataset); dataset != "" {
+		if !zfsDatasetExists(dataset) {
+			return fmt.Errorf("matched ZFS dataset %q no longer exists; refresh before destroying", dataset)
+		}
+		actionable = true
+	} else if path := strings.TrimSpace(plan.JailPath); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			actionable = true
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to inspect jail path %q: %w", path, err)
+		}
+	}
+	for _, candidate := range []string{plan.ConfigPath, plan.FstabPath} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			actionable = true
+			continue
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to inspect %q before destroy: %w", candidate, err)
+		}
+	}
+	if !actionable {
+		return fmt.Errorf("nothing exists to destroy for jail %q", strings.TrimSpace(plan.Name))
+	}
 	return nil
 }
 

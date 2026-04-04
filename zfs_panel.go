@@ -121,9 +121,9 @@ func rollbackZFSSnapshotCmd(snapshot string) tea.Cmd {
 	}
 }
 
-func setZFSDatasetPropertyCmd(dataset, property, value string) tea.Cmd {
+func setZFSDatasetPropertyCmd(detail JailDetail, dataset, property, value string) tea.Cmd {
 	return func() tea.Msg {
-		properties, logs, err := applyZFSDatasetPropertyEdit(dataset, property, value)
+		properties, logs, err := applyZFSDatasetPropertyEdit(detail, dataset, property, value)
 		message := fmt.Sprintf("Updated %s on %s.", property, dataset)
 		if err != nil {
 			message = "Dataset property update failed."
@@ -181,6 +181,10 @@ func listZFSSnapshots(dataset string) ([]ZFSSnapshot, error) {
 }
 
 func readZFSEditableProperties(dataset string) (zfsEditablePropertyState, error) {
+	var err error
+	if dataset, err = validateZFSDatasetName(dataset, "dataset"); err != nil {
+		return zfsEditablePropertyState{}, err
+	}
 	cmd := exec.Command("zfs", "get", "-H", "-o", "property,value,source", "compression,quota,reservation", dataset)
 	out, err := cmd.Output()
 	if err != nil {
@@ -210,11 +214,22 @@ func readZFSEditableProperties(dataset string) (zfsEditablePropertyState, error)
 	return state, nil
 }
 
-func applyZFSDatasetPropertyEdit(dataset, property, value string) (zfsEditablePropertyState, []string, error) {
+func applyZFSDatasetPropertyEdit(detail JailDetail, dataset, property, value string) (zfsEditablePropertyState, []string, error) {
 	logs := make([]string, 0, 6)
+	var err error
+	if dataset, err = validateZFSDatasetName(dataset, "dataset"); err != nil {
+		return zfsEditablePropertyState{}, logs, err
+	}
 	property = strings.TrimSpace(strings.ToLower(property))
 	value = strings.TrimSpace(value)
 	if err := validateZFSDatasetPropertyEdit(property, value); err != nil {
+		return zfsEditablePropertyState{}, logs, err
+	}
+	if detail.ZFS == nil || detail.ZFS.MatchType != "exact" || strings.TrimSpace(detail.ZFS.Name) != dataset {
+		return zfsEditablePropertyState{}, logs, fmt.Errorf("dataset property editing requires an exact jail dataset match")
+	}
+	before, err := readZFSEditableProperties(dataset)
+	if err != nil {
 		return zfsEditablePropertyState{}, logs, err
 	}
 	if strings.EqualFold(value, "inherit") {
@@ -232,9 +247,41 @@ func applyZFSDatasetPropertyEdit(dataset, property, value string) (zfsEditablePr
 	}
 	state, err := readZFSEditableProperties(dataset)
 	if err != nil {
+		if rollbackErr := restoreZFSDatasetProperty(dataset, property, before, &logs); rollbackErr != nil {
+			return zfsEditablePropertyState{}, logs, fmt.Errorf("failed to refresh dataset properties after updating %s and rollback also failed: %v", property, rollbackErr)
+		}
+		logs = append(logs, "  reverted property change after refresh failure")
 		return zfsEditablePropertyState{}, logs, err
 	}
 	return state, logs, nil
+}
+
+func restoreZFSDatasetProperty(dataset, property string, state zfsEditablePropertyState, logs *[]string) error {
+	value, source, err := datasetPropertyValueAndSource(state, property)
+	if err != nil {
+		return err
+	}
+	if source == "" || strings.EqualFold(source, "default") || strings.EqualFold(source, "inherited") {
+		cmdLogs, cmdErr := runZFSCommand("zfs", "inherit", property, dataset)
+		*logs = append(*logs, cmdLogs...)
+		return cmdErr
+	}
+	cmdLogs, cmdErr := runZFSCommand("zfs", "set", property+"="+value, dataset)
+	*logs = append(*logs, cmdLogs...)
+	return cmdErr
+}
+
+func datasetPropertyValueAndSource(state zfsEditablePropertyState, property string) (string, string, error) {
+	switch strings.TrimSpace(strings.ToLower(property)) {
+	case "compression":
+		return strings.TrimSpace(state.Compression), strings.TrimSpace(state.CompressionSource), nil
+	case "quota":
+		return strings.TrimSpace(state.Quota), strings.TrimSpace(state.QuotaSource), nil
+	case "reservation":
+		return strings.TrimSpace(state.Reservation), strings.TrimSpace(state.ReservationSource), nil
+	default:
+		return "", "", fmt.Errorf("unsupported dataset property %q", property)
+	}
 }
 
 func validateZFSDatasetPropertyEdit(property, value string) error {
@@ -346,7 +393,7 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.zfsPanel.logs = nil
 			m.zfsPanel.err = nil
 			m.zfsPanel.message = "Updating dataset property..."
-			return m, setZFSDatasetPropertyCmd(m.zfsPanel.dataset, m.zfsPanel.propertyName, m.zfsPanel.propertyValue)
+			return m, setZFSDatasetPropertyCmd(m.zfsPanel.sourceDetail, m.zfsPanel.dataset, m.zfsPanel.propertyName, m.zfsPanel.propertyValue)
 		case "backspace", "delete":
 			if m.zfsPanel.propertyField == 1 {
 				runes := []rune(m.zfsPanel.propertyValue)

@@ -79,6 +79,31 @@ func validateAccessibleAbsolutePath(value, field string) (string, error) {
 	return clean, nil
 }
 
+func validateUnusedMountpointPath(value, field string) (string, error) {
+	clean, err := validateAbsolutePath(value, field)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(clean)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return clean, nil
+		}
+		return "", fmt.Errorf("failed to inspect %s %q: %w", field, clean, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s %q already exists and is not a directory", field, clean)
+	}
+	entries, err := os.ReadDir(clean)
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect %s %q: %w", field, clean, err)
+	}
+	if len(entries) > 0 {
+		return "", fmt.Errorf("%s %q already exists and is not empty", field, clean)
+	}
+	return clean, nil
+}
+
 func validateZFSDatasetName(value, field string) (string, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {

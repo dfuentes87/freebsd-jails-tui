@@ -181,6 +181,10 @@ func InspectTemplateDatasetRename(dataset, newName string, parentOverride *templ
 		preview.Err = err
 		return preview
 	}
+	if preview.NewMountpoint, err = validateUnusedMountpointPath(preview.NewMountpoint, "template mountpoint"); err != nil {
+		preview.Err = err
+		return preview
+	}
 	if _, err := exec.Command("zfs", "list", "-H", "-o", "name", preview.NewDataset).Output(); err == nil {
 		preview.Err = fmt.Errorf("template dataset %q already exists", preview.NewDataset)
 	}
@@ -205,6 +209,15 @@ func ExecuteTemplateDatasetRename(dataset, newName string, parentOverride *templ
 	result.Mountpoint = preview.NewMountpoint
 	result.UpdatedWizardTemplates = append(result.UpdatedWizardTemplates, preview.UpdatedWizardTemplates...)
 
+	var templateBackup *fileMutationBackup
+	var err error
+	if len(preview.UpdatedWizardTemplates) > 0 {
+		templateBackup, err = backupWizardTemplateStore(&logs)
+		if err != nil {
+			return fail(err)
+		}
+	}
+
 	if _, err := runLoggedCommand(&logs, "zfs", "rename", preview.Current.Name, preview.NewDataset); err != nil {
 		return fail(fmt.Errorf("failed to rename template dataset %q: %w", preview.Current.Name, err))
 	}
@@ -215,6 +228,9 @@ func ExecuteTemplateDatasetRename(dataset, newName string, parentOverride *templ
 	if _, err := rewriteWizardTemplateReleaseReferences(preview.Current.Mountpoint, preview.NewMountpoint); err != nil {
 		_, _ = runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.Current.Mountpoint, preview.NewDataset)
 		_, _ = runLoggedCommand(&logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
+		if restoreErr := restoreWizardTemplateStoreBackup(templateBackup, &logs); restoreErr != nil {
+			logs = append(logs, "rollback warning: "+restoreErr.Error())
+		}
 		return fail(fmt.Errorf("failed to update saved wizard templates after rename: %w", err))
 	}
 

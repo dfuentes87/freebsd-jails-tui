@@ -75,6 +75,10 @@ func InspectTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 		preview.Err = err
 		return preview
 	}
+	if preview.NewMountpoint, err = validateUnusedMountpointPath(preview.NewMountpoint, "template mountpoint"); err != nil {
+		preview.Err = err
+		return preview
+	}
 	if zfsDatasetExists(preview.NewDataset) {
 		preview.Err = fmt.Errorf("template dataset %q already exists", preview.NewDataset)
 	}
