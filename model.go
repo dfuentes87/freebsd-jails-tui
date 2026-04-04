@@ -210,6 +210,7 @@ type model struct {
 	detailScroll       int
 	detailShowAdvanced bool
 	detailNotice       string
+	wizardScroll       int
 	zfsPanel           zfsPanelState
 	wizard             jailCreationWizard
 	wizardApplying     bool
@@ -359,6 +360,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.boundDetailScroll()
+		m.boundWizardScroll()
 		m.boundHelpScroll()
 		return m, nil
 	case snapshotMsg:
@@ -772,6 +774,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c", "n":
 		m.mode = screenCreateWizard
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
+		m.wizardScroll = 0
 		m.notice = ""
 		return m, nil
 	case "i", "I":
@@ -949,6 +952,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.wizard.endThinDatasetSelect()
 			m.wizard.message = "Thin template dataset selection canceled."
+			m.ensureWizardFieldVisible()
 			return m, nil
 		case "j", "down", "tab":
 			m.wizard.thinDatasetCursor++
@@ -994,6 +998,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.values.TemplateRelease = option.Value
 			m.wizard.endThinDatasetSelect()
 			m.wizard.message = fmt.Sprintf("Selected thin template dataset: %s", option.Label)
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
 		m.wizard.boundThinDatasetCursor()
@@ -1004,6 +1009,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "left":
 			m.wizard.endUserlandSelect()
 			m.wizard.message = "Userland selection canceled."
+			m.ensureWizardFieldVisible()
 			return m, nil
 		case "j", "down", "tab":
 			m.wizard.userlandCursor++
@@ -1028,6 +1034,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.values.TemplateRelease = option.Value
 			m.wizard.endUserlandSelect()
 			m.wizard.message = fmt.Sprintf("Selected userland: %s", option.Label)
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
 		m.wizard.boundUserlandCursor()
@@ -1102,6 +1109,8 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.normalizeStep()
 			m.wizard.endTemplateMode()
 			m.wizard.message = fmt.Sprintf("Template %q loaded.", template.Name)
+			m.wizardScroll = 0
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
 		m.wizard.boundTemplateCursor()
@@ -1110,6 +1119,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if !m.wizardApplying && !m.wizard.isConfirmationStep() && msg.Type == tea.KeyRunes {
 		m.wizard.appendToActive(string(msg.Runes))
+		m.boundWizardScroll()
 		return m, nil
 	}
 
@@ -1126,32 +1136,67 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.wizard.prevStep()
+		m.wizardScroll = 0
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "right":
 		if m.wizardApplying {
 			return m, nil
 		}
 		if err := m.wizard.nextStep(); err != nil {
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
+		m.wizardScroll = 0
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "tab", "down":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.nextField()
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "shift+tab", "up":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.prevField()
+		m.ensureWizardFieldVisible()
+		return m, nil
+	case "pgdown":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll += m.wizardBodyHeight()
+		m.boundWizardScroll()
+		return m, nil
+	case "pgup":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll -= m.wizardBodyHeight()
+		m.boundWizardScroll()
+		return m, nil
+	case "home":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll = 0
+		return m, nil
+	case "end":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll = 1 << 30
+		m.boundWizardScroll()
 		return m, nil
 	case "s", "S", "ctrl+s":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.beginTemplateSave()
+		m.wizardScroll = 0
 		return m, nil
 	case "l", "L", "ctrl+l":
 		if m.wizardApplying {
@@ -1161,6 +1206,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.message = err.Error()
 			return m, nil
 		}
+		m.wizardScroll = 0
 		return m, nil
 	case "ctrl+u":
 		if m.wizardApplying {
@@ -1170,6 +1216,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.message = err.Error()
 			return m, nil
 		}
+		m.wizardScroll = 0
 		return m, nil
 	case "ctrl+t":
 		if m.wizardApplying {
@@ -1195,6 +1242,8 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.wizard.normalizeField()
 				m.wizard.applyValidationError(fieldID, err)
+				m.wizardScroll = 0
+				m.ensureWizardFieldVisible()
 				return m, nil
 			}
 			m.wizard.clearExecutionResult()
@@ -1207,12 +1256,15 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		_ = m.wizard.nextStep()
+		m.wizardScroll = 0
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "backspace", "delete":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.backspaceActive()
+		m.boundWizardScroll()
 		return m, nil
 	}
 
@@ -1655,8 +1707,9 @@ func (m model) helpLines(width int) []string {
 		truncate("esc: cancel prompt or return to detail", width),
 		"",
 		sectionStyle.Render("Creation Wizard"),
-		truncate("steps 1-5 are shown together on one page", width),
+		truncate("common jail settings are on one page; linux adds a bootstrap step before confirmation", width),
 		truncate("tab/shift+tab/up/down: move field", width),
+		truncate("pgup/pgdown: scroll long wizard pages", width),
 		truncate("enter/right: next step", width),
 		truncate("left: previous step", width),
 		truncate("s/l on the confirmation step: save/load templates", width),
@@ -1829,12 +1882,48 @@ func (m model) renderWizardView() string {
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
-	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
+	hint := m.wizardFooterHint()
+	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
+	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	body := ""
+	if leftWidth, rightWidth, ok := m.wizardSplitPaneWidths(); ok {
+		leftLines, _ := m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
+		offset, end := wizardViewportBounds(len(leftLines), m.wizardScroll, bodyHeight)
+		leftPanel := lipgloss.NewStyle().
+			Width(leftWidth).
+			Height(bodyHeight).
+			Padding(0, 1).
+			Render(strings.Join(leftLines[offset:end], "\n"))
+		rightPanel := lipgloss.NewStyle().
+			Width(rightWidth).
+			Height(bodyHeight).
+			Padding(0, 1).
+			Render(strings.Join(m.wizardFieldContextLines(max(12, rightWidth-2)), "\n"))
+		separator := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render(strings.Repeat("|\n", bodyHeight-1) + "|")
+		body = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, separator, rightPanel)
+	}
+	if body == "" {
+		lines := m.wizardLines(max(12, m.width-2))
+		offset, end := wizardViewportBounds(len(lines), m.wizardScroll, bodyHeight)
+		body = lipgloss.NewStyle().
+			Width(m.width).
+			Height(bodyHeight).
+			Padding(0, 1).
+			Render(strings.Join(lines[offset:end], "\n"))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m model) wizardFooterHint() string {
+	hint := "type to edit | tab/shift+tab/up/down: fields | pgup/pgdown: scroll | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	if normalizedJailType(m.wizard.values.JailType) == "thin" {
-		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
+		hint = "type to edit | tab/shift+tab/up/down: fields | pgup/pgdown: scroll | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	}
 	if m.wizard.isConfirmationStep() {
-		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
+		hint = "pgup/pgdown: scroll | enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.templateMode == wizardTemplateModeSave {
 		hint = "Template save: type name | enter: save | backspace: edit | esc: cancel | ctrl+c: quit"
@@ -1854,45 +1943,52 @@ func (m model) renderWizardView() string {
 	if m.wizardApplying {
 		hint = "Applying changes... please wait | ctrl+c: quit"
 	}
-	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
-	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
-	body := ""
-	if m.wizardUsesSplitPane() {
-		leftWidth := max(48, (m.width-1)*3/5)
-		if leftWidth > m.width-34 {
-			leftWidth = m.width - 34
-		}
-		if leftWidth < 40 {
-			leftWidth = 40
-		}
-		rightWidth := m.width - leftWidth - 1
-		if rightWidth >= 32 {
-			leftPanel := lipgloss.NewStyle().
-				Width(leftWidth).
-				Height(bodyHeight).
-				Padding(0, 1).
-				Render(strings.Join(m.wizardFieldEntryLines(max(12, leftWidth-2), false), "\n"))
-			rightPanel := lipgloss.NewStyle().
-				Width(rightWidth).
-				Height(bodyHeight).
-				Padding(0, 1).
-				Render(strings.Join(m.wizardFieldContextLines(max(12, rightWidth-2)), "\n"))
-			separator := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("240")).
-				Render(strings.Repeat("|\n", bodyHeight-1) + "|")
-			body = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, separator, rightPanel)
-		}
-	}
-	if body == "" {
-		lines := m.wizardLines(max(12, m.width-2))
-		body = lipgloss.NewStyle().
-			Width(m.width).
-			Height(bodyHeight).
-			Padding(0, 1).
-			Render(strings.Join(lines, "\n"))
-	}
+	return hint
+}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+func (m model) wizardBodyHeight() int {
+	step := m.wizard.currentStep()
+	title := titleStyle.Render("Jail Creation Wizard")
+	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
+	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	footer := m.renderFooterWithMessage(m.wizardFooterHint(), m.wizard.message, footerStyle)
+	return max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+}
+
+func (m model) wizardSplitPaneWidths() (int, int, bool) {
+	if !m.wizardUsesSplitPane() {
+		return 0, 0, false
+	}
+	leftWidth := max(48, (m.width-1)*3/5)
+	if leftWidth > m.width-34 {
+		leftWidth = m.width - 34
+	}
+	if leftWidth < 40 {
+		leftWidth = 40
+	}
+	rightWidth := m.width - leftWidth - 1
+	if rightWidth < 32 {
+		return 0, 0, false
+	}
+	return leftWidth, rightWidth, true
+}
+
+func wizardViewportBounds(totalLines, scroll, height int) (int, int) {
+	if height <= 0 {
+		height = 1
+	}
+	maxOffset := max(0, totalLines-height)
+	if scroll < 0 {
+		scroll = 0
+	}
+	if scroll > maxOffset {
+		scroll = maxOffset
+	}
+	end := min(totalLines, scroll+height)
+	if end < scroll {
+		end = scroll
+	}
+	return scroll, end
 }
 
 func (m model) renderTemplateDatasetCreateView() string {
@@ -2388,11 +2484,17 @@ func (m model) wizardUsesSplitPane() bool {
 }
 
 func (m model) wizardFieldEntryLines(width int, inlineHelp bool) []string {
+	lines, _ := m.wizardFieldEntryLayout(width, inlineHelp)
+	return lines
+}
+
+func (m model) wizardFieldEntryLayout(width int, inlineHelp bool) ([]string, int) {
 	lines := []string{}
+	activeLine := -1
 	currentSection := ""
 	fields := m.wizard.visibleFields()
 	if len(fields) == 0 {
-		return []string{"No editable fields on this step."}
+		return []string{"No editable fields on this step."}, -1
 	}
 	m.wizard.normalizeField()
 	for idx, field := range fields {
@@ -2421,6 +2523,9 @@ func (m model) wizardFieldEntryLines(width int, inlineHelp bool) []string {
 			line = selectedRowStyle.Width(max(1, width)).Render(line)
 		}
 		lines = append(lines, line)
+		if idx == m.wizard.field {
+			activeLine = len(lines) - 1
+		}
 		if inlineHelp && idx == m.wizard.field && field.Help != "" {
 			if field.ID == "template_release" {
 				lines = append(lines, "")
@@ -2456,7 +2561,7 @@ func (m model) wizardFieldEntryLines(width int, inlineHelp bool) []string {
 		}
 	}
 
-	return lines
+	return lines, activeLine
 }
 
 func (m model) wizardFieldContextLines(width int) []string {
@@ -2978,11 +3083,19 @@ func (m model) detailLines(width int) []string {
 
 	if m.detail.NetworkSummary != nil {
 		appendSection(&lines, width, "Network summary")
+		networkLabelWidth := 25
+		if width < 72 {
+			networkLabelWidth = 20
+		}
+		networkPairs := make([][2]string, 0, len(m.detail.NetworkSummary.Configured)+len(m.detail.NetworkSummary.Runtime))
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Configured) {
-			lines = append(lines, renderKeyValueLines(width, [2]string{"Configured " + key, m.detail.NetworkSummary.Configured[key]})...)
+			networkPairs = append(networkPairs, [2]string{"Configured " + key, m.detail.NetworkSummary.Configured[key]})
 		}
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Runtime) {
-			lines = append(lines, renderKeyValueLines(width, [2]string{"Runtime " + key, m.detail.NetworkSummary.Runtime[key]})...)
+			networkPairs = append(networkPairs, [2]string{"Runtime " + key, m.detail.NetworkSummary.Runtime[key]})
+		}
+		if len(networkPairs) > 0 {
+			lines = append(lines, renderKeyValueLinesWithLabelWidth(width, networkLabelWidth, networkPairs...)...)
 		}
 		if len(m.detail.NetworkSummary.Validation) > 0 {
 			for _, line := range m.detail.NetworkSummary.Validation {
@@ -2990,7 +3103,7 @@ func (m model) detailLines(width int) []string {
 					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 					continue
 				}
-				lines = append(lines, renderInformationalKeyValue(width, line)...)
+				lines = append(lines, renderInformationalKeyValueWithLabelWidth(width, networkLabelWidth, line)...)
 			}
 		}
 	}
@@ -3181,6 +3294,78 @@ func (m *model) boundDetailScroll() {
 	if m.detailScroll > maxOffset {
 		m.detailScroll = maxOffset
 	}
+}
+
+func (m model) wizardIsFieldEntryMode() bool {
+	return m.mode == screenCreateWizard &&
+		!m.wizardApplying &&
+		!m.wizard.datasetCreateRunning &&
+		!m.wizard.isConfirmationStep() &&
+		m.wizard.templateMode == wizardTemplateModeNone &&
+		!m.wizard.userlandMode &&
+		!m.wizard.thinDatasetMode
+}
+
+func (m *model) boundWizardScroll() {
+	if m.mode != screenCreateWizard {
+		m.wizardScroll = 0
+		return
+	}
+	if m.width <= 0 || m.height <= 0 {
+		m.wizardScroll = 0
+		return
+	}
+
+	var lines []string
+	if leftWidth, _, ok := m.wizardSplitPaneWidths(); ok {
+		lines, _ = m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
+	} else {
+		lines = m.wizardLines(max(12, m.width-2))
+	}
+
+	maxOffset := max(0, len(lines)-m.wizardBodyHeight())
+	if m.wizardScroll < 0 {
+		m.wizardScroll = 0
+	}
+	if m.wizardScroll > maxOffset {
+		m.wizardScroll = maxOffset
+	}
+}
+
+func (m *model) ensureWizardFieldVisible() {
+	if !m.wizardIsFieldEntryMode() || m.width <= 0 || m.height <= 0 {
+		return
+	}
+
+	bodyHeight := m.wizardBodyHeight()
+	if bodyHeight <= 0 {
+		return
+	}
+
+	activeLine := -1
+	if leftWidth, _, ok := m.wizardSplitPaneWidths(); ok {
+		_, activeLine = m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
+	} else {
+		_, activeLine = m.wizardFieldEntryLayout(max(12, m.width-2), true)
+		prefixLines := 2
+		if m.wizard.currentStep().Description != "" {
+			prefixLines = 3
+		}
+		if activeLine >= 0 {
+			activeLine += prefixLines
+		}
+	}
+	if activeLine < 0 {
+		m.boundWizardScroll()
+		return
+	}
+
+	if activeLine < m.wizardScroll {
+		m.wizardScroll = activeLine
+	} else if activeLine >= m.wizardScroll+bodyHeight {
+		m.wizardScroll = activeLine - bodyHeight + 1
+	}
+	m.boundWizardScroll()
 }
 
 func (m model) detailBodyHeight() int {
@@ -3649,11 +3834,15 @@ func appendRenderedSection(lines *[]string, title string, body []string) {
 }
 
 func renderKeyValueLines(width int, pairs ...[2]string) []string {
-	lines := make([]string, 0, len(pairs)*2)
 	labelWidth := 18
 	if width < 48 {
 		labelWidth = 14
 	}
+	return renderKeyValueLinesWithLabelWidth(width, labelWidth, pairs...)
+}
+
+func renderKeyValueLinesWithLabelWidth(width, labelWidth int, pairs ...[2]string) []string {
+	lines := make([]string, 0, len(pairs)*2)
 	for _, pair := range pairs {
 		lines = append(lines, renderKeyValue(width, labelWidth, pair[0], pair[1])...)
 	}
@@ -3684,6 +3873,14 @@ func renderKeyValue(width, labelWidth int, label, value string) []string {
 }
 
 func renderInformationalKeyValue(width int, line string) []string {
+	labelWidth := 18
+	if width < 48 {
+		labelWidth = 14
+	}
+	return renderInformationalKeyValueWithLabelWidth(width, labelWidth, line)
+}
+
+func renderInformationalKeyValueWithLabelWidth(width, labelWidth int, line string) []string {
 	left, right, ok := strings.Cut(strings.TrimSpace(line), ":")
 	if !ok {
 		return []string{truncate(line, width)}
@@ -3693,7 +3890,7 @@ func renderInformationalKeyValue(width int, line string) []string {
 	if label == "" || value == "" {
 		return []string{truncate(line, width)}
 	}
-	return renderKeyValueLines(width, [2]string{label, value})
+	return renderKeyValueLinesWithLabelWidth(width, labelWidth, [2]string{label, value})
 }
 
 func valueOrDash(value string) string {
