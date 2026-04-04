@@ -819,11 +819,9 @@ func (m model) initialCheckLines(width int) []string {
 	lines := make([]string, 0, 64)
 
 	if m.initCheck.loading {
-		lines = append(lines, renderModeBanner("run host checks"))
 		lines = append(lines, truncate("Running initial checks...", width))
 		return lines
 	}
-	lines = append(lines, renderModeBanner("initial host setup"))
 	appendRenderedSection(&lines, "rc.conf checks", renderKeyValueLines(width,
 		[2]string{"jail_enable", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable))},
 	))

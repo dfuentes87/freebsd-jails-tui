@@ -68,18 +68,18 @@ var wizardBaseSteps = []wizardStep{
 		Description: "Fill in name, destination, release/template, networking, limits, and mounts on this page.",
 		Fields: []wizardField{
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
-			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Use full destination path where jail root will be created"},
-			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL (downloads supported)"},
-			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Jail interface name for thick, thin, and linux jails"},
+			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Full jail root path"},
+			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL"},
+			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Used by thick, thin, and linux"},
 			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
 			{ID: "bridge_policy", Label: "Bridge policy", Placeholder: "auto-create", Help: "Options: auto-create or require-existing"},
-			{ID: "uplink", Label: "Uplink", Placeholder: "em0", Help: "Optional host uplink to attach to the bridge before jail start"},
+			{ID: "uplink", Label: "Uplink", Placeholder: "em0", Help: "Optional host uplink"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
-			{ID: "startup_order", Label: "Startup order", Placeholder: "append", Help: "Optional rc.conf jail_list position; blank appends"},
-			{ID: "dependencies", Label: "Dependencies", Placeholder: "db01 cache01", Help: "Optional jail names; writes depend in jail.conf"},
+			{ID: "startup_order", Label: "Startup order", Placeholder: "append", Help: "Optional jail_list position"},
+			{ID: "dependencies", Label: "Dependencies", Placeholder: "db01 cache01", Help: "Optional jail names"},
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
 			{ID: "memory_limit", Label: "Memory", Placeholder: "2G"},
 			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: ""},
@@ -1665,18 +1665,20 @@ func wizardSectionForField(id string) string {
 	switch id {
 	case "jail_type":
 		return "0. Jail Type"
-	case "name", "dataset", "startup_order", "dependencies":
-		return "1. Name & Destination"
-	case "template_release":
-		return "2. Template or release"
-	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router", "hostname":
+	case "name", "hostname":
+		return "1. Identity"
+	case "dataset", "template_release":
+		return "2. Root filesystem"
+	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router":
 		return "3. Networking"
+	case "startup_order", "dependencies":
+		return "4. Startup"
 	case "cpu_percent", "memory_limit", "process_limit":
-		return "4. Resource Limits (optional)"
+		return "5. Resource limits"
 	case "mount_points":
-		return "5. Mount points"
+		return "6. Mount points"
 	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
-		return "6. Linux Bootstrap"
+		return "7. Linux bootstrap"
 	default:
 		return ""
 	}

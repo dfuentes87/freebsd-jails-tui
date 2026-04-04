@@ -24,11 +24,6 @@ var (
 	panelTitleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("45"))
-	modeBannerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("238")).
-			Padding(0, 1)
 	selectedRowStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("230")).
 				Background(lipgloss.Color("24"))
@@ -1691,8 +1686,7 @@ func (m model) renderDestroyView() string {
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
 	bodyWidth := max(12, m.width-2)
-	lines := []string{renderModeBanner("confirm destroy")}
-	appendSection(&lines, bodyWidth, "Confirmation")
+	lines := []string{sectionStyle.Render("Confirmation")}
 	for _, line := range m.destroy.preview {
 		lines = append(lines, truncate(line, bodyWidth))
 	}
@@ -1863,28 +1857,6 @@ func (m model) renderWizardView() string {
 	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
 	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
 	lines := m.wizardLines(max(12, m.width-2))
-	modeLine := ""
-	switch {
-	case m.wizardApplying:
-		modeLine = renderModeBanner("apply")
-	case m.wizard.datasetCreateRunning:
-		modeLine = renderModeBanner("create template dataset")
-	case m.wizard.templateMode == wizardTemplateModeSave:
-		modeLine = renderModeBanner("save wizard template")
-	case m.wizard.templateMode == wizardTemplateModeLoad:
-		modeLine = renderModeBanner("load wizard template")
-	case m.wizard.userlandMode:
-		modeLine = renderModeBanner("select userland source")
-	case m.wizard.thinDatasetMode:
-		modeLine = renderModeBanner("select thin template dataset")
-	case m.wizard.isConfirmationStep():
-		modeLine = renderModeBanner("confirm jail creation")
-	default:
-		modeLine = renderModeBanner("edit fields")
-	}
-	if modeLine != "" {
-		lines = append([]string{modeLine, ""}, lines...)
-	}
 	body := lipgloss.NewStyle().
 		Width(m.width).
 		Height(bodyHeight).
@@ -2016,7 +1988,7 @@ func (m model) templateManagerListLines(width, height int) []string {
 }
 
 func (m model) templateManagerDetailLines(width int) []string {
-	lines := []string{renderModeBanner(m.templateManagerModeLabel())}
+	lines := []string{}
 	switch m.templateCreate.mode {
 	case templateManagerModeCreate:
 		appendSection(&lines, width, "Create template dataset",
@@ -2395,23 +2367,19 @@ func (m model) wizardLines(width int) []string {
 			line = selectedRowStyle.Width(max(1, width)).Render(line)
 		}
 		lines = append(lines, line)
-		if field.Help != "" {
+		if idx == m.wizard.field && field.Help != "" {
 			lines = append(lines, truncate("  "+field.Help, width))
 		}
-		if field.ID == "template_release" {
-			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
+		if idx == m.wizard.field && field.ID == "template_release" {
+			lines = append(lines, truncate("  ctrl+u: select local userland or release download", width))
 			if normalizedJailType(m.wizard.values.JailType) == "thin" {
-				lines = append(lines, truncate("  ctrl+t: open the template manager and apply an extracted ZFS template dataset mountpoint", width))
+				lines = append(lines, truncate("  ctrl+t: choose an extracted ZFS template dataset", width))
 			}
-		}
-		if field.ID == "name" || field.ID == "dependencies" || field.ID == "interface" || field.ID == "bridge_policy" || field.ID == "uplink" || field.ID == "ip6" {
-			lines = append(lines, "")
 		}
 		if idx == m.wizard.field && field.ID == m.wizard.validationField && strings.TrimSpace(m.wizard.validationError) != "" {
 			for _, line := range wrapText("  error: "+m.wizard.validationError, max(8, width-2)) {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, width)))
 			}
-			lines = append(lines, "")
 		}
 	}
 
@@ -2509,7 +2477,6 @@ func (m model) detailLines(width int) []string {
 		memText = fmt.Sprintf("%dMB", jail.MemoryMB)
 	}
 
-	lines = append(lines, renderModeBanner("inspect jail"))
 	appendRenderedSection(&lines, "Overview", renderKeyValueLines(width,
 		[2]string{"Name", m.detail.Name},
 		[2]string{"State", state},
@@ -3136,12 +3103,6 @@ func (m model) renderDetailPanel(width, height int) string {
 			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
 			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},
 		)...)
-		appendSection(&lines, max(12, width-2), "Actions",
-			"t: template manager",
-			"s: start/stop selected jail",
-			"z: ZFS panel for selected jail",
-			"enter: full detail view",
-		)
 	}
 
 	return lipgloss.NewStyle().
@@ -3149,45 +3110,6 @@ func (m model) renderDetailPanel(width, height int) string {
 		Height(height).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
-}
-
-func (m model) templateManagerModeLabel() string {
-	switch m.templateCreate.mode {
-	case templateManagerModeCreate:
-		if m.templateCreate.parentApplying {
-			return "create parent dataset"
-		}
-		if m.templateCreate.applying {
-			return "create template"
-		}
-		return "create template"
-	case templateManagerModeRename:
-		if m.templateCreate.applying {
-			return "rename template"
-		}
-		return "rename template"
-	case templateManagerModeDestroy:
-		if m.templateCreate.applying {
-			return "destroy template"
-		}
-		return "destroy template"
-	case templateManagerModeClone:
-		if m.templateCreate.cloneLoading {
-			return "load snapshots"
-		}
-		if m.templateCreate.applying {
-			return "clone snapshot"
-		}
-		return "clone snapshot"
-	default:
-		if m.templateCreate.loading {
-			return "refresh template list"
-		}
-		if m.templateCreate.selectMode {
-			return "select template mountpoint"
-		}
-		return "inspect templates"
-	}
 }
 
 func (m *model) boundCursor() {
@@ -3263,14 +3185,6 @@ func looksLikeWarningText(message string) bool {
 		strings.Contains(lower, "refusing") ||
 		strings.Contains(lower, "blocked") ||
 		strings.Contains(lower, "cannot")
-}
-
-func renderModeBanner(label string) string {
-	label = strings.TrimSpace(label)
-	if label == "" {
-		return ""
-	}
-	return modeBannerStyle.Render("Mode: " + label)
 }
 
 func appendSection(lines *[]string, width int, title string, body ...string) {

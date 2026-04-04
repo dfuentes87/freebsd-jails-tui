@@ -657,20 +657,6 @@ func (m model) renderZFSPanelView() string {
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 	bodyHeight := max(5, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
 	lines := m.zfsPanelLines(max(12, m.width-2), bodyHeight)
-	modeLine := renderModeBanner("inspect snapshots")
-	switch {
-	case m.zfsPanel.actionRunning:
-		modeLine = renderModeBanner("run ZFS action")
-	case m.zfsPanel.propertyEditMode:
-		modeLine = renderModeBanner("edit dataset property")
-	case m.zfsPanel.cloneMode:
-		modeLine = renderModeBanner("clone jail from snapshot")
-	case m.zfsPanel.confirmRollback:
-		modeLine = renderModeBanner("confirm rollback")
-	case m.zfsPanel.inputMode:
-		modeLine = renderModeBanner("create snapshot")
-	}
-	lines = append([]string{modeLine, ""}, lines...)
 	body := lipgloss.NewStyle().
 		Width(m.width).
 		Height(bodyHeight).
