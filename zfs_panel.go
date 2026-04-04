@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -29,6 +30,15 @@ type zfsActionMsg struct {
 	message string
 }
 
+type zfsEditablePropertyState struct {
+	Compression       string
+	CompressionSource string
+	Quota             string
+	QuotaSource       string
+	Reservation       string
+	ReservationSource string
+}
+
 type zfsPanelState struct {
 	returnMode       screenMode
 	dataset          string
@@ -48,6 +58,11 @@ type zfsPanelState struct {
 	cloneDestination string
 	cloneWriteConfig bool
 	clonePreview     JailSnapshotClonePreview
+	propertyEditMode bool
+	propertyField    int
+	propertyName     string
+	propertyValue    string
+	propertyState    zfsEditablePropertyState
 	message          string
 	logs             []string
 	err              error
@@ -76,6 +91,13 @@ func listZFSSnapshotsCmd(dataset string) tea.Cmd {
 	}
 }
 
+func zfsPropertyStateCmd(dataset string) tea.Cmd {
+	return func() tea.Msg {
+		properties, err := readZFSEditableProperties(dataset)
+		return zfsPropertyStateMsg{properties: properties, err: err}
+	}
+}
+
 func createZFSSnapshotCmd(dataset, snapshotName string) tea.Cmd {
 	return func() tea.Msg {
 		fullName := dataset + "@" + snapshotName
@@ -96,6 +118,17 @@ func rollbackZFSSnapshotCmd(snapshot string) tea.Cmd {
 			message = "Rollback failed."
 		}
 		return zfsActionMsg{logs: logs, err: err, message: message}
+	}
+}
+
+func setZFSDatasetPropertyCmd(dataset, property, value string) tea.Cmd {
+	return func() tea.Msg {
+		properties, logs, err := applyZFSDatasetPropertyEdit(dataset, property, value)
+		message := fmt.Sprintf("Updated %s on %s.", property, dataset)
+		if err != nil {
+			message = "Dataset property update failed."
+		}
+		return zfsPropertyApplyMsg{properties: properties, logs: logs, err: err, message: message}
 	}
 }
 
@@ -147,6 +180,96 @@ func listZFSSnapshots(dataset string) ([]ZFSSnapshot, error) {
 	return snapshots, nil
 }
 
+func readZFSEditableProperties(dataset string) (zfsEditablePropertyState, error) {
+	cmd := exec.Command("zfs", "get", "-H", "-o", "property,value,source", "compression,quota,reservation", dataset)
+	out, err := cmd.Output()
+	if err != nil {
+		return zfsEditablePropertyState{}, fmt.Errorf("failed to read dataset properties for %s: %w", dataset, err)
+	}
+	state := zfsEditablePropertyState{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) < 3 {
+			continue
+		}
+		property := strings.TrimSpace(fields[0])
+		value := strings.TrimSpace(fields[1])
+		source := strings.TrimSpace(fields[2])
+		switch property {
+		case "compression":
+			state.Compression = value
+			state.CompressionSource = source
+		case "quota":
+			state.Quota = value
+			state.QuotaSource = source
+		case "reservation":
+			state.Reservation = value
+			state.ReservationSource = source
+		}
+	}
+	return state, nil
+}
+
+func applyZFSDatasetPropertyEdit(dataset, property, value string) (zfsEditablePropertyState, []string, error) {
+	logs := make([]string, 0, 6)
+	property = strings.TrimSpace(strings.ToLower(property))
+	value = strings.TrimSpace(value)
+	if err := validateZFSDatasetPropertyEdit(property, value); err != nil {
+		return zfsEditablePropertyState{}, logs, err
+	}
+	if strings.EqualFold(value, "inherit") {
+		cmdLogs, err := runZFSCommand("zfs", "inherit", property, dataset)
+		logs = append(logs, cmdLogs...)
+		if err != nil {
+			return zfsEditablePropertyState{}, logs, err
+		}
+	} else {
+		cmdLogs, err := runZFSCommand("zfs", "set", property+"="+value, dataset)
+		logs = append(logs, cmdLogs...)
+		if err != nil {
+			return zfsEditablePropertyState{}, logs, err
+		}
+	}
+	state, err := readZFSEditableProperties(dataset)
+	if err != nil {
+		return zfsEditablePropertyState{}, logs, err
+	}
+	return state, logs, nil
+}
+
+func validateZFSDatasetPropertyEdit(property, value string) error {
+	if property == "" {
+		return fmt.Errorf("property is required")
+	}
+	if value == "" {
+		return fmt.Errorf("property value is required")
+	}
+	if strings.ContainsAny(value, "\n\r\t") {
+		return fmt.Errorf("property value contains invalid control characters")
+	}
+	switch property {
+	case "compression":
+		if strings.EqualFold(value, "inherit") {
+			return nil
+		}
+		switch strings.ToLower(value) {
+		case "on", "off", "lz4", "zle", "gzip", "gzip-1", "gzip-2", "gzip-3", "gzip-4", "gzip-5", "gzip-6", "gzip-7", "gzip-8", "gzip-9":
+			return nil
+		}
+		return fmt.Errorf("compression must be one of: inherit, on, off, lz4, zle, gzip, gzip-1 .. gzip-9")
+	case "quota", "reservation":
+		if strings.EqualFold(value, "inherit") || strings.EqualFold(value, "none") {
+			return nil
+		}
+		if matched, _ := regexp.MatchString(`^[0-9]+[KMGTP]?$`, strings.ToUpper(value)); matched {
+			return nil
+		}
+		return fmt.Errorf("%s must be a size like 10G, none, or inherit", property)
+	default:
+		return fmt.Errorf("unsupported dataset property %q", property)
+	}
+}
+
 func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.zfsPanel.inputMode {
 		switch msg.String() {
@@ -183,6 +306,72 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Type == tea.KeyRunes {
 			m.zfsPanel.inputValue += string(msg.Runes)
+		}
+		return m, nil
+	}
+
+	if m.zfsPanel.propertyEditMode {
+		if m.zfsPanel.actionRunning {
+			return m, nil
+		}
+		switch msg.String() {
+		case "esc", "left":
+			m.zfsPanel.propertyEditMode = false
+			m.zfsPanel.message = "Dataset property edit canceled."
+			return m, nil
+		case "tab", "down":
+			m.zfsPanel.propertyField++
+			if m.zfsPanel.propertyField > 1 {
+				m.zfsPanel.propertyField = 0
+			}
+			return m, nil
+		case "shift+tab", "up":
+			m.zfsPanel.propertyField--
+			if m.zfsPanel.propertyField < 0 {
+				m.zfsPanel.propertyField = 1
+			}
+			return m, nil
+		case "j":
+			m.zfsPanel.cyclePropertyName(1)
+			return m, nil
+		case "k":
+			m.zfsPanel.cyclePropertyName(-1)
+			return m, nil
+		case "enter":
+			if err := validateZFSDatasetPropertyEdit(m.zfsPanel.propertyName, m.zfsPanel.propertyValue); err != nil {
+				m.zfsPanel.message = err.Error()
+				return m, nil
+			}
+			m.zfsPanel.actionRunning = true
+			m.zfsPanel.logs = nil
+			m.zfsPanel.err = nil
+			m.zfsPanel.message = "Updating dataset property..."
+			return m, setZFSDatasetPropertyCmd(m.zfsPanel.dataset, m.zfsPanel.propertyName, m.zfsPanel.propertyValue)
+		case "backspace", "delete":
+			if m.zfsPanel.propertyField == 1 {
+				runes := []rune(m.zfsPanel.propertyValue)
+				if len(runes) > 0 {
+					m.zfsPanel.propertyValue = string(runes[:len(runes)-1])
+				}
+			}
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			if m.zfsPanel.propertyField == 0 {
+				value := strings.ToLower(strings.TrimSpace(string(msg.Runes)))
+				if value != "" {
+					switch value {
+					case "c":
+						m.zfsPanel.propertyName = "compression"
+					case "q":
+						m.zfsPanel.propertyName = "quota"
+					case "r":
+						m.zfsPanel.propertyName = "reservation"
+					}
+				}
+			} else {
+				m.zfsPanel.propertyValue += string(msg.Runes)
+			}
 		}
 		return m, nil
 	}
@@ -271,7 +460,7 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.zfsPanel.loading = true
 		m.zfsPanel.message = "Refreshing snapshots..."
-		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case "c", "C":
 		if m.zfsPanel.actionRunning {
 			return m, nil
@@ -318,6 +507,22 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.zfsPanel.cloneWriteConfig = true
 		m.zfsPanel.clonePreview = InspectJailSnapshotClone(m.zfsPanel.sourceDetail, snapshot.Name, m.zfsPanel.cloneName, m.zfsPanel.cloneDestination, m.zfsPanel.cloneWriteConfig)
 		m.zfsPanel.message = "Review the jail snapshot clone preview, then press enter to clone it."
+		return m, nil
+	case "e", "E":
+		if m.zfsPanel.actionRunning {
+			return m, nil
+		}
+		if !m.zfsPanel.datasetPropertyEditable() {
+			m.zfsPanel.message = "Dataset property editing requires an exact jail ZFS dataset."
+			return m, nil
+		}
+		m.zfsPanel.propertyEditMode = true
+		m.zfsPanel.propertyField = 0
+		if strings.TrimSpace(m.zfsPanel.propertyName) == "" {
+			m.zfsPanel.propertyName = "compression"
+		}
+		m.zfsPanel.syncPropertyEditValue()
+		m.zfsPanel.message = "Edit a dataset property, then press enter to apply it."
 		return m, nil
 	case "enter":
 		if m.zfsPanel.actionRunning {
@@ -378,15 +583,7 @@ func (m model) renderZFSPanelView() string {
 	meta := summaryStyle.Render("Dataset: " + valueOrDash(m.zfsPanel.dataset))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := max(5, m.height-4)
-	lines := m.zfsPanelLines(max(12, m.width-2), bodyHeight)
-	body := lipgloss.NewStyle().
-		Width(m.width).
-		Height(bodyHeight).
-		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
-
-	hint := "j/k: select snapshot | c: create snapshot | r: rollback selected | n: clone as jail | x: refresh | esc: back | q: quit"
+	hint := "j/k: select snapshot | c: create snapshot | r: rollback selected | n: clone as jail | e: edit property | x: refresh | esc: back | q: quit"
 	if m.zfsPanel.inputMode {
 		hint = "Type snapshot name | enter: create snapshot | backspace: edit | esc: cancel"
 	}
@@ -395,6 +592,9 @@ func (m model) renderZFSPanelView() string {
 	}
 	if m.zfsPanel.cloneMode {
 		hint = "type name/destination | tab/shift+tab: field | j/k: snapshot | t: toggle config | enter: clone | esc: cancel | ctrl+c: quit"
+	}
+	if m.zfsPanel.propertyEditMode {
+		hint = "tab/shift+tab: field | j/k: property | type value | enter: apply | esc: cancel | ctrl+c: quit"
 	}
 	if m.zfsPanel.actionRunning {
 		hint = "Executing ZFS action... please wait | ctrl+c: quit"
@@ -408,6 +608,13 @@ func (m model) renderZFSPanelView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
+	bodyHeight := max(5, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	lines := m.zfsPanelLines(max(12, m.width-2), bodyHeight)
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -457,10 +664,18 @@ func (m model) zfsPanelLines(width, height int) []string {
 	}
 
 	lines = append(lines, "")
+	lines = append(lines, sectionStyle.Render("Dataset properties"))
+	lines = append(lines, truncate("Editable only for exact jail datasets: "+yesNoText(m.zfsPanel.datasetPropertyEditable()), width))
+	lines = append(lines, truncate("Compression: "+valueOrDash(m.zfsPanel.propertyState.Compression)+" ("+valueOrDash(m.zfsPanel.propertyState.CompressionSource)+")", width))
+	lines = append(lines, truncate("Quota: "+valueOrDash(m.zfsPanel.propertyState.Quota)+" ("+valueOrDash(m.zfsPanel.propertyState.QuotaSource)+")", width))
+	lines = append(lines, truncate("Reservation: "+valueOrDash(m.zfsPanel.propertyState.Reservation)+" ("+valueOrDash(m.zfsPanel.propertyState.ReservationSource)+")", width))
+
+	lines = append(lines, "")
 	lines = append(lines, sectionStyle.Render("Actions"))
 	lines = append(lines, "c: create snapshot")
 	lines = append(lines, "r: rollback selected snapshot")
 	lines = append(lines, "n: clone selected snapshot as a new jail")
+	lines = append(lines, "e: edit dataset property")
 	lines = append(lines, "x: refresh snapshot list")
 
 	if m.zfsPanel.inputMode {
@@ -507,6 +722,23 @@ func (m model) zfsPanelLines(width, height int) []string {
 				lines = append(lines, wizardErrorStyle.Render(line))
 			}
 		}
+	}
+
+	if m.zfsPanel.propertyEditMode {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Edit dataset property"))
+		propLine := truncate("Property: "+valueOrDash(m.zfsPanel.propertyName), width)
+		if m.zfsPanel.propertyField == 0 {
+			propLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> Property: "+valueOrDash(m.zfsPanel.propertyName), width))
+		}
+		lines = append(lines, propLine)
+		valueLine := truncate("Value: "+valueOrDash(m.zfsPanel.propertyValue), width)
+		if m.zfsPanel.propertyField == 1 {
+			valueLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> Value: "+valueOrDash(m.zfsPanel.propertyValue), width))
+		}
+		lines = append(lines, valueLine)
+		lines = append(lines, truncate("Supported properties: compression, quota, reservation", width))
+		lines = append(lines, truncate("Allowed values: compression={inherit,on,off,lz4,zle,gzip,gzip-1..9}; quota/reservation={inherit,none,<size>}", width))
 	}
 
 	if len(m.zfsPanel.logs) > 0 {
@@ -599,6 +831,42 @@ func (m model) zfsNewerSnapshots(target string) []ZFSSnapshot {
 
 func (m model) zfsListHeight() int {
 	return max(3, m.height-16)
+}
+
+func (panel zfsPanelState) datasetPropertyEditable() bool {
+	return panel.sourceDetail.ZFS != nil && panel.sourceDetail.ZFS.MatchType == "exact" && strings.TrimSpace(panel.sourceDetail.ZFS.Name) == strings.TrimSpace(panel.dataset)
+}
+
+func (panel *zfsPanelState) cyclePropertyName(delta int) {
+	order := []string{"compression", "quota", "reservation"}
+	idx := 0
+	for i, item := range order {
+		if item == panel.propertyName {
+			idx = i
+			break
+		}
+	}
+	idx += delta
+	if idx < 0 {
+		idx = len(order) - 1
+	}
+	if idx >= len(order) {
+		idx = 0
+	}
+	panel.propertyName = order[idx]
+	panel.syncPropertyEditValue()
+}
+
+func (panel *zfsPanelState) syncPropertyEditValue() {
+	switch panel.propertyName {
+	case "quota":
+		panel.propertyValue = panel.propertyState.Quota
+	case "reservation":
+		panel.propertyValue = panel.propertyState.Reservation
+	default:
+		panel.propertyName = "compression"
+		panel.propertyValue = panel.propertyState.Compression
+	}
 }
 
 func (panel *zfsPanelState) selectedSnapshot() (ZFSSnapshot, bool) {

@@ -117,6 +117,18 @@ type zfsOpenMsg struct {
 	result zfsOpenResult
 }
 
+type zfsPropertyStateMsg struct {
+	properties zfsEditablePropertyState
+	err        error
+}
+
+type zfsPropertyApplyMsg struct {
+	properties zfsEditablePropertyState
+	logs       []string
+	err        error
+	message    string
+}
+
 type tickMsg time.Time
 
 type screenMode int
@@ -402,8 +414,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.zfsPanel.loading = false
 		m.zfsPanel.snapshots = msg.snapshots
 		m.zfsPanel.err = msg.err
-		m.zfsPanel.message = msg.message
+		if msg.err != nil || m.zfsPanel.message == "" || strings.HasPrefix(strings.ToLower(m.zfsPanel.message), "loading") || strings.HasPrefix(strings.ToLower(m.zfsPanel.message), "refreshing") {
+			m.zfsPanel.message = msg.message
+		}
 		m.zfsPanel.boundCursor(m.zfsListHeight())
+		return m, nil
+	case zfsPropertyStateMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.zfsPanel.err = msg.err
+			m.zfsPanel.message = msg.err.Error()
+			return m, nil
+		}
+		m.zfsPanel.propertyState = msg.properties
+		if m.zfsPanel.propertyEditMode {
+			m.zfsPanel.syncPropertyEditValue()
+		}
 		return m, nil
 	case zfsActionMsg:
 		if m.mode != screenZFSPanel {
@@ -413,7 +441,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.zfsPanel.logs = msg.logs
 		m.zfsPanel.err = msg.err
 		m.zfsPanel.message = msg.message
-		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
+	case zfsPropertyApplyMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		m.zfsPanel.actionRunning = false
+		m.zfsPanel.logs = msg.logs
+		m.zfsPanel.err = msg.err
+		m.zfsPanel.message = msg.message
+		if msg.err == nil {
+			m.zfsPanel.propertyState = msg.properties
+			m.zfsPanel.propertyEditMode = false
+			if m.zfsPanel.sourceDetail.ZFS != nil {
+				m.zfsPanel.sourceDetail.ZFS.Compression = msg.properties.Compression
+				m.zfsPanel.sourceDetail.ZFS.Quota = msg.properties.Quota
+				m.zfsPanel.sourceDetail.ZFS.Reservation = msg.properties.Reservation
+			}
+		}
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case wizardApplyMsg:
 		m.wizardApplying = false
 		m.wizard.setExecutionResult(msg.result)
@@ -628,7 +674,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailLoading = false
 		m.mode = screenZFSPanel
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenDashboard, m.detail)
-		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case tickMsg:
 		return m, pollCmd()
 	case tea.KeyMsg:
@@ -851,7 +897,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = screenZFSPanel
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail, m.detail)
-		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case "x", "X":
 		jail, ok := m.detailJail()
 		if !ok {
@@ -1603,6 +1649,7 @@ func (m model) helpLines(width int) []string {
 		truncate("c: create snapshot", width),
 		truncate("r: rollback selected snapshot (confirmation required)", width),
 		truncate("n: clone selected snapshot as a new jail", width),
+		truncate("e: edit compression, quota, or reservation on an exact jail dataset", width),
 		truncate("selected snapshot details show creation time, used size, and rollback implications", width),
 		truncate("x: refresh snapshot list", width),
 		truncate("esc: cancel prompt or return to detail", width),

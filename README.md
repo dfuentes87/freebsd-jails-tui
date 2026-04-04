@@ -139,6 +139,7 @@ Actions:
 - create snapshot
 - rollback snapshot
 - clone a selected snapshot into a new jail dataset/config
+- edit `compression`, `quota`, and `reservation` on an exact jail dataset
 - refresh snapshot list
 
 ### Jail Creation Wizard
