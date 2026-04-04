@@ -24,6 +24,11 @@ var (
 	panelTitleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("45"))
+	modeBannerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("238")).
+			Padding(0, 1)
 	selectedRowStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("230")).
 				Background(lipgloss.Color("24"))
@@ -1686,13 +1691,13 @@ func (m model) renderDestroyView() string {
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
 	bodyWidth := max(12, m.width-2)
-	lines := []string{"", sectionStyle.Render("Confirmation")}
+	lines := []string{renderModeBanner("confirm destroy")}
+	appendSection(&lines, bodyWidth, "Confirmation")
 	for _, line := range m.destroy.preview {
 		lines = append(lines, truncate(line, bodyWidth))
 	}
 	if len(m.destroy.logs) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Execution output"))
+		appendSection(&lines, bodyWidth, "Execution output")
 		maxLogs := min(12, len(m.destroy.logs))
 		for _, line := range m.destroy.logs[len(m.destroy.logs)-maxLogs:] {
 			lines = append(lines, truncate(line, bodyWidth))
@@ -1858,6 +1863,28 @@ func (m model) renderWizardView() string {
 	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
 	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
 	lines := m.wizardLines(max(12, m.width-2))
+	modeLine := ""
+	switch {
+	case m.wizardApplying:
+		modeLine = renderModeBanner("apply")
+	case m.wizard.datasetCreateRunning:
+		modeLine = renderModeBanner("create template dataset")
+	case m.wizard.templateMode == wizardTemplateModeSave:
+		modeLine = renderModeBanner("save wizard template")
+	case m.wizard.templateMode == wizardTemplateModeLoad:
+		modeLine = renderModeBanner("load wizard template")
+	case m.wizard.userlandMode:
+		modeLine = renderModeBanner("select userland source")
+	case m.wizard.thinDatasetMode:
+		modeLine = renderModeBanner("select thin template dataset")
+	case m.wizard.isConfirmationStep():
+		modeLine = renderModeBanner("confirm jail creation")
+	default:
+		modeLine = renderModeBanner("edit fields")
+	}
+	if modeLine != "" {
+		lines = append([]string{modeLine, ""}, lines...)
+	}
 	body := lipgloss.NewStyle().
 		Width(m.width).
 		Height(bodyHeight).
@@ -1989,18 +2016,18 @@ func (m model) templateManagerListLines(width, height int) []string {
 }
 
 func (m model) templateManagerDetailLines(width int) []string {
-	lines := []string{}
+	lines := []string{renderModeBanner(m.templateManagerModeLabel())}
 	switch m.templateCreate.mode {
 	case templateManagerModeCreate:
-		lines = append(lines, sectionStyle.Render("Create Template Dataset"))
-		lines = append(lines, truncate("Supported sources: local directory, local archive, release tag, custom https URL, or a named userland entry.", width))
+		appendSection(&lines, width, "Create template dataset",
+			"Sources: local directory, local archive, release tag, custom URL, or named userland entry.",
+		)
 		sourceDisplay := m.templateCreate.sourceInput
 		if strings.TrimSpace(sourceDisplay) == "" {
 			sourceDisplay = "(15.0-RELEASE)"
 		}
 		lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> Template/Release: "+sourceDisplay, width)))
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Preview"))
+		appendSection(&lines, width, "Preview")
 		preview := m.templateCreate.preview
 		parentDataset := preview.ParentDataset
 		parentMountpoint := preview.ParentMountpoint
@@ -2053,14 +2080,14 @@ func (m model) templateManagerDetailLines(width int) []string {
 			lines = append(lines, truncate("Create action: "+preview.Action, width))
 		}
 		if preview.NeedsParentCreate {
-			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent dataset or edit the values first.", width))
+			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent or edit the values first.", width))
 		} else if preview.Err != nil {
 			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
 				lines = append(lines, wizardErrorStyle.Render(line))
 			}
 		}
 	case templateManagerModeRename:
-		lines = append(lines, sectionStyle.Render("Rename Template Dataset"))
+		appendSection(&lines, width, "Rename template dataset")
 		preview := m.templateCreate.renamePreview
 		current := preview.Current
 		if current.Name == "" {
@@ -2085,7 +2112,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 		}
 	case templateManagerModeDestroy:
-		lines = append(lines, sectionStyle.Render("Destroy Template Dataset"))
+		appendSection(&lines, width, "Destroy template dataset")
 		preview := m.templateCreate.destroyPreview
 		current := preview.Current
 		if current.Name == "" {
@@ -2110,7 +2137,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 		}
 	case templateManagerModeClone:
-		lines = append(lines, sectionStyle.Render("Clone Template Snapshot"))
+		appendSection(&lines, width, "Clone template snapshot")
 		item, ok := m.templateCreate.selectedItem()
 		if !ok {
 			lines = append(lines, "No template dataset selected.")
@@ -2118,8 +2145,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 		}
 		lines = append(lines, truncate("Dataset: "+item.Name, width))
 		lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.cloneName, filepath.Base(item.Name)+"-clone"), width)))
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Snapshots"))
+		appendSection(&lines, width, "Snapshots")
 		if m.templateCreate.cloneLoading {
 			lines = append(lines, "Loading snapshots...")
 			break
@@ -2137,8 +2163,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 			lines = append(lines, row)
 		}
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Preview"))
+		appendSection(&lines, width, "Preview")
 		preview := m.templateCreate.clonePreview
 		if preview.Snapshot != "" {
 			lines = append(lines, truncate("Snapshot: "+preview.Snapshot, width))
@@ -2155,7 +2180,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 		}
 	default:
-		lines = append(lines, sectionStyle.Render("Inspect"))
+		appendSection(&lines, width, "Inspect")
 		item, ok := m.templateCreate.selectedItem()
 		if !ok {
 			lines = append(lines, "No template dataset selected.")
@@ -2172,8 +2197,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			lines = append(lines, truncate(fmt.Sprintf("Child datasets: %d", len(item.ChildDatasets)), width))
 			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(item.CloneDependents)), width))
 			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(item.WizardTemplateRefs)), width))
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Safety"))
+			appendSection(&lines, width, "Safety")
 			lines = append(lines, truncate("Rename allowed: "+yesNoText(item.RenameAllowed), width))
 			lines = append(lines, truncate("Destroy allowed: "+yesNoText(item.DestroyAllowed), width))
 			if len(item.SafetyIssues) > 0 {
@@ -2193,8 +2217,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 		}
 	}
 	if len(m.templateCreate.logs) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Execution output"))
+		appendSection(&lines, width, "Execution output")
 		for _, line := range m.templateCreate.logs {
 			lines = append(lines, truncate(line, width))
 		}
@@ -2469,9 +2492,6 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 
 func (m model) detailLines(width int) []string {
 	lines := make([]string, 0, 64)
-	appendLine := func(text string) {
-		lines = append(lines, truncate(text, max(1, width)))
-	}
 
 	jail, hasJail := m.detailJail()
 	state := "STOPPED"
@@ -2489,74 +2509,75 @@ func (m model) detailLines(width int) []string {
 		memText = fmt.Sprintf("%dMB", jail.MemoryMB)
 	}
 
-	lines = append(lines, sectionStyle.Render("Overview"))
-	appendLine("Name: " + valueOrDash(m.detail.Name))
-	appendLine("State: " + state)
-	appendLine("JID: " + jidText)
-	appendLine("CPU: " + cpuText)
-	appendLine("Memory: " + memText)
-	appendLine("Path: " + valueOrDash(m.detail.Path))
-	appendLine("Hostname: " + valueOrDash(m.detail.Hostname))
-	appendLine("")
+	lines = append(lines, renderModeBanner("inspect jail"))
+	appendRenderedSection(&lines, "Overview", renderKeyValueLines(width,
+		[2]string{"Name", m.detail.Name},
+		[2]string{"State", state},
+		[2]string{"JID", jidText},
+		[2]string{"CPU", cpuText},
+		[2]string{"Memory", memText},
+		[2]string{"Path", m.detail.Path},
+		[2]string{"Hostname", m.detail.Hostname},
+	))
 
-	lines = append(lines, sectionStyle.Render("Configured state"))
-	appendLine("Source: " + valueOrDash(m.detail.JailConfSource))
+	appendSection(&lines, width, "Configured state")
+	lines = append(lines, renderKeyValueLines(width, [2]string{"Source", m.detail.JailConfSource})...)
 	if len(m.detail.JailConfValues) == 0 && len(m.detail.JailConfFlags) == 0 {
-		appendLine("No matching jail block found.")
+		lines = append(lines, truncate("No matching jail block found.", width))
 	} else {
 		for _, key := range sortedKeys(m.detail.JailConfValues) {
-			appendLine(fmt.Sprintf("%s = %s", key, m.detail.JailConfValues[key]))
+			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.JailConfValues[key]})...)
 		}
 		for _, flag := range m.detail.JailConfFlags {
-			appendLine(flag)
+			lines = append(lines, truncate(flag, width))
 		}
 	}
-	appendLine("")
 
-	lines = append(lines, sectionStyle.Render("Startup policy"))
+	appendSection(&lines, width, "Startup policy")
 	if m.detail.StartupConfig == nil {
-		appendLine("Startup policy unavailable.")
+		lines = append(lines, truncate("Startup policy unavailable.", width))
 	} else {
 		if m.detail.StartupConfig.InJailList {
-			appendLine(fmt.Sprintf("jail_list position: %d of %d", m.detail.StartupConfig.Position, len(m.detail.StartupConfig.JailList)))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"jail_list position", fmt.Sprintf("%d of %d", m.detail.StartupConfig.Position, len(m.detail.StartupConfig.JailList))},
+			)...)
 		} else if len(m.detail.StartupConfig.JailList) == 0 {
-			appendLine("jail_list: empty (all configured jails start unless depend changes the order)")
+			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "empty (all configured jails start unless depend changes the order)"})...)
 		} else {
-			appendLine("jail_list: not present (manual start required when jail_list is used)")
+			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "not present (manual start required when jail_list is used)"})...)
 		}
-		appendLine("Dependencies: " + dependencySummary(strings.Join(m.detail.StartupConfig.Dependencies, " ")))
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Dependencies", dependencySummary(strings.Join(m.detail.StartupConfig.Dependencies, " "))})...)
 		if len(m.detail.StartupConfig.JailList) > 0 {
-			appendLine("Effective jail_list: " + strings.Join(m.detail.StartupConfig.JailList, " "))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Effective jail_list", strings.Join(m.detail.StartupConfig.JailList, " ")})...)
 		}
 		if m.detail.StartupConfig.ReadError != "" {
 			lines = append(lines, wizardErrorStyle.Render(truncate("jail_list read error: "+m.detail.StartupConfig.ReadError, max(1, width))))
 		}
 	}
-	appendLine("")
 
-	lines = append(lines, sectionStyle.Render("Runtime state"))
-	appendLine("State: " + state)
-	appendLine("CPU: " + cpuText)
-	appendLine("Memory: " + memText)
+	appendRenderedSection(&lines, "Runtime state", renderKeyValueLines(width,
+		[2]string{"State", state},
+		[2]string{"CPU", cpuText},
+		[2]string{"Memory", memText},
+	))
 	if len(m.detail.RuntimeValues) == 0 {
-		appendLine("No running runtime record for this jail.")
+		lines = append(lines, truncate("No running runtime record for this jail.", width))
 	} else {
 		for _, key := range orderedRuntimeKeys(m.detail.RuntimeValues) {
-			appendLine(fmt.Sprintf("%s: %s", key, m.detail.RuntimeValues[key]))
+			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.RuntimeValues[key]})...)
 		}
 	}
 	if !m.detailShowAdvanced {
-		appendLine("Raw runtime/default parameters hidden; press a to show.")
+		lines = append(lines, truncate("Raw runtime/default parameters hidden; press a to show.", width))
 	}
-	appendLine("")
 
 	if m.detail.NetworkSummary != nil {
-		lines = append(lines, sectionStyle.Render("Network summary"))
+		appendSection(&lines, width, "Network summary")
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Configured) {
-			appendLine(fmt.Sprintf("Configured %s: %s", key, m.detail.NetworkSummary.Configured[key]))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Configured " + key, m.detail.NetworkSummary.Configured[key]})...)
 		}
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Runtime) {
-			appendLine(fmt.Sprintf("Runtime %s: %s", key, m.detail.NetworkSummary.Runtime[key]))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Runtime " + key, m.detail.NetworkSummary.Runtime[key]})...)
 		}
 		if len(m.detail.NetworkSummary.Validation) > 0 {
 			for _, line := range m.detail.NetworkSummary.Validation {
@@ -2564,64 +2585,61 @@ func (m model) detailLines(width int) []string {
 					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 					continue
 				}
-				appendLine(line)
+				lines = append(lines, truncate(line, width))
 			}
 		}
-		appendLine("")
 	}
 
 	if m.detailShowAdvanced {
-		lines = append(lines, sectionStyle.Render("Advanced runtime parameters"))
+		appendSection(&lines, width, "Advanced runtime parameters")
 		if len(m.detail.AdvancedRuntimeFields) == 0 {
-			appendLine("No additional runtime/default parameters.")
+			lines = append(lines, truncate("No additional runtime/default parameters.", width))
 		} else {
 			for _, key := range sortedKeys(m.detail.AdvancedRuntimeFields) {
-				appendLine(fmt.Sprintf("%s = %s", key, m.detail.AdvancedRuntimeFields[key]))
+				lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.AdvancedRuntimeFields[key]})...)
 			}
 		}
-		appendLine("")
 	}
 
-	lines = append(lines, sectionStyle.Render("ZFS dataset"))
+	appendSection(&lines, width, "ZFS dataset")
 	if m.detail.ZFS == nil {
-		appendLine("No dataset matched the jail path.")
+		lines = append(lines, truncate("No dataset matched the jail path.", width))
 	} else {
-		appendLine("Dataset: " + m.detail.ZFS.Name)
-		appendLine("Mountpoint: " + m.detail.ZFS.Mountpoint)
-		appendLine("Match: " + m.detail.ZFS.MatchType)
-		appendLine("Used: " + m.detail.ZFS.Used)
-		appendLine("Avail: " + m.detail.ZFS.Avail)
-		appendLine("Refer: " + m.detail.ZFS.Refer)
-		appendLine("Compression: " + m.detail.ZFS.Compression)
-		appendLine("Quota: " + m.detail.ZFS.Quota)
-		appendLine("Reservation: " + m.detail.ZFS.Reservation)
+		lines = append(lines, renderKeyValueLines(width,
+			[2]string{"Dataset", m.detail.ZFS.Name},
+			[2]string{"Mountpoint", m.detail.ZFS.Mountpoint},
+			[2]string{"Match", m.detail.ZFS.MatchType},
+			[2]string{"Used", m.detail.ZFS.Used},
+			[2]string{"Avail", m.detail.ZFS.Avail},
+			[2]string{"Refer", m.detail.ZFS.Refer},
+			[2]string{"Compression", m.detail.ZFS.Compression},
+			[2]string{"Quota", m.detail.ZFS.Quota},
+			[2]string{"Reservation", m.detail.ZFS.Reservation},
+		)...)
 	}
-	appendLine("")
 
-	lines = append(lines, sectionStyle.Render("rctl"))
+	appendSection(&lines, width, "rctl")
 	if len(m.detail.RctlRules) == 0 {
-		appendLine("No matching rctl rules.")
+		lines = append(lines, truncate("No matching rctl rules.", width))
 	} else {
 		for _, rule := range m.detail.RctlRules {
-			appendLine(rule)
+			lines = append(lines, truncate(rule, width))
 		}
 	}
 
 	if m.detail.LinuxReadiness != nil {
-		appendLine("")
-		lines = append(lines, sectionStyle.Render("Linux readiness"))
+		appendSection(&lines, width, "Linux readiness")
 		for _, line := range m.linuxReadinessLines() {
 			if looksLikeWarningText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 				continue
 			}
-			appendLine(line)
+			lines = append(lines, truncate(line, width))
 		}
 	}
 
 	if len(m.detail.SourceErrors) > 0 {
-		appendLine("")
-		lines = append(lines, sectionStyle.Render("Source errors"))
+		appendSection(&lines, width, "Source errors")
 		for _, source := range sortedKeys(m.detail.SourceErrors) {
 			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
 		}
@@ -3111,17 +3129,18 @@ func (m model) renderDetailPanel(width, height int) string {
 			state = "RUNNING"
 			jidText = strconv.Itoa(j.JID)
 		}
-		lines = append(lines,
-			fmt.Sprintf("%s %s", detailKeyStyle.Render("Name:"), j.Name),
-			fmt.Sprintf("%s %s", detailKeyStyle.Render("State:"), state),
-			fmt.Sprintf("%s %s", detailKeyStyle.Render("JID:"), jidText),
-			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
-			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
-			"",
-			"t: open the template manager.",
-			"s: start/stop selected jail.",
-			"z: open ZFS panel for selected jail.",
-			"Press enter for full detail view.",
+		lines = append(lines, renderKeyValueLines(max(12, width-2),
+			[2]string{"Name", j.Name},
+			[2]string{"State", state},
+			[2]string{"JID", jidText},
+			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
+			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},
+		)...)
+		appendSection(&lines, max(12, width-2), "Actions",
+			"t: template manager",
+			"s: start/stop selected jail",
+			"z: ZFS panel for selected jail",
+			"enter: full detail view",
 		)
 	}
 
@@ -3130,6 +3149,45 @@ func (m model) renderDetailPanel(width, height int) string {
 		Height(height).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
+}
+
+func (m model) templateManagerModeLabel() string {
+	switch m.templateCreate.mode {
+	case templateManagerModeCreate:
+		if m.templateCreate.parentApplying {
+			return "create parent dataset"
+		}
+		if m.templateCreate.applying {
+			return "create template"
+		}
+		return "create template"
+	case templateManagerModeRename:
+		if m.templateCreate.applying {
+			return "rename template"
+		}
+		return "rename template"
+	case templateManagerModeDestroy:
+		if m.templateCreate.applying {
+			return "destroy template"
+		}
+		return "destroy template"
+	case templateManagerModeClone:
+		if m.templateCreate.cloneLoading {
+			return "load snapshots"
+		}
+		if m.templateCreate.applying {
+			return "clone snapshot"
+		}
+		return "clone snapshot"
+	default:
+		if m.templateCreate.loading {
+			return "refresh template list"
+		}
+		if m.templateCreate.selectMode {
+			return "select template mountpoint"
+		}
+		return "inspect templates"
+	}
 }
 
 func (m *model) boundCursor() {
@@ -3205,6 +3263,67 @@ func looksLikeWarningText(message string) bool {
 		strings.Contains(lower, "refusing") ||
 		strings.Contains(lower, "blocked") ||
 		strings.Contains(lower, "cannot")
+}
+
+func renderModeBanner(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	return modeBannerStyle.Render("Mode: " + label)
+}
+
+func appendSection(lines *[]string, width int, title string, body ...string) {
+	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
+		*lines = append(*lines, "")
+	}
+	*lines = append(*lines, sectionStyle.Render(title))
+	for _, line := range body {
+		*lines = append(*lines, truncate(line, width))
+	}
+}
+
+func appendRenderedSection(lines *[]string, title string, body []string) {
+	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
+		*lines = append(*lines, "")
+	}
+	*lines = append(*lines, sectionStyle.Render(title))
+	*lines = append(*lines, body...)
+}
+
+func renderKeyValueLines(width int, pairs ...[2]string) []string {
+	lines := make([]string, 0, len(pairs)*2)
+	labelWidth := 18
+	if width < 48 {
+		labelWidth = 14
+	}
+	for _, pair := range pairs {
+		lines = append(lines, renderKeyValue(width, labelWidth, pair[0], pair[1])...)
+	}
+	return lines
+}
+
+func renderKeyValue(width, labelWidth int, label, value string) []string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return []string{truncate(valueOrDash(value), width)}
+	}
+	if labelWidth < 8 {
+		labelWidth = 8
+	}
+	valueWidth := max(8, width-labelWidth-2)
+	wrapped := wrapText(valueOrDash(value), valueWidth)
+	prefix := fmt.Sprintf("%-*s", labelWidth, label+":")
+	lines := make([]string, 0, len(wrapped))
+	if len(wrapped) == 0 {
+		return []string{detailKeyStyle.Render(prefix) + " -"}
+	}
+	lines = append(lines, detailKeyStyle.Render(prefix)+" "+wrapped[0])
+	continuation := strings.Repeat(" ", labelWidth+1)
+	for _, part := range wrapped[1:] {
+		lines = append(lines, continuation+" "+part)
+	}
+	return lines
 }
 
 func valueOrDash(value string) string {

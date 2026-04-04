@@ -657,6 +657,20 @@ func (m model) renderZFSPanelView() string {
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 	bodyHeight := max(5, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
 	lines := m.zfsPanelLines(max(12, m.width-2), bodyHeight)
+	modeLine := renderModeBanner("inspect snapshots")
+	switch {
+	case m.zfsPanel.actionRunning:
+		modeLine = renderModeBanner("run ZFS action")
+	case m.zfsPanel.propertyEditMode:
+		modeLine = renderModeBanner("edit dataset property")
+	case m.zfsPanel.cloneMode:
+		modeLine = renderModeBanner("clone jail from snapshot")
+	case m.zfsPanel.confirmRollback:
+		modeLine = renderModeBanner("confirm rollback")
+	case m.zfsPanel.inputMode:
+		modeLine = renderModeBanner("create snapshot")
+	}
+	lines = append([]string{modeLine, ""}, lines...)
 	body := lipgloss.NewStyle().
 		Width(m.width).
 		Height(bodyHeight).
@@ -697,28 +711,25 @@ func (m model) zfsPanelLines(width, height int) []string {
 	}
 
 	if snapshot, ok := m.zfsPanel.selectedSnapshot(); ok {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Selected snapshot"))
-		lines = append(lines, truncate("Name: "+snapshot.Name, width))
-		lines = append(lines, truncate("Created: "+valueOrDash(snapshot.Creation), width))
-		lines = append(lines, truncate("Used: "+valueOrDash(snapshot.Used), width))
-
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Rollback implications"))
+		appendRenderedSection(&lines, "Selected snapshot", renderKeyValueLines(width,
+			[2]string{"Name", snapshot.Name},
+			[2]string{"Created", snapshot.Creation},
+			[2]string{"Used", snapshot.Used},
+		))
+		appendSection(&lines, width, "Rollback implications")
 		for _, line := range m.zfsRollbackImplicationLines(width, snapshot) {
 			lines = append(lines, line)
 		}
 	}
 
-	lines = append(lines, "")
-	lines = append(lines, sectionStyle.Render("Dataset properties"))
-	lines = append(lines, truncate("Editable only for exact jail datasets: "+yesNoText(m.zfsPanel.datasetPropertyEditable()), width))
-	lines = append(lines, truncate("Compression: "+valueOrDash(m.zfsPanel.propertyState.Compression)+" ("+valueOrDash(m.zfsPanel.propertyState.CompressionSource)+")", width))
-	lines = append(lines, truncate("Quota: "+valueOrDash(m.zfsPanel.propertyState.Quota)+" ("+valueOrDash(m.zfsPanel.propertyState.QuotaSource)+")", width))
-	lines = append(lines, truncate("Reservation: "+valueOrDash(m.zfsPanel.propertyState.Reservation)+" ("+valueOrDash(m.zfsPanel.propertyState.ReservationSource)+")", width))
+	appendRenderedSection(&lines, "Dataset properties", renderKeyValueLines(width,
+		[2]string{"Editable", yesNoText(m.zfsPanel.datasetPropertyEditable())},
+		[2]string{"Compression", valueOrDash(m.zfsPanel.propertyState.Compression) + " (" + valueOrDash(m.zfsPanel.propertyState.CompressionSource) + ")"},
+		[2]string{"Quota", valueOrDash(m.zfsPanel.propertyState.Quota) + " (" + valueOrDash(m.zfsPanel.propertyState.QuotaSource) + ")"},
+		[2]string{"Reservation", valueOrDash(m.zfsPanel.propertyState.Reservation) + " (" + valueOrDash(m.zfsPanel.propertyState.ReservationSource) + ")"},
+	))
 
-	lines = append(lines, "")
-	lines = append(lines, sectionStyle.Render("Actions"))
+	appendSection(&lines, width, "Actions")
 	lines = append(lines, "c: create snapshot")
 	lines = append(lines, "r: rollback selected snapshot")
 	lines = append(lines, "n: clone selected snapshot as a new jail")
@@ -726,23 +737,22 @@ func (m model) zfsPanelLines(width, height int) []string {
 	lines = append(lines, "x: refresh snapshot list")
 
 	if m.zfsPanel.inputMode {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Create snapshot"))
-		lines = append(lines, truncate("Name: "+m.zfsPanel.inputValue, width))
+		appendRenderedSection(&lines, "Create snapshot", renderKeyValueLines(width,
+			[2]string{"Name", m.zfsPanel.inputValue},
+		))
 	}
 
 	if m.zfsPanel.confirmRollback {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Confirm rollback"))
-		lines = append(lines, truncate("Target: "+m.zfsPanel.rollbackTarget, width))
-		lines = append(lines, truncate("Command: zfs rollback -r "+m.zfsPanel.rollbackTarget, width))
+		appendRenderedSection(&lines, "Confirm rollback", renderKeyValueLines(width,
+			[2]string{"Target", m.zfsPanel.rollbackTarget},
+			[2]string{"Command", "zfs rollback -r " + m.zfsPanel.rollbackTarget},
+		))
 	}
 
 	if m.zfsPanel.cloneMode {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Clone jail from snapshot"))
+		appendSection(&lines, width, "Clone jail from snapshot")
 		if snapshot, ok := m.zfsPanel.selectedSnapshot(); ok {
-			lines = append(lines, truncate("Source snapshot: "+snapshot.Name, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Source snapshot", snapshot.Name})...)
 		}
 		nameLine := truncate("Clone name: "+valueOrDash(m.zfsPanel.cloneName), width)
 		if m.zfsPanel.cloneField == 0 {
@@ -772,8 +782,7 @@ func (m model) zfsPanelLines(width, height int) []string {
 	}
 
 	if m.zfsPanel.propertyEditMode {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Edit dataset property"))
+		appendSection(&lines, width, "Edit dataset property")
 		propLine := truncate("Property: "+valueOrDash(m.zfsPanel.propertyName), width)
 		if m.zfsPanel.propertyField == 0 {
 			propLine = selectedRowStyle.Width(max(1, width)).Render(truncate("> Property: "+valueOrDash(m.zfsPanel.propertyName), width))
@@ -789,8 +798,7 @@ func (m model) zfsPanelLines(width, height int) []string {
 	}
 
 	if len(m.zfsPanel.logs) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Last operation"))
+		appendSection(&lines, width, "Last operation")
 		maxLogs := min(8, len(m.zfsPanel.logs))
 		for _, line := range m.zfsPanel.logs[len(m.zfsPanel.logs)-maxLogs:] {
 			lines = append(lines, truncate(line, width))
