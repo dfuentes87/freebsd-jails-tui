@@ -82,13 +82,13 @@ var wizardBaseSteps = []wizardStep{
 	},
 	{
 		Title:       "Linux Bootstrap",
-		Description: "Choose the Linux distro and release to bootstrap inside /compat when creating a linux jail.",
+		Description: "Choose the bootstrap family, release, and mirror used to populate /compat inside a linux jail.",
 		Fields: []wizardField{
-			{ID: "linux_distro", Label: "Linux distro", Placeholder: "ubuntu", Help: "Supported: ubuntu or debian"},
-			{ID: "linux_release", Label: "Linux release", Placeholder: "jammy", Help: "Ubuntu codename or Debian suite"},
+			{ID: "linux_distro", Label: "Bootstrap family", Placeholder: "ubuntu", Help: "Free-form family name; Ubuntu and Debian have built-in default mirrors"},
+			{ID: "linux_release", Label: "Bootstrap release", Placeholder: "noble", Help: "Free-form codename, suite, or release string passed to debootstrap"},
 			{ID: "linux_bootstrap", Label: "Bootstrap mode", Placeholder: "auto", Help: "Options: auto or skip"},
 			{ID: "linux_mirror_mode", Label: "Mirror mode", Placeholder: "default", Help: "Options: default or custom"},
-			{ID: "linux_mirror_url", Label: "Mirror URL", Placeholder: "https://mirror.example.invalid/ubuntu", Help: "Custom Linux package mirror base URL"},
+			{ID: "linux_mirror_url", Label: "Mirror URL", Placeholder: "https://mirror.example.invalid/repo", Help: "Custom Linux package mirror base URL"},
 		},
 	},
 	{
@@ -807,11 +807,16 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		}
 	}
 	if (w.currentStepHasField("linux_distro") || w.currentStepHasField("linux_release") || w.currentStepHasField("linux_bootstrap") || w.currentStepHasField("linux_mirror_mode") || w.currentStepHasField("linux_mirror_url")) && jailType == "linux" {
-		distro := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
-		switch distro {
-		case "", "ubuntu", "debian":
-		default:
-			return "linux_distro", fmt.Errorf("linux distro must be ubuntu or debian")
+		family := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
+		if family == "" {
+			return "linux_distro", fmt.Errorf("bootstrap family is required")
+		}
+		if !jailNamePattern.MatchString(family) {
+			return "linux_distro", fmt.Errorf("bootstrap family must use letters, numbers, dot, underscore, or dash")
+		}
+		w.values.LinuxDistro = family
+		if strings.TrimSpace(w.values.LinuxRelease) == "" {
+			return "linux_release", fmt.Errorf("bootstrap release is required")
 		}
 		mode := effectiveLinuxBootstrapMode(w.values)
 		switch mode {
@@ -1076,8 +1081,8 @@ func (w jailCreationWizard) summaryLines() []string {
 	}
 	if normalizedJailType(w.values.JailType) == "linux" {
 		lines = append(lines,
-			fmt.Sprintf("Linux distro: %s", effectiveLinuxDistro(w.values)),
-			fmt.Sprintf("Linux release: %s", effectiveLinuxRelease(w.values)),
+			fmt.Sprintf("Bootstrap family: %s", effectiveLinuxDistro(w.values)),
+			fmt.Sprintf("Bootstrap release: %s", effectiveLinuxRelease(w.values)),
 			fmt.Sprintf("Bootstrap mode: %s", effectiveLinuxBootstrapMode(w.values)),
 			fmt.Sprintf("Mirror mode: %s", effectiveLinuxMirrorMode(w.values)),
 			fmt.Sprintf("Mirror URL: %s", effectiveLinuxMirrorSummary(w.values)),
@@ -1588,8 +1593,10 @@ func resolveLinuxMirror(values jailWizardValues) (linuxMirrorInfo, error) {
 		switch effectiveLinuxDistro(values) {
 		case "debian":
 			baseURL = "https://deb.debian.org/debian"
-		default:
+		case "ubuntu":
 			baseURL = "https://archive.ubuntu.com/ubuntu"
+		default:
+			return linuxMirrorInfo{}, fmt.Errorf("default mirror mode only supports bootstrap families ubuntu or debian; use custom mirror mode for %q", effectiveLinuxDistro(values))
 		}
 	case "custom":
 		raw := strings.TrimSpace(values.LinuxMirrorURL)

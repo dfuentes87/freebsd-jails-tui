@@ -28,6 +28,7 @@ type LinuxWizardPrereqs struct {
 
 type LinuxReadiness struct {
 	Host                 LinuxHostStatus
+	BootstrapFamily      string
 	CompatRoot           string
 	BootstrapMode        string
 	MirrorURL            string
@@ -91,8 +92,9 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 
 	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
 	readiness := &LinuxReadiness{
-		Host:          collectLinuxHostStatus(),
-		BootstrapMode: effectiveLinuxBootstrapMode(values),
+		Host:            collectLinuxHostStatus(),
+		BootstrapFamily: effectiveLinuxDistro(values),
+		BootstrapMode:   effectiveLinuxBootstrapMode(values),
 	}
 	mirror, err := resolveLinuxMirror(values)
 	readiness.MirrorURL = mirror.BaseURL

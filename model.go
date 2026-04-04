@@ -2710,7 +2710,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 			guide.Shortcuts = append(guide.Shortcuts, "ctrl+t opens Template Manager to select or create a reusable dataset")
 		case "linux":
 			guide.Purpose = "Source used to build the FreeBSD jail base before Linux userland is bootstrapped under /compat."
-			guide.Notes = append(guide.Notes, "This is still a FreeBSD base/root source. The Linux distro and release are configured on the next step.")
+			guide.Notes = append(guide.Notes, "This is still a FreeBSD base/root source. The Linux bootstrap family and release are configured on the next step.")
 		}
 		return guide
 	case "interface":
@@ -2857,19 +2857,21 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 		}
 	case "linux_distro":
 		return wizardFieldGuide{
-			Purpose: "Linux distribution to bootstrap inside the existing FreeBSD jail root.",
-			Format:  "ubuntu or debian.",
+			Purpose: "Bootstrap family passed to debootstrap and used for the compat root name.",
+			Format:  "Free-form family name. Ubuntu and Debian have built-in default mirrors; other families require a custom mirror.",
 			Examples: []string{
 				"ubuntu",
 				"debian",
+				"devuan",
 			},
 		}
 	case "linux_release":
 		return wizardFieldGuide{
-			Purpose: "Ubuntu codename or Debian suite passed to debootstrap.",
+			Purpose: "Free-form codename, suite, or release string passed directly to debootstrap.",
 			Examples: []string{
-				"jammy",
+				"noble",
 				"bookworm",
+				"trixie",
 			},
 		}
 	case "linux_bootstrap":
@@ -2884,7 +2886,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 	case "linux_mirror_mode":
 		return wizardFieldGuide{
 			Purpose: "Choose whether bootstrap uses the built-in distro mirror or a custom base URL.",
-			Format:  "default or custom.",
+			Format:  "default or custom. default only works for bootstrap families ubuntu and debian.",
 			Examples: []string{
 				"default",
 				"custom",
@@ -3235,6 +3237,7 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
+		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
 		fmt.Sprintf("Mirror URL: %s", valueOrDash(readiness.MirrorURL)),
