@@ -57,20 +57,14 @@ type templateDatasetOption struct {
 
 var wizardBaseSteps = []wizardStep{
 	{
-		Title:       "1. Basics",
-		Description: "Set the jail type, identity, and root filesystem source.",
+		Title:       "Create Jail",
+		Description: "Set the jail type, identity, root filesystem source, networking, startup behavior, limits, and mounts.",
 		Fields: []wizardField{
 			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux"},
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Full jail root path"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL"},
-		},
-	},
-	{
-		Title:       "2. Networking & Limits",
-		Description: "Configure networking, startup behavior, limits, and optional mounts.",
-		Fields: []wizardField{
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Used by thick, thin, and linux"},
 			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
 			{ID: "bridge_policy", Label: "Bridge policy", Placeholder: "auto-create", Help: "Options: auto-create or require-existing"},
@@ -87,7 +81,7 @@ var wizardBaseSteps = []wizardStep{
 		},
 	},
 	{
-		Title:       "3. Linux Bootstrap",
+		Title:       "Linux Bootstrap",
 		Description: "Choose the Linux distro and release to bootstrap inside /compat when creating a linux jail.",
 		Fields: []wizardField{
 			{ID: "linux_distro", Label: "Linux distro", Placeholder: "ubuntu", Help: "Supported: ubuntu or debian"},
@@ -98,7 +92,7 @@ var wizardBaseSteps = []wizardStep{
 		},
 	},
 	{
-		Title:       "4. Confirmation",
+		Title:       "Confirmation",
 		Description: "Review the generated jail.conf and creation plan.",
 	},
 }
@@ -187,7 +181,7 @@ func (w jailCreationWizard) steps() []wizardStep {
 	if normalizedJailType(w.values.JailType) == "linux" {
 		return wizardBaseSteps
 	}
-	return []wizardStep{wizardBaseSteps[0], wizardBaseSteps[1], wizardBaseSteps[3]}
+	return []wizardStep{wizardBaseSteps[0], wizardBaseSteps[2]}
 }
 
 func (w jailCreationWizard) currentStep() wizardStep {
@@ -1052,11 +1046,15 @@ func blockingPrereqFieldID(values jailWizardValues) string {
 }
 
 func (w jailCreationWizard) summaryLines() []string {
+	templateLabel := "Template/Release"
+	if normalizedJailType(w.values.JailType) == "linux" {
+		templateLabel = "FreeBSD Base/Release"
+	}
 	lines := []string{
 		fmt.Sprintf("Type: %s", valueOrDash(w.values.JailType)),
 		fmt.Sprintf("Name: %s", w.values.Name),
 		fmt.Sprintf("Destination: %s", w.values.Dataset),
-		fmt.Sprintf("Template/Release: %s", w.values.TemplateRelease),
+		fmt.Sprintf("%s: %s", templateLabel, w.values.TemplateRelease),
 		fmt.Sprintf("IPv4: %s", w.values.IP4),
 		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),

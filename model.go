@@ -1856,12 +1856,41 @@ func (m model) renderWizardView() string {
 	}
 	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
 	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
-	lines := m.wizardLines(max(12, m.width-2))
-	body := lipgloss.NewStyle().
-		Width(m.width).
-		Height(bodyHeight).
-		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
+	body := ""
+	if m.wizardUsesSplitPane() {
+		leftWidth := max(48, (m.width-1)*3/5)
+		if leftWidth > m.width-34 {
+			leftWidth = m.width - 34
+		}
+		if leftWidth < 40 {
+			leftWidth = 40
+		}
+		rightWidth := m.width - leftWidth - 1
+		if rightWidth >= 32 {
+			leftPanel := lipgloss.NewStyle().
+				Width(leftWidth).
+				Height(bodyHeight).
+				Padding(0, 1).
+				Render(strings.Join(m.wizardFieldEntryLines(max(12, leftWidth-2), false), "\n"))
+			rightPanel := lipgloss.NewStyle().
+				Width(rightWidth).
+				Height(bodyHeight).
+				Padding(0, 1).
+				Render(strings.Join(m.wizardFieldContextLines(max(12, rightWidth-2)), "\n"))
+			separator := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Render(strings.Repeat("|\n", bodyHeight-1) + "|")
+			body = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, separator, rightPanel)
+		}
+	}
+	if body == "" {
+		lines := m.wizardLines(max(12, m.width-2))
+		body = lipgloss.NewStyle().
+			Width(m.width).
+			Height(bodyHeight).
+			Padding(0, 1).
+			Render(strings.Join(lines, "\n"))
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -2302,10 +2331,12 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.summaryLines() {
 			lines = append(lines, truncate(line, width))
 		}
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Network prerequisites"))
-		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
-			appendStyledWizardLine(&lines, line, width)
+		if shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Network prerequisites"))
+			for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+				appendStyledWizardLine(&lines, line, width)
+			}
 		}
 		if normalizedJailType(m.wizard.values.JailType) == "linux" {
 			lines = append(lines, "")
@@ -2339,8 +2370,30 @@ func (m model) wizardLines(width int) []string {
 		return lines
 	}
 
+	lines = append(lines, m.wizardFieldEntryLines(width, true)...)
+	return lines
+}
+
+func (m model) wizardUsesSplitPane() bool {
+	if m.width < 110 {
+		return false
+	}
+	if m.wizard.templateMode != wizardTemplateModeNone || m.wizard.userlandMode || m.wizard.thinDatasetMode {
+		return false
+	}
+	if m.wizard.datasetCreateRunning || m.wizardApplying || m.wizard.isConfirmationStep() {
+		return false
+	}
+	return len(m.wizard.visibleFields()) > 0
+}
+
+func (m model) wizardFieldEntryLines(width int, inlineHelp bool) []string {
+	lines := []string{}
 	currentSection := ""
 	fields := m.wizard.visibleFields()
+	if len(fields) == 0 {
+		return []string{"No editable fields on this step."}
+	}
 	m.wizard.normalizeField()
 	for idx, field := range fields {
 		section := wizardSectionForField(field.ID)
@@ -2361,23 +2414,20 @@ func (m model) wizardLines(width int) []string {
 		if idx == m.wizard.field {
 			prefix = ">"
 		}
-		label := field.Label
-		if field.ID == "template_release" && normalizedJailType(m.wizard.values.JailType) == "linux" {
-			label = "FreeBSD Base/Release"
-		}
+		label := m.wizardFieldDisplayLabel(field)
 		line := fmt.Sprintf("%s %s: %s", prefix, label, display)
 		line = truncate(line, width)
 		if idx == m.wizard.field {
 			line = selectedRowStyle.Width(max(1, width)).Render(line)
 		}
 		lines = append(lines, line)
-		if idx == m.wizard.field && field.Help != "" {
+		if inlineHelp && idx == m.wizard.field && field.Help != "" {
 			if field.ID == "template_release" {
 				lines = append(lines, "")
 			}
 			lines = append(lines, truncate("  "+field.Help, width))
 		}
-		if idx == m.wizard.field && field.ID == "template_release" {
+		if inlineHelp && idx == m.wizard.field && field.ID == "template_release" {
 			lines = append(lines, truncate("  ctrl+u: select local userland or release download", width))
 			if normalizedJailType(m.wizard.values.JailType) == "thin" {
 				lines = append(lines, truncate("  ctrl+t: choose an extracted ZFS template dataset", width))
@@ -2390,7 +2440,7 @@ func (m model) wizardLines(width int) []string {
 		}
 	}
 
-	if shouldShowNetworkPrereqs(m.wizard.networkPrereqs) && wizardShowsNetworkPrereqs(step) {
+	if inlineHelp && shouldShowNetworkPrereqs(m.wizard.networkPrereqs) && wizardShowsNetworkPrereqs(m.wizard.currentStep()) {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Network prerequisites"))
 		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
@@ -2398,7 +2448,7 @@ func (m model) wizardLines(width int) []string {
 		}
 	}
 
-	if normalizedJailType(m.wizard.values.JailType) == "linux" && wizardsShowsLinuxPrereqs(step) {
+	if inlineHelp && normalizedJailType(m.wizard.values.JailType) == "linux" && wizardsShowsLinuxPrereqs(m.wizard.currentStep()) {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
 		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
@@ -2407,6 +2457,373 @@ func (m model) wizardLines(width int) []string {
 	}
 
 	return lines
+}
+
+func (m model) wizardFieldContextLines(width int) []string {
+	lines := []string{panelTitleStyle.Render("Field Guide")}
+	field, ok := m.wizard.activeField()
+	if !ok {
+		lines = append(lines, "Select a field to see accepted values and examples.")
+		return lines
+	}
+
+	displayValue := strings.TrimSpace(m.wizard.valueByID(field.ID))
+	if displayValue == "" {
+		displayValue = "(" + field.Placeholder + ")"
+	}
+	lines = append(lines, renderKeyValueLines(width,
+		[2]string{"Field", m.wizardFieldDisplayLabel(field)},
+		[2]string{"Current", displayValue},
+	)...)
+
+	guide := m.wizardFieldGuide(field)
+	if guide.Purpose != "" {
+		appendSection(&lines, width, "Purpose")
+		for _, line := range wrapText(guide.Purpose, width) {
+			lines = append(lines, line)
+		}
+	}
+	if guide.Format != "" {
+		appendSection(&lines, width, "Accepted format")
+		for _, line := range wrapText(guide.Format, width) {
+			lines = append(lines, line)
+		}
+	}
+	if len(guide.Examples) > 0 {
+		appendSection(&lines, width, "Examples")
+		for _, example := range guide.Examples {
+			for _, line := range wrapText("- "+example, width) {
+				lines = append(lines, line)
+			}
+		}
+	}
+	if len(guide.Notes) > 0 {
+		appendSection(&lines, width, "Notes")
+		for _, note := range guide.Notes {
+			isWarning := looksLikeWarningText(note)
+			for _, line := range wrapText(note, width) {
+				rendered := line
+				if isWarning {
+					rendered = wizardErrorStyle.Render(line)
+				}
+				lines = append(lines, rendered)
+			}
+		}
+	}
+	if len(guide.Shortcuts) > 0 {
+		appendSection(&lines, width, "Shortcuts")
+		for _, shortcut := range guide.Shortcuts {
+			for _, line := range wrapText("- "+shortcut, width) {
+				lines = append(lines, line)
+			}
+		}
+	}
+
+	if wizardFieldUsesNetworkContext(field.ID) && shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
+		appendSection(&lines, width, "Host checks")
+		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
+	}
+	if wizardFieldUsesLinuxContext(field.ID) {
+		appendSection(&lines, width, "Linux prerequisites")
+		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
+	}
+
+	return lines
+}
+
+type wizardFieldGuide struct {
+	Purpose   string
+	Format    string
+	Examples  []string
+	Notes     []string
+	Shortcuts []string
+}
+
+func (m model) wizardFieldDisplayLabel(field wizardField) string {
+	if field.ID == "template_release" && normalizedJailType(m.wizard.values.JailType) == "linux" {
+		return "FreeBSD Base/Release"
+	}
+	return field.Label
+}
+
+func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
+	jailType := normalizedJailType(m.wizard.values.JailType)
+	switch field.ID {
+	case "jail_type":
+		return wizardFieldGuide{
+			Purpose: "Choose the jail model. This decides how the root is provisioned and how networking is configured.",
+			Format:  "One of: thick, thin, vnet, linux.",
+			Examples: []string{
+				"thick for a copied root filesystem",
+				"thin for a ZFS template dataset clone",
+				"vnet for bridge-backed virtual networking",
+				"linux for a FreeBSD jail with Linux userland bootstrap",
+			},
+		}
+	case "name":
+		return wizardFieldGuide{
+			Purpose: "The jail name is used for jail.conf, fstab, rctl rules, and several generated paths.",
+			Format:  "Letters, numbers, dot, underscore, and dash only.",
+			Examples: []string{
+				"web01",
+				"db-primary",
+			},
+		}
+	case "hostname":
+		return wizardFieldGuide{
+			Purpose: "Hostname assigned inside the jail. Leave blank to reuse the jail name.",
+			Examples: []string{
+				"web01.example.internal",
+				"pkg-cache.local",
+			},
+		}
+	case "dataset":
+		return wizardFieldGuide{
+			Purpose: "Absolute jail root path. The final path must end with the jail name.",
+			Format:  "Absolute path only. Shared roots like /usr/local/jails/containers are not valid jail roots by themselves.",
+			Examples: []string{
+				"/usr/local/jails/containers/web01",
+				"/usr/local/jails/thick/db01",
+			},
+		}
+	case "template_release":
+		guide := wizardFieldGuide{
+			Purpose: "Source used to populate the FreeBSD jail root.",
+			Format:  "Local path, FreeBSD release tag, named userland source, or custom https URL.",
+			Examples: []string{
+				"15.0-RELEASE",
+				"/usr/local/jails/media/base.txz",
+				"https://download.freebsd.org/ftp/releases/amd64/amd64/15.0-RELEASE/base.txz",
+			},
+			Shortcuts: []string{
+				"ctrl+u selects a discovered local userland source or release download",
+			},
+		}
+		switch jailType {
+		case "thin":
+			guide.Notes = append(guide.Notes,
+				"Thin jails require an extracted ZFS template dataset mountpoint, not a release tag or archive, at create time.",
+			)
+			guide.Shortcuts = append(guide.Shortcuts, "ctrl+t opens Template Manager to select or create a reusable dataset")
+		case "linux":
+			guide.Purpose = "Source used to build the FreeBSD jail base before Linux userland is bootstrapped under /compat."
+			guide.Notes = append(guide.Notes, "This is still a FreeBSD base/root source. The Linux distro and release are configured on the next step.")
+		}
+		return guide
+	case "interface":
+		return wizardFieldGuide{
+			Purpose: "Host interface used by shared-stack jails.",
+			Format:  "Existing host interface name.",
+			Examples: []string{
+				"em0",
+				"igb0",
+			},
+			Notes: []string{
+				"Required for thick, thin, and linux jails. VNET jails use bridge and uplink instead.",
+			},
+		}
+	case "bridge":
+		return wizardFieldGuide{
+			Purpose: "Bridge device used for VNET connectivity.",
+			Format:  "Bridge interface name such as bridge0.",
+			Examples: []string{
+				"bridge0",
+				"bridge1",
+			},
+		}
+	case "bridge_policy":
+		return wizardFieldGuide{
+			Purpose: "Controls whether the TUI may create a missing bridge before jail creation.",
+			Format:  "auto-create or require-existing.",
+			Examples: []string{
+				"auto-create to let the TUI create bridge0 if it is missing",
+				"require-existing to fail unless the named bridge already exists",
+			},
+		}
+	case "uplink":
+		return wizardFieldGuide{
+			Purpose: "Optional host interface to attach to the selected bridge.",
+			Format:  "Existing host interface name or blank.",
+			Examples: []string{
+				"em0",
+				"ix0",
+			},
+			Notes: []string{
+				"Use this when the bridge should be connected to a physical or VLAN-backed host interface.",
+			},
+		}
+	case "ip4":
+		notes := []string{}
+		if jailType == "vnet" {
+			notes = append(notes, "VNET jails require an explicit IPv4 address. inherit is not allowed.")
+		}
+		return wizardFieldGuide{
+			Purpose: "Primary IPv4 address assigned to the jail.",
+			Format:  "CIDR address, or inherit for non-VNET jails.",
+			Examples: []string{
+				"192.168.1.20/24",
+				"inherit",
+			},
+			Notes: notes,
+		}
+	case "ip6":
+		notes := []string{}
+		if jailType == "vnet" {
+			notes = append(notes, "VNET jails require an explicit IPv6 address when IPv6 is used. inherit is not allowed.")
+		}
+		return wizardFieldGuide{
+			Purpose: "Optional IPv6 address assigned to the jail.",
+			Format:  "CIDR address, or inherit for non-VNET jails.",
+			Examples: []string{
+				"2001:db8::20/64",
+				"inherit",
+			},
+			Notes: notes,
+		}
+	case "default_router":
+		return wizardFieldGuide{
+			Purpose: "Optional default gateway configured for the jail.",
+			Format:  "IPv4 or IPv6 address. Leave blank if routing is handled elsewhere.",
+			Examples: []string{
+				"192.168.1.1",
+				"2001:db8::1",
+			},
+		}
+	case "startup_order":
+		return wizardFieldGuide{
+			Purpose: "Optional position for this jail in rc.conf jail_list.",
+			Format:  "Positive integer, or blank to append when jail_list is already managed.",
+			Examples: []string{
+				"1",
+				"5",
+			},
+			Notes: []string{
+				"Leaving this blank preserves the default FreeBSD behavior when jail_list is currently unset.",
+			},
+		}
+	case "dependencies":
+		return wizardFieldGuide{
+			Purpose: "Optional jail names used for depend ordering in jail.conf.",
+			Format:  "Space- or comma-separated jail names.",
+			Examples: []string{
+				"db01 cache01",
+				"router01, storage01",
+			},
+			Notes: []string{
+				"Dependencies refine startup order beyond plain jail_list position.",
+			},
+		}
+	case "cpu_percent":
+		return wizardFieldGuide{
+			Purpose: "Optional rctl CPU cap for the jail.",
+			Format:  "Integer from 1 to 100.",
+			Examples: []string{
+				"25",
+				"50",
+			},
+		}
+	case "memory_limit":
+		return wizardFieldGuide{
+			Purpose: "Optional rctl memory limit.",
+			Format:  "Integer with optional size suffix K, M, G, T, or P.",
+			Examples: []string{
+				"512M",
+				"2G",
+			},
+		}
+	case "process_limit":
+		return wizardFieldGuide{
+			Purpose: "Optional rctl maximum process count.",
+			Format:  "Positive integer.",
+			Examples: []string{
+				"256",
+				"1024",
+			},
+		}
+	case "mount_points":
+		return wizardFieldGuide{
+			Purpose: "Optional extra mount targets created through mount.fstab.",
+			Format:  "Comma-separated list of target-only entries or source:target pairs.",
+			Examples: []string{
+				"/var/cache/pkg",
+				"/data:/srv/data, /logs:/var/log/app",
+			},
+			Notes: []string{
+				"Mount targets must stay inside the jail root after normalization.",
+			},
+		}
+	case "linux_distro":
+		return wizardFieldGuide{
+			Purpose: "Linux distribution to bootstrap inside the existing FreeBSD jail root.",
+			Format:  "ubuntu or debian.",
+			Examples: []string{
+				"ubuntu",
+				"debian",
+			},
+		}
+	case "linux_release":
+		return wizardFieldGuide{
+			Purpose: "Ubuntu codename or Debian suite passed to debootstrap.",
+			Examples: []string{
+				"jammy",
+				"bookworm",
+			},
+		}
+	case "linux_bootstrap":
+		return wizardFieldGuide{
+			Purpose: "Choose whether Linux userland should be bootstrapped immediately after jail creation.",
+			Format:  "auto or skip.",
+			Examples: []string{
+				"auto to run networking preflight and debootstrap now",
+				"skip to create the jail first and retry later from detail view",
+			},
+		}
+	case "linux_mirror_mode":
+		return wizardFieldGuide{
+			Purpose: "Choose whether bootstrap uses the built-in distro mirror or a custom base URL.",
+			Format:  "default or custom.",
+			Examples: []string{
+				"default",
+				"custom",
+			},
+		}
+	case "linux_mirror_url":
+		return wizardFieldGuide{
+			Purpose: "Base repository URL used for Linux bootstrap, readiness checks, and retry.",
+			Format:  "http or https base URL with a host.",
+			Examples: []string{
+				"https://archive.ubuntu.com/ubuntu",
+				"https://deb.debian.org/debian",
+			},
+			Notes: []string{
+				"Enter the repository base URL, not a full Release file URL.",
+			},
+		}
+	default:
+		return wizardFieldGuide{Purpose: field.Help}
+	}
+}
+
+func wizardFieldUsesNetworkContext(id string) bool {
+	switch id {
+	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router":
+		return true
+	default:
+		return false
+	}
+}
+
+func wizardFieldUsesLinuxContext(id string) bool {
+	switch id {
+	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
+		return true
+	default:
+		return false
+	}
 }
 
 func wizardsShowsLinuxPrereqs(step wizardStep) bool {
