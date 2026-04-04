@@ -2361,7 +2361,11 @@ func (m model) wizardLines(width int) []string {
 		if idx == m.wizard.field {
 			prefix = ">"
 		}
-		line := fmt.Sprintf("%s %s: %s", prefix, field.Label, display)
+		label := field.Label
+		if field.ID == "template_release" && normalizedJailType(m.wizard.values.JailType) == "linux" {
+			label = "FreeBSD Base/Release"
+		}
+		line := fmt.Sprintf("%s %s: %s", prefix, label, display)
 		line = truncate(line, width)
 		if idx == m.wizard.field {
 			line = selectedRowStyle.Width(max(1, width)).Render(line)
@@ -2386,7 +2390,7 @@ func (m model) wizardLines(width int) []string {
 		}
 	}
 
-	if wizardShowsNetworkPrereqs(step) {
+	if shouldShowNetworkPrereqs(m.wizard.networkPrereqs) && wizardShowsNetworkPrereqs(step) {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Network prerequisites"))
 		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
@@ -2421,6 +2425,19 @@ func wizardShowsNetworkPrereqs(step wizardStep) bool {
 		case "interface", "bridge", "uplink", "ip4", "ip6", "default_router":
 			return true
 		}
+	}
+	return false
+}
+
+func shouldShowNetworkPrereqs(prereqs NetworkWizardPrereqs) bool {
+	if strings.TrimSpace(prereqs.InspectError) != "" || len(prereqs.Errors) > 0 || len(prereqs.Warnings) > 0 {
+		return true
+	}
+	if strings.TrimSpace(prereqs.RouterStatus) != "" && !strings.EqualFold(strings.TrimSpace(prereqs.RouterStatus), "ok") {
+		return true
+	}
+	if prereqs.BridgeCreateNeeded || prereqs.UplinkAttachNeeded {
+		return true
 	}
 	return false
 }
@@ -2530,15 +2547,16 @@ func (m model) detailLines(width int) []string {
 		[2]string{"CPU", cpuText},
 		[2]string{"Memory", memText},
 	))
+	runtimeNotes := make([]string, 0, 2)
 	if len(m.detail.RuntimeValues) == 0 {
-		lines = append(lines, truncate("No running runtime record for this jail.", width))
+		runtimeNotes = append(runtimeNotes, "No running runtime record for this jail.")
 	} else {
 		for _, key := range orderedRuntimeKeys(m.detail.RuntimeValues) {
 			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.RuntimeValues[key]})...)
 		}
 	}
 	if !m.detailShowAdvanced {
-		lines = append(lines, truncate("Raw runtime/default parameters hidden; press a to show.", width))
+		runtimeNotes = append(runtimeNotes, "Raw runtime/default parameters hidden; press a to show.")
 	}
 
 	if m.detail.NetworkSummary != nil {
@@ -2556,17 +2574,6 @@ func (m model) detailLines(width int) []string {
 					continue
 				}
 				lines = append(lines, renderInformationalKeyValue(width, line)...)
-			}
-		}
-	}
-
-	if m.detailShowAdvanced {
-		appendSection(&lines, width, "Advanced runtime parameters")
-		if len(m.detail.AdvancedRuntimeFields) == 0 {
-			lines = append(lines, truncate("No additional runtime/default parameters.", width))
-		} else {
-			for _, key := range sortedKeys(m.detail.AdvancedRuntimeFields) {
-				lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.AdvancedRuntimeFields[key]})...)
 			}
 		}
 	}
@@ -2612,6 +2619,22 @@ func (m model) detailLines(width int) []string {
 		appendSection(&lines, width, "Source errors")
 		for _, source := range sortedKeys(m.detail.SourceErrors) {
 			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
+		}
+	}
+	if len(runtimeNotes) > 0 {
+		appendSection(&lines, width, "Runtime notes")
+		for _, line := range runtimeNotes {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	if m.detailShowAdvanced {
+		appendSection(&lines, width, "Advanced runtime parameters")
+		if len(m.detail.AdvancedRuntimeFields) == 0 {
+			lines = append(lines, truncate("No additional runtime/default parameters.", width))
+		} else {
+			for _, key := range sortedKeys(m.detail.AdvancedRuntimeFields) {
+				lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.AdvancedRuntimeFields[key]})...)
+			}
 		}
 	}
 	return lines

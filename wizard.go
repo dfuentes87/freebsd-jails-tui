@@ -162,6 +162,15 @@ type jailCreationWizard struct {
 	executionError       string
 }
 
+func (w jailCreationWizard) currentStepHasField(id string) bool {
+	for _, field := range w.visibleFields() {
+		if field.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func newJailCreationWizard(defaultDestination string) jailCreationWizard {
 	w := jailCreationWizard{
 		values: jailWizardValues{
@@ -683,125 +692,127 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		return "jail_type", fmt.Errorf("jail type must be one of: thick, thin, vnet, linux")
 	}
 	w.values.JailType = jailType
-
-	if w.step == 0 {
-		return "", nil
-	}
-	if strings.TrimSpace(w.values.Name) == "" {
+	if w.currentStepHasField("name") && strings.TrimSpace(w.values.Name) == "" {
 		return "name", fmt.Errorf("jail name is required")
 	}
-	if !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
+	if w.currentStepHasField("name") && !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
 		return "name", fmt.Errorf("invalid jail name")
 	}
-	if strings.TrimSpace(w.values.Dataset) == "" {
+	if w.currentStepHasField("dataset") && strings.TrimSpace(w.values.Dataset) == "" {
 		return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 	}
-	if _, err := validateJailDestinationPath(w.values.Dataset, w.values.Name); err != nil {
-		if strings.Contains(err.Error(), "is required") {
-			return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+	if w.currentStepHasField("dataset") {
+		if _, err := validateJailDestinationPath(w.values.Dataset, w.values.Name); err != nil {
+			if strings.Contains(err.Error(), "is required") {
+				return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
+			}
+			return "dataset", err
 		}
-		return "dataset", err
 	}
-	if strings.TrimSpace(w.values.TemplateRelease) == "" {
+	if w.currentStepHasField("template_release") && strings.TrimSpace(w.values.TemplateRelease) == "" {
 		return "template_release", fmt.Errorf("template/release is required (local path, release tag, or https URL)")
 	}
-	if err := validateTemplateReleaseInput(w.values); err != nil {
-		return "template_release", err
+	if w.currentStepHasField("template_release") {
+		if err := validateTemplateReleaseInput(w.values); err != nil {
+			return "template_release", err
+		}
 	}
-	if hasConflictingJailConfig(w.values.Name) {
+	if w.currentStepHasField("name") && hasConflictingJailConfig(w.values.Name) {
 		return "name", fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
 	}
-	if jailType == "vnet" {
-		bridge, err := validateNetworkInterfaceName(w.values.Bridge, "bridge")
-		if err != nil {
-			return "bridge", err
-		}
-		w.values.Bridge = bridge
-		if strings.TrimSpace(w.values.Bridge) == "" {
-			return "bridge", fmt.Errorf("bridge is required for vnet jails")
-		}
-		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Bridge)), "bridge") {
-			return "bridge", fmt.Errorf("vnet jails require a bridge such as bridge0")
-		}
-		policy := effectiveBridgePolicy(w.values)
-		switch policy {
-		case "auto-create", "require-existing":
-			w.values.BridgePolicy = policy
-		default:
-			return "bridge_policy", fmt.Errorf("bridge policy must be auto-create or require-existing")
-		}
-		if strings.TrimSpace(w.values.Uplink) != "" {
-			uplink, err := validateOptionalNetworkInterfaceName(w.values.Uplink, "uplink")
+	if w.currentStepHasField("bridge") || w.currentStepHasField("interface") || w.currentStepHasField("ip4") || w.currentStepHasField("ip6") || w.currentStepHasField("default_router") || w.currentStepHasField("startup_order") || w.currentStepHasField("cpu_percent") || w.currentStepHasField("mount_points") {
+		if jailType == "vnet" {
+			bridge, err := validateNetworkInterfaceName(w.values.Bridge, "bridge")
 			if err != nil {
-				return "uplink", err
+				return "bridge", err
 			}
-			w.values.Uplink = uplink
+			w.values.Bridge = bridge
+			if strings.TrimSpace(w.values.Bridge) == "" {
+				return "bridge", fmt.Errorf("bridge is required for vnet jails")
+			}
+			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(w.values.Bridge)), "bridge") {
+				return "bridge", fmt.Errorf("vnet jails require a bridge such as bridge0")
+			}
+			policy := effectiveBridgePolicy(w.values)
+			switch policy {
+			case "auto-create", "require-existing":
+				w.values.BridgePolicy = policy
+			default:
+				return "bridge_policy", fmt.Errorf("bridge policy must be auto-create or require-existing")
+			}
+			if strings.TrimSpace(w.values.Uplink) != "" {
+				uplink, err := validateOptionalNetworkInterfaceName(w.values.Uplink, "uplink")
+				if err != nil {
+					return "uplink", err
+				}
+				w.values.Uplink = uplink
+			}
+		} else {
+			iface, err := validateNetworkInterfaceName(w.values.Interface, "interface")
+			if err != nil {
+				return "interface", err
+			}
+			w.values.Interface = iface
+			if strings.TrimSpace(w.values.Interface) == "" {
+				return "interface", fmt.Errorf("interface is required")
+			}
 		}
-	} else {
-		iface, err := validateNetworkInterfaceName(w.values.Interface, "interface")
+		if strings.TrimSpace(w.values.IP4) == "" {
+			return "ip4", fmt.Errorf("IPv4 is required")
+		}
+		if err := validateJailIPValue(strings.TrimSpace(w.values.IP4), true, "IPv4", jailType != "vnet"); err != nil {
+			return "ip4", err
+		}
+		if err := validateJailIPValue(strings.TrimSpace(w.values.IP6), false, "IPv6", jailType != "vnet"); err != nil {
+			return "ip6", err
+		}
+		if jailType == "vnet" {
+			if strings.EqualFold(strings.TrimSpace(w.values.IP4), "inherit") {
+				return "ip4", fmt.Errorf("vnet jails cannot use IPv4 inherit; switch jail type or enter an explicit IPv4 address")
+			}
+			if strings.EqualFold(strings.TrimSpace(w.values.IP6), "inherit") {
+				return "ip6", fmt.Errorf("vnet jails cannot use IPv6 inherit; switch jail type or enter an explicit IPv6 address")
+			}
+		}
+		if value := strings.TrimSpace(w.values.DefaultRouter); value != "" {
+			if _, err := netip.ParseAddr(value); err != nil {
+				return "default_router", fmt.Errorf("default router must be a valid IPv4 or IPv6 address")
+			}
+		}
+		if _, err := parseStartupOrderValue(w.values.StartupOrder); err != nil {
+			return "startup_order", err
+		}
+		dependencies, err := parseJailDependencyNames(w.values.Dependencies, w.values.Name)
 		if err != nil {
-			return "interface", err
+			return "dependencies", err
 		}
-		w.values.Interface = iface
-		if strings.TrimSpace(w.values.Interface) == "" {
-			return "interface", fmt.Errorf("interface is required")
+		w.values.Dependencies = strings.Join(dependencies, " ")
+		if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
+			cpu, err := strconv.Atoi(value)
+			if err != nil || cpu <= 0 || cpu > 100 {
+				return "cpu_percent", fmt.Errorf("CPU %% must be between 1 and 100")
+			}
 		}
-	}
-	if strings.TrimSpace(w.values.IP4) == "" {
-		return "ip4", fmt.Errorf("IPv4 is required")
-	}
-	if err := validateJailIPValue(strings.TrimSpace(w.values.IP4), true, "IPv4", jailType != "vnet"); err != nil {
-		return "ip4", err
-	}
-	if err := validateJailIPValue(strings.TrimSpace(w.values.IP6), false, "IPv6", jailType != "vnet"); err != nil {
-		return "ip6", err
-	}
-	if jailType == "vnet" {
-		if strings.EqualFold(strings.TrimSpace(w.values.IP4), "inherit") {
-			return "ip4", fmt.Errorf("vnet jails cannot use IPv4 inherit; switch jail type or enter an explicit IPv4 address")
+		if value := strings.TrimSpace(w.values.MemoryLimit); value != "" {
+			if !memoryLimitPattern.MatchString(strings.ToUpper(value)) {
+				return "memory_limit", fmt.Errorf("memory must look like 512M or 2G")
+			}
 		}
-		if strings.EqualFold(strings.TrimSpace(w.values.IP6), "inherit") {
-			return "ip6", fmt.Errorf("vnet jails cannot use IPv6 inherit; switch jail type or enter an explicit IPv6 address")
+		if value := strings.TrimSpace(w.values.ProcessLimit); value != "" {
+			procs, err := strconv.Atoi(value)
+			if err != nil || procs <= 0 {
+				return "process_limit", fmt.Errorf("max processes must be a positive integer")
+			}
 		}
-	}
-	if value := strings.TrimSpace(w.values.DefaultRouter); value != "" {
-		if _, err := netip.ParseAddr(value); err != nil {
-			return "default_router", fmt.Errorf("default router must be a valid IPv4 or IPv6 address")
+		if err := validateMountPointInput(w.values.MountPoints); err != nil {
+			return "mount_points", err
 		}
-	}
-	if _, err := parseStartupOrderValue(w.values.StartupOrder); err != nil {
-		return "startup_order", err
-	}
-	dependencies, err := parseJailDependencyNames(w.values.Dependencies, w.values.Name)
-	if err != nil {
-		return "dependencies", err
-	}
-	w.values.Dependencies = strings.Join(dependencies, " ")
-	if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
-		cpu, err := strconv.Atoi(value)
-		if err != nil || cpu <= 0 || cpu > 100 {
-			return "cpu_percent", fmt.Errorf("CPU %% must be between 1 and 100")
+		w.refreshNetworkPrereqs()
+		if err := w.networkPrereqs.blockingError(); err != nil {
+			return blockingPrereqFieldID(w.values), err
 		}
 	}
-	if value := strings.TrimSpace(w.values.MemoryLimit); value != "" {
-		if !memoryLimitPattern.MatchString(strings.ToUpper(value)) {
-			return "memory_limit", fmt.Errorf("memory must look like 512M or 2G")
-		}
-	}
-	if value := strings.TrimSpace(w.values.ProcessLimit); value != "" {
-		procs, err := strconv.Atoi(value)
-		if err != nil || procs <= 0 {
-			return "process_limit", fmt.Errorf("max processes must be a positive integer")
-		}
-	}
-	if err := validateMountPointInput(w.values.MountPoints); err != nil {
-		return "mount_points", err
-	}
-	w.refreshNetworkPrereqs()
-	if err := w.networkPrereqs.blockingError(); err != nil {
-		return blockingPrereqFieldID(w.values), err
-	}
-	if jailType == "linux" {
+	if (w.currentStepHasField("linux_distro") || w.currentStepHasField("linux_release") || w.currentStepHasField("linux_bootstrap") || w.currentStepHasField("linux_mirror_mode") || w.currentStepHasField("linux_mirror_url")) && jailType == "linux" {
 		distro := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
 		switch distro {
 		case "", "ubuntu", "debian":
