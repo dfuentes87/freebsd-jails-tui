@@ -57,19 +57,20 @@ type templateDatasetOption struct {
 
 var wizardBaseSteps = []wizardStep{
 	{
-		Title:       "0. Jail Type",
-		Description: "Select the jail type to create.",
+		Title:       "1. Basics",
+		Description: "Set the jail type, identity, and root filesystem source.",
 		Fields: []wizardField{
 			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux"},
+			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
+			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
+			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Full jail root path"},
+			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL"},
 		},
 	},
 	{
-		Title:       "1-5. Configuration",
-		Description: "Fill in name, destination, release/template, networking, limits, and mounts on this page.",
+		Title:       "2. Networking & Limits",
+		Description: "Configure networking, startup behavior, limits, and optional mounts.",
 		Fields: []wizardField{
-			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
-			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Full jail root path"},
-			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL"},
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Used by thick, thin, and linux"},
 			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
 			{ID: "bridge_policy", Label: "Bridge policy", Placeholder: "auto-create", Help: "Options: auto-create or require-existing"},
@@ -77,7 +78,6 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "default_router", Label: "Default router", Placeholder: "192.168.1.1", Help: "Optional"},
-			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
 			{ID: "startup_order", Label: "Startup order", Placeholder: "append", Help: "Optional jail_list position"},
 			{ID: "dependencies", Label: "Dependencies", Placeholder: "db01 cache01", Help: "Optional jail names"},
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
@@ -87,7 +87,7 @@ var wizardBaseSteps = []wizardStep{
 		},
 	},
 	{
-		Title:       "6. Linux Bootstrap",
+		Title:       "3. Linux Bootstrap",
 		Description: "Choose the Linux distro and release to bootstrap inside /compat when creating a linux jail.",
 		Fields: []wizardField{
 			{ID: "linux_distro", Label: "Linux distro", Placeholder: "ubuntu", Help: "Supported: ubuntu or debian"},
@@ -98,7 +98,7 @@ var wizardBaseSteps = []wizardStep{
 		},
 	},
 	{
-		Title:       "7. Confirmation",
+		Title:       "4. Confirmation",
 		Description: "Review the generated jail.conf and creation plan.",
 	},
 }
@@ -1664,21 +1664,21 @@ func vnetEpairName(name string) string {
 func wizardSectionForField(id string) string {
 	switch id {
 	case "jail_type":
-		return "0. Jail Type"
+		return "Type"
 	case "name", "hostname":
-		return "1. Identity"
+		return "Identity"
 	case "dataset", "template_release":
-		return "2. Root filesystem"
+		return "Root filesystem"
 	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router":
-		return "3. Networking"
+		return "Networking"
 	case "startup_order", "dependencies":
-		return "4. Startup"
+		return "Startup"
 	case "cpu_percent", "memory_limit", "process_limit":
-		return "5. Resource limits"
+		return "Resource limits"
 	case "mount_points":
-		return "6. Mount points"
+		return "Mount points"
 	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
-		return "7. Linux bootstrap"
+		return "Linux bootstrap"
 	default:
 		return ""
 	}

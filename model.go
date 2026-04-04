@@ -2368,6 +2368,9 @@ func (m model) wizardLines(width int) []string {
 		}
 		lines = append(lines, line)
 		if idx == m.wizard.field && field.Help != "" {
+			if field.ID == "template_release" {
+				lines = append(lines, "")
+			}
 			lines = append(lines, truncate("  "+field.Help, width))
 		}
 		if idx == m.wizard.field && field.ID == "template_release" {
@@ -2496,7 +2499,7 @@ func (m model) detailLines(width int) []string {
 			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.JailConfValues[key]})...)
 		}
 		for _, flag := range m.detail.JailConfFlags {
-			lines = append(lines, truncate(flag, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{flag, "enabled"})...)
 		}
 	}
 
@@ -2509,7 +2512,7 @@ func (m model) detailLines(width int) []string {
 				[2]string{"jail_list position", fmt.Sprintf("%d of %d", m.detail.StartupConfig.Position, len(m.detail.StartupConfig.JailList))},
 			)...)
 		} else if len(m.detail.StartupConfig.JailList) == 0 {
-			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "empty (all configured jails start unless depend changes the order)"})...)
+			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "empty"})...)
 		} else {
 			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "not present (manual start required when jail_list is used)"})...)
 		}
@@ -2552,7 +2555,7 @@ func (m model) detailLines(width int) []string {
 					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 					continue
 				}
-				lines = append(lines, truncate(line, width))
+				lines = append(lines, renderInformationalKeyValue(width, line)...)
 			}
 		}
 	}
@@ -3238,6 +3241,19 @@ func renderKeyValue(width, labelWidth int, label, value string) []string {
 		lines = append(lines, continuation+" "+part)
 	}
 	return lines
+}
+
+func renderInformationalKeyValue(width int, line string) []string {
+	left, right, ok := strings.Cut(strings.TrimSpace(line), ":")
+	if !ok {
+		return []string{truncate(line, width)}
+	}
+	label := strings.TrimSpace(left)
+	value := strings.TrimSpace(right)
+	if label == "" || value == "" {
+		return []string{truncate(line, width)}
+	}
+	return renderKeyValueLines(width, [2]string{label, value})
 }
 
 func valueOrDash(value string) string {
