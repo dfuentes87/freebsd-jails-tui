@@ -3834,9 +3834,9 @@ func appendRenderedSection(lines *[]string, title string, body []string) {
 }
 
 func renderKeyValueLines(width int, pairs ...[2]string) []string {
-	labelWidth := 18
-	if width < 48 {
-		labelWidth = 14
+	labelWidth := 25
+	if width < 72 {
+		labelWidth = 20
 	}
 	return renderKeyValueLinesWithLabelWidth(width, labelWidth, pairs...)
 }
@@ -3873,9 +3873,9 @@ func renderKeyValue(width, labelWidth int, label, value string) []string {
 }
 
 func renderInformationalKeyValue(width int, line string) []string {
-	labelWidth := 18
-	if width < 48 {
-		labelWidth = 14
+	labelWidth := 25
+	if width < 72 {
+		labelWidth = 20
 	}
 	return renderInformationalKeyValueWithLabelWidth(width, labelWidth, line)
 }
