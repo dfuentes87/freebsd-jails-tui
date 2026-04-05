@@ -82,6 +82,9 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 			return fail(fmt.Errorf("failed to destroy dataset %q: %w", plan.ZFSDataset, err))
 		}
 	} else if plan.JailPath != "" {
+		if err := clearDestroyPathFlags(plan.JailPath, &logs); err != nil {
+			return fail(err)
+		}
 		logs = append(logs, "$ rm -rf "+plan.JailPath)
 		if err := os.RemoveAll(plan.JailPath); err != nil {
 			return fail(fmt.Errorf("failed to remove jail path %q: %w", plan.JailPath, err))
@@ -278,6 +281,23 @@ func preflightDestroyPlan(plan jailDestroyPlan) error {
 	return nil
 }
 
+func clearDestroyPathFlags(path string, logs *[]string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to inspect jail path %q before clearing file flags: %w", path, err)
+	}
+	if _, err := runLoggedCommand(logs, "chflags", "-R", "0", path); err != nil {
+		return fmt.Errorf("failed to clear file flags under %q: %w", path, err)
+	}
+	return nil
+}
+
 func removeJailRctlRules(name string, logs *[]string) {
 	if _, err := runLoggedCommand(logs, "rctl", "-r", "jail:"+name); err != nil {
 		*logs = append(*logs, "warning: unable to remove rctl rules: "+err.Error())
@@ -309,7 +329,7 @@ func buildDestroyPreview(target Jail) []string {
 		"1. Stop the jail if it is currently running.",
 		"2. Remove jail-specific rctl rules if present.",
 		"3. Destroy the ZFS dataset recursively only when the jail path matches a dataset mountpoint exactly.",
-		"4. Otherwise remove only the jail root path recursively.",
+		"4. Otherwise clear file flags with chflags -R 0 before removing the jail root path recursively.",
 		"5. Remove /etc/jail.conf.d/<name>.conf and /etc/fstab.<name> when present.",
 		"",
 		fmt.Sprintf("Selected jail: %s", target.Name),
@@ -324,9 +344,15 @@ func buildDestroyPreview(target Jail) []string {
 			lines = append(lines, fmt.Sprintf("Fallback path removal: blocked (%s)", err.Error()))
 		} else {
 			lines = append(lines, "Fallback path removal: allowed for dedicated jail leaf path")
+			if strings.TrimSpace(plan.JailPath) != "" {
+				lines = append(lines, fmt.Sprintf("Pre-step before rm -rf: chflags -R 0 %s", plan.JailPath))
+			}
 		}
 	} else {
 		lines = append(lines, "Matched ZFS dataset: none")
+		if strings.TrimSpace(plan.JailPath) != "" {
+			lines = append(lines, fmt.Sprintf("Pre-step before rm -rf: chflags -R 0 %s", plan.JailPath))
+		}
 	}
 	if strings.TrimSpace(target.Hostname) != "" {
 		lines = append(lines, fmt.Sprintf("Current hostname: %s", target.Hostname))
