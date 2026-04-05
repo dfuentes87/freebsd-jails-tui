@@ -65,21 +65,6 @@ User-specific TUI state is stored under the app config directory:
 - `$XDG_CONFIG_HOME/freebsd-jails-tui`
 - or `~/.config/freebsd-jails-tui`
 
-## Documentation
-
-The README is intentionally brief.
-
-Detailed documentation such as:
-
-- screen-by-screen workflows
-- key bindings
-- jail type behavior
-- VNET and Linux notes
-- template manager lifecycle details
-- operational caveats and recovery procedures
-
-should live in the GitHub repository wiki.
-
 ## License
 
 BSD 2-Clause
