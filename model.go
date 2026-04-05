@@ -2167,6 +2167,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if preview.Mountpoint != "" {
 			lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
 		}
+		lines = append(lines, truncate("Readonly after create: yes", width))
 		if preview.SourceKind != "" {
 			lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
 		}
@@ -2192,12 +2193,17 @@ func (m model) templateManagerDetailLines(width int) []string {
 		} else {
 			lines = append(lines, truncate("Current dataset: "+current.Name, width))
 			lines = append(lines, truncate("Current mountpoint: "+current.Mountpoint, width))
+			lines = append(lines, truncate("Current readonly: "+yesNoText(current.Readonly), width))
 			lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.renameInput, filepath.Base(current.Name)), width)))
 			if preview.NewDataset != "" {
 				lines = append(lines, truncate("Renamed dataset: "+preview.NewDataset, width))
 			}
 			if preview.NewMountpoint != "" {
 				lines = append(lines, truncate("New mountpoint: "+preview.NewMountpoint, width))
+			}
+			lines = append(lines, truncate("Readonly after rename: "+yesNoText(preview.ReadonlyPreserved), width))
+			if !current.Readonly {
+				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: current template dataset is writable; handbook-style templates should be readonly.", width)))
 			}
 			if len(preview.UpdatedWizardTemplates) > 0 {
 				lines = append(lines, truncate("Saved wizard templates updated on rename: "+strings.Join(preview.UpdatedWizardTemplates, ", "), width))
@@ -2217,10 +2223,14 @@ func (m model) templateManagerDetailLines(width int) []string {
 		} else {
 			lines = append(lines, truncate("Dataset: "+current.Name, width))
 			lines = append(lines, truncate("Mountpoint: "+current.Mountpoint, width))
+			lines = append(lines, truncate("Readonly: "+yesNoText(preview.Readonly), width))
 			lines = append(lines, truncate("Destroy scope: zfs destroy -r "+preview.DestroyScope, width))
 			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", current.SnapshotCount), width))
 			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(current.CloneDependents)), width))
 			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(preview.ReferencedTemplates)), width))
+			if !preview.Readonly {
+				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: this template dataset is writable; handbook-style templates should be readonly.", width)))
+			}
 			if len(current.CloneDependents) > 0 {
 				lines = append(lines, truncate("Dependents: "+strings.Join(current.CloneDependents, ", "), width))
 			}
@@ -2271,6 +2281,9 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if preview.NewMountpoint != "" {
 			lines = append(lines, truncate("Clone mountpoint: "+preview.NewMountpoint, width))
 		}
+		if preview.NewDataset != "" {
+			lines = append(lines, truncate("Readonly after clone: "+yesNoText(preview.ReadonlyAfter), width))
+		}
 		if preview.Err != nil {
 			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
 				lines = append(lines, wizardErrorStyle.Render(line))
@@ -2284,6 +2297,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 		} else {
 			lines = append(lines, truncate("Dataset: "+item.Name, width))
 			lines = append(lines, truncate("Mountpoint: "+item.Mountpoint, width))
+			lines = append(lines, truncate("Readonly: "+yesNoText(item.Readonly), width))
 			lines = append(lines, truncate("Used: "+item.Used+"  Avail: "+item.Avail, width))
 			lines = append(lines, truncate("Refer: "+item.Refer+"  Compression: "+item.Compression, width))
 			lines = append(lines, truncate("Quota: "+valueOrDash(item.Quota)+"  Reservation: "+valueOrDash(item.Reservation), width))
@@ -2299,7 +2313,11 @@ func (m model) templateManagerDetailLines(width int) []string {
 			lines = append(lines, truncate("Destroy allowed: "+yesNoText(item.DestroyAllowed), width))
 			if len(item.SafetyIssues) > 0 {
 				for _, issue := range item.SafetyIssues {
-					lines = append(lines, wizardErrorStyle.Render(truncate("Issue: "+issue, width)))
+					prefix := "Issue: "
+					if strings.Contains(strings.ToLower(issue), "writable") {
+						prefix = "Warning: "
+					}
+					lines = append(lines, wizardErrorStyle.Render(truncate(prefix+issue, width)))
 				}
 			}
 			if len(item.CloneDependents) > 0 {

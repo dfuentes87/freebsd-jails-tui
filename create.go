@@ -803,6 +803,9 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 			return fail(fmt.Errorf("failed to extract template archive into %q: %w", result.Dataset, err))
 		}
 	}
+	if err := finalizeTemplateDatasetReadonly(result.Dataset, &logs); err != nil {
+		return fail(err)
+	}
 
 	success = true
 	result.Logs = logs
@@ -1448,6 +1451,17 @@ func runLoggedCommand(logs *[]string, name string, args ...string) (string, erro
 		return text, fmt.Errorf("%s: %w", command, err)
 	}
 	return text, nil
+}
+
+func finalizeTemplateDatasetReadonly(dataset string, logs *[]string) error {
+	dataset = strings.TrimSpace(dataset)
+	if dataset == "" {
+		return fmt.Errorf("template dataset is required")
+	}
+	if _, err := runLoggedCommand(logs, "zfs", "set", "readonly=on", dataset); err != nil {
+		return fmt.Errorf("failed to finalize template dataset %q as readonly: %w", dataset, err)
+	}
+	return nil
 }
 
 func zfsDatasetExists(dataset string) bool {

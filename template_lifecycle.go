@@ -16,6 +16,7 @@ type TemplateDatasetInfo struct {
 	Mountpoint         string
 	ParentDataset      string
 	ParentMountpoint   string
+	Readonly           bool
 	Used               string
 	Avail              string
 	Refer              string
@@ -38,6 +39,7 @@ type TemplateDatasetRenamePreview struct {
 	NewName                string
 	NewDataset             string
 	NewMountpoint          string
+	ReadonlyPreserved      bool
 	UpdatedWizardTemplates []string
 	Err                    error
 }
@@ -54,6 +56,7 @@ type TemplateDatasetDestroyPreview struct {
 	Current             TemplateDatasetInfo
 	ReferencedTemplates []string
 	DestroyScope        string
+	Readonly            bool
 	Err                 error
 }
 
@@ -66,6 +69,7 @@ type TemplateDatasetDestroyResult struct {
 type zfsFilesystemRow struct {
 	Name        string
 	Mountpoint  string
+	Readonly    string
 	Used        string
 	Avail       string
 	Refer       string
@@ -104,6 +108,7 @@ func ListTemplateDatasets(parentOverride *templateDatasetParent) ([]TemplateData
 			Mountpoint:       row.Mountpoint,
 			ParentDataset:    parent.Name,
 			ParentMountpoint: parent.Mountpoint,
+			Readonly:         strings.EqualFold(row.Readonly, "on"),
 			Used:             row.Used,
 			Avail:            row.Avail,
 			Refer:            row.Refer,
@@ -155,6 +160,7 @@ func InspectTemplateDatasetRename(dataset, newName string, parentOverride *templ
 		return preview
 	}
 	preview.Current = info
+	preview.ReadonlyPreserved = info.Readonly
 	preview.UpdatedWizardTemplates = append(preview.UpdatedWizardTemplates, info.WizardTemplateRefs...)
 	if !info.RenameAllowed {
 		preview.Err = fmt.Errorf("template dataset %q cannot be renamed: %s", info.Name, strings.Join(info.SafetyIssues, "; "))
@@ -246,6 +252,7 @@ func InspectTemplateDatasetDestroy(dataset string, parentOverride *templateDatas
 		return preview
 	}
 	preview.Current = info
+	preview.Readonly = info.Readonly
 	preview.ReferencedTemplates = append(preview.ReferencedTemplates, info.WizardTemplateRefs...)
 	preview.DestroyScope = info.Name
 	if !info.DestroyAllowed {
@@ -281,7 +288,7 @@ func listZFSFilesystems() ([]zfsFilesystemRow, error) {
 		"list",
 		"-H",
 		"-o",
-		"name,mountpoint,used,avail,refer,compression,quota,reservation,origin",
+		"name,mountpoint,readonly,used,avail,refer,compression,quota,reservation,origin",
 		"-t",
 		"filesystem",
 	).CombinedOutput()
@@ -296,22 +303,23 @@ func listZFSFilesystems() ([]zfsFilesystemRow, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) < 9 {
+		if len(fields) < 10 {
 			fields = strings.Fields(line)
 		}
-		if len(fields) < 9 {
+		if len(fields) < 10 {
 			continue
 		}
 		row := zfsFilesystemRow{
 			Name:        strings.TrimSpace(fields[0]),
 			Mountpoint:  strings.TrimSpace(fields[1]),
-			Used:        strings.TrimSpace(fields[2]),
-			Avail:       strings.TrimSpace(fields[3]),
-			Refer:       strings.TrimSpace(fields[4]),
-			Compression: strings.TrimSpace(fields[5]),
-			Quota:       strings.TrimSpace(fields[6]),
-			Reservation: strings.TrimSpace(fields[7]),
-			Origin:      strings.TrimSpace(fields[8]),
+			Readonly:    strings.TrimSpace(fields[2]),
+			Used:        strings.TrimSpace(fields[3]),
+			Avail:       strings.TrimSpace(fields[4]),
+			Refer:       strings.TrimSpace(fields[5]),
+			Compression: strings.TrimSpace(fields[6]),
+			Quota:       strings.TrimSpace(fields[7]),
+			Reservation: strings.TrimSpace(fields[8]),
+			Origin:      strings.TrimSpace(fields[9]),
 		}
 		if row.Name == "" || row.Mountpoint == "" || row.Mountpoint == "-" || row.Mountpoint == "legacy" {
 			continue
@@ -409,5 +417,8 @@ func applyTemplateDatasetSafety(item *TemplateDatasetInfo) {
 		issues = append(issues, fmt.Sprintf("referenced by %d saved wizard templates", len(item.WizardTemplateRefs)))
 	}
 	item.DestroyAllowed = len(issues) == 0
+	if !item.Readonly {
+		issues = append(issues, "template dataset is writable; handbook-style templates should be readonly")
+	}
 	item.SafetyIssues = issues
 }
