@@ -468,7 +468,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
 			if len(msg.result.Warnings) > 0 {
-				m.notice = fmt.Sprintf("Jail %s created and started with warnings: %s", msg.result.Name, msg.result.Warnings[0])
+				m.notice = fmt.Sprintf("Jail %s created and started with warnings: %s", msg.result.Name, summarizeCreationWarning(msg.result.Warnings[0]))
 			} else {
 				m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
 			}
@@ -3062,7 +3062,7 @@ func (m model) detailLines(width int) []string {
 		lines = append(lines, truncate("No matching jail block found.", width))
 	} else {
 		for _, key := range sortedKeys(m.detail.JailConfValues) {
-			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.JailConfValues[key]})...)
+			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detailDisplayConfigValue(m.detail.JailConfValues[key])})...)
 		}
 		for _, flag := range m.detail.JailConfFlags {
 			lines = append(lines, renderKeyValueLines(width, [2]string{flag, "enabled"})...)
@@ -3304,6 +3304,20 @@ func (m model) detailJail() (Jail, bool) {
 		Hostname: m.detail.Hostname,
 		Running:  m.detail.JID > 0,
 	}, true
+}
+
+func (m model) detailDisplayConfigValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	name := strings.TrimSpace(m.detail.Name)
+	if name == "" {
+		return value
+	}
+	value = strings.ReplaceAll(value, "${name}", name)
+	value = strings.ReplaceAll(value, "$name", name)
+	return value
 }
 
 func (m *model) boundDetailScroll() {
@@ -3826,6 +3840,21 @@ func styleWizardMessage(message string) string {
 		return wizardErrorStyle.Render(message)
 	}
 	return summaryStyle.Render(message)
+}
+
+func summarizeCreationWarning(message string) string {
+	trimmed := strings.TrimSpace(message)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "linux bootstrap skipped"):
+		return "linux bootstrap skipped; use detail view action 'b' after networking is ready"
+	case strings.Contains(lower, "linux bootstrap preflight failed"):
+		return "linux bootstrap preflight failed; use detail view action 'b' after fixing networking"
+	case strings.Contains(lower, "failed to bootstrap") || strings.Contains(lower, "failed to install debootstrap"):
+		return "linux bootstrap failed; use detail view action 'b' after fixing package access"
+	default:
+		return trimmed
+	}
 }
 
 func looksLikeWarningText(message string) bool {

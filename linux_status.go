@@ -114,6 +114,10 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 	readiness.IPv4Route = linuxRouteFamilyAvailable(detail.Name, "inet")
 	readiness.IPv6Route = linuxRouteFamilyAvailable(detail.Name, "inet6")
 	if !readiness.IPv4Route && !readiness.IPv6Route {
+		if readiness.PreflightURL != "" && linuxGenericFetchReachable(detail.Name, readiness.PreflightURL) {
+			populateLinuxHealth(readiness, detail, values)
+			return readiness
+		}
 		readiness.RuntimeError = "No IPv4 or IPv6 default route inside the jail."
 		return readiness
 	}
@@ -196,6 +200,13 @@ func linuxFetchReachable(jailName, url, familyFlag string) bool {
 		return false
 	}
 	return exec.Command("jexec", jailName, "fetch", familyFlag, "-qo", "/dev/null", url).Run() == nil
+}
+
+func linuxGenericFetchReachable(jailName, url string) bool {
+	if strings.TrimSpace(url) == "" {
+		return false
+	}
+	return exec.Command("jexec", jailName, "fetch", "-qo", "/dev/null", url).Run() == nil
 }
 
 func errorText(err error) string {

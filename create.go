@@ -603,6 +603,10 @@ func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]s
 	hasIPv4Route := checkLinuxRouteFamily(jailName, "inet", logs)
 	hasIPv6Route := checkLinuxRouteFamily(jailName, "inet6", logs)
 	if !hasIPv4Route && !hasIPv6Route {
+		if err := checkLinuxGenericFetchReachability(mirrorInfo.PreflightURL, jailName, logs); err == nil {
+			*logs = append(*logs, "Linux bootstrap preflight: shared-stack fetch succeeded without an explicit default route probe.")
+			return nil
+		}
 		return fmt.Errorf("linux bootstrap preflight failed: no IPv4 or IPv6 default route inside the jail")
 	}
 	host := mirrorInfo.Host
@@ -661,6 +665,17 @@ func checkLinuxFetchReachability(preflightURL, jailName string, hasIPv4Route, ha
 		failures = append(failures, "no usable IP family available for fetch")
 	}
 	return fmt.Errorf("linux bootstrap preflight failed: could not fetch %s (%s)", preflightURL, strings.Join(failures, ", "))
+}
+
+func checkLinuxGenericFetchReachability(preflightURL, jailName string, logs *[]string) error {
+	if strings.TrimSpace(preflightURL) == "" {
+		return fmt.Errorf("linux bootstrap preflight failed: no preflight URL available")
+	}
+	_, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-qo", "/dev/null", preflightURL)
+	if err != nil {
+		return fmt.Errorf("linux bootstrap preflight failed: generic fetch to %s failed: %w", preflightURL, err)
+	}
+	return nil
 }
 
 func checkLinuxDNSFamilies(jailName, host string, logs *[]string) (bool, bool, error) {
