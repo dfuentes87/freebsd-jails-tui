@@ -343,25 +343,14 @@ func buildDestroyPreview(target Jail) []string {
 		"",
 		fmt.Sprintf("Selected jail: %s", target.Name),
 		fmt.Sprintf("Current JID: %s", valueOrDash(jailJIDText(target))),
-		fmt.Sprintf("Current path: %s", valueOrDash(strings.TrimSpace(target.Path))),
+		fmt.Sprintf("Current path: %s", valueOrDash(strings.TrimSpace(plan.JailPath))),
 	}
 	if plan.ZFSDataset != "" {
 		lines = append(lines, fmt.Sprintf("Matched ZFS dataset: %s (exact)", plan.ZFSDataset))
-	} else if plan.ZFSMatch != "" {
-		lines = append(lines, fmt.Sprintf("Matched ZFS dataset: prefix match only (%s); dataset destroy will be skipped", plan.ZFSMatch))
-		if err := validateFallbackDestroyPlan(plan); err != nil {
-			lines = append(lines, fmt.Sprintf("Fallback path removal: blocked (%s)", err.Error()))
-		} else {
-			lines = append(lines, "Fallback path removal: allowed for dedicated jail leaf path")
-			if strings.TrimSpace(plan.JailPath) != "" {
-				lines = append(lines, fmt.Sprintf("Pre-step before rm -rf: chflags -R 0 %s", plan.JailPath))
-			}
-		}
+	} else if plan.ZFSPrefixDataset != "" {
+		lines = append(lines, fmt.Sprintf("Matched ZFS dataset: %s (prefix match only; dataset destroy will be skipped)", plan.ZFSPrefixDataset))
 	} else {
 		lines = append(lines, "Matched ZFS dataset: none")
-		if strings.TrimSpace(plan.JailPath) != "" {
-			lines = append(lines, fmt.Sprintf("Pre-step before rm -rf: chflags -R 0 %s", plan.JailPath))
-		}
 	}
 	if strings.TrimSpace(target.Hostname) != "" {
 		lines = append(lines, fmt.Sprintf("Current hostname: %s", target.Hostname))
@@ -409,6 +398,18 @@ func buildDestroyTarget(target Jail) Jail {
 	target.Hostname = strings.TrimSpace(target.Hostname)
 	if target.JID > 0 {
 		target.Running = true
+	}
+	if target.Name == "" {
+		return target
+	}
+	plan := buildJailDestroyPlan(target, &[]string{})
+	if target.Path == "" {
+		target.Path = strings.TrimSpace(plan.JailPath)
+	}
+	if target.Hostname == "" {
+		if conf, err := discoverJailConf(target.Name); err == nil {
+			target.Hostname = strings.TrimSpace(conf.Values["host.hostname"])
+		}
 	}
 	return target
 }

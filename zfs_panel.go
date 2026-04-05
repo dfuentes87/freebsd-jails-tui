@@ -663,7 +663,7 @@ func (m model) renderZFSPanelView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) zfsPanelLines(width, height int) []string {

@@ -1675,7 +1675,7 @@ func (m model) renderHelpView() string {
 		Render(strings.Join(lines[offset:end], "\n"))
 
 	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) helpLines(width int) []string {
@@ -1828,7 +1828,7 @@ func (m model) renderDashboard() string {
 	listPanel := m.renderJailList(leftWidth, bodyHeight)
 	if rightWidth == 0 {
 		footer := m.renderFooter()
-		return lipgloss.JoinVertical(lipgloss.Left, header, listPanel, footer)
+		return lipgloss.JoinVertical(lipgloss.Left, header, "", listPanel, footer)
 	}
 
 	detailPanel := m.renderDetailPanel(rightWidth, bodyHeight)
@@ -1839,7 +1839,7 @@ func (m model) renderDashboard() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
 	footer := m.renderFooter()
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) renderJailDetailView() string {
@@ -1893,7 +1893,7 @@ func (m model) renderJailDetailView() string {
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) renderWizardView() string {
@@ -1934,7 +1934,7 @@ func (m model) renderWizardView() string {
 			Render(strings.Join(lines[offset:end], "\n"))
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) wizardFooterHint() string {
@@ -2093,7 +2093,7 @@ func (m model) renderTemplateDatasetCreateView() string {
 	}
 	footer := m.renderFooterWithMessage(hint, m.templateCreate.message, footerStyle)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) templateManagerListLines(width, height int) []string {

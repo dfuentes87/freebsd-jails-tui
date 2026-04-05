@@ -884,7 +884,7 @@ func (m model) renderInitialCheckView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(m.initialCheckFooterHint(), message, footerRenderer)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) initialCheckLines(width int) []string {
