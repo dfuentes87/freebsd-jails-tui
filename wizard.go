@@ -1226,7 +1226,7 @@ func (w jailCreationWizard) commandPlanLines() []string {
 	if strings.TrimSpace(w.values.CPUPercent) != "" ||
 		strings.TrimSpace(w.values.MemoryLimit) != "" ||
 		strings.TrimSpace(w.values.ProcessLimit) != "" {
-		addStep("Apply rctl limits:")
+		addStep("Write managed jail limits to /etc/rctl.conf and apply them immediately:")
 		if strings.TrimSpace(w.values.CPUPercent) != "" {
 			addDetail(fmt.Sprintf("   rctl -a jail:%s:pcpu:deny=%s", w.values.Name, w.values.CPUPercent))
 		}
@@ -1390,6 +1390,11 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 		lines = append(lines, fmt.Sprintf("  interface = %q;", strings.TrimSpace(values.Interface)))
 		appendJailIPConfig(&lines, "ip4", strings.TrimSpace(values.IP4))
 		appendJailIPConfig(&lines, "ip6", strings.TrimSpace(values.IP6))
+	}
+	if hasAnyRctlLimits(values) {
+		lines = append(lines,
+			fmt.Sprintf("  # freebsd-jails-tui: rctl_mode=persistent cpu_percent=%s memory_limit=%s process_limit=%s;", metadataDashValue(values.CPUPercent), metadataDashValue(values.MemoryLimit), metadataDashValue(values.ProcessLimit)),
+		)
 	}
 
 	if strings.TrimSpace(values.DefaultRouter) != "" {
@@ -1678,6 +1683,14 @@ func linuxMirrorMetadataValue(values jailWizardValues) string {
 		return strings.TrimSpace(values.LinuxMirrorURL)
 	}
 	return info.BaseURL
+}
+
+func metadataDashValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func freeBSDPatchSummary(sourceInput, preference string) string {

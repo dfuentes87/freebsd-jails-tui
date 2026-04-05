@@ -3214,8 +3214,33 @@ func (m model) detailLines(width int) []string {
 	}
 
 	appendSection(&lines, width, "rctl")
+	if m.detail.RctlConfig != nil {
+		lines = append(lines, renderKeyValueLines(width,
+			[2]string{"Limit mode", valueOrDash(m.detail.RctlConfig.Mode)},
+			[2]string{"Configured CPU %", valueOrDash(m.detail.RctlConfig.CPUPercent)},
+			[2]string{"Configured memory", valueOrDash(m.detail.RctlConfig.MemoryLimit)},
+			[2]string{"Configured max processes", valueOrDash(m.detail.RctlConfig.ProcessLimit)},
+			[2]string{"Persistent block in /etc/rctl.conf", yesNoText(m.detail.RctlConfig.Persistent)},
+		)...)
+		if m.detail.RctlConfig.PersistentErr != "" {
+			lines = append(lines, wizardErrorStyle.Render(truncate("rctl.conf check: "+m.detail.RctlConfig.PersistentErr, width)))
+		}
+	}
+	if m.detail.RacctStatus != nil {
+		lines = append(lines, renderKeyValueLines(width,
+			[2]string{"kern.racct.enable", valueOrDash(m.detail.RacctStatus.EffectiveValue)},
+			[2]string{"loader.conf configured", yesNoText(m.detail.RacctStatus.LoaderConfigured)},
+		)...)
+		if m.detail.RacctStatus.ReadError != "" {
+			lines = append(lines, wizardErrorStyle.Render(truncate("racct check: "+m.detail.RacctStatus.ReadError, width)))
+		}
+	}
 	if len(m.detail.RctlRules) == 0 {
-		lines = append(lines, truncate("No matching rctl rules.", width))
+		if m.detail.RctlConfig != nil && m.detail.RctlConfig.Mode == "runtime" {
+			lines = append(lines, truncate("No live rctl rules. Runtime-only limits apply only while the jail is running.", width))
+		} else {
+			lines = append(lines, truncate("No matching rctl rules.", width))
+		}
 	} else {
 		for _, rule := range m.detail.RctlRules {
 			lines = append(lines, truncate(rule, width))

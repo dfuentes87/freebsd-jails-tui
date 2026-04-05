@@ -48,6 +48,9 @@ func validateJailCreateHostPreflight(values jailWizardValues) (string, error) {
 	if compatibility.Err != nil {
 		return "template_release", compatibility.Err
 	}
+	if err := validateRacctPreflight(values); err != nil {
+		return "cpu_percent", err
+	}
 	return "", nil
 }
 

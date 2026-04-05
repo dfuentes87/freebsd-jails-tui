@@ -207,6 +207,11 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return fail(err)
 	}
 	addCleanup(startupCleanup)
+	persistentRctlCleanup, err := syncPersistentJailRctlRules(values, result.Name, &logs)
+	if err != nil {
+		return fail(err)
+	}
+	addCleanup(persistentRctlCleanup)
 
 	if _, err := runLoggedCommand(&logs, "service", "jail", "start", result.Name); err != nil {
 		return fail(err)
@@ -1445,6 +1450,9 @@ func writeJailConfigFile(configPath string, lines []string, logs *[]string) erro
 }
 
 func applyRctlLimits(values jailWizardValues, jailName string, logs *[]string) error {
+	if !hasAnyRctlLimits(values) {
+		return nil
+	}
 	if strings.TrimSpace(values.CPUPercent) != "" {
 		if _, err := runLoggedCommand(logs, "rctl", "-a", fmt.Sprintf("jail:%s:pcpu:deny=%s", jailName, strings.TrimSpace(values.CPUPercent))); err != nil {
 			return fmt.Errorf("failed to apply CPU rctl limit: %w", err)
