@@ -710,6 +710,9 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		if err := validateTemplateReleaseInput(w.values); err != nil {
 			return "template_release", err
 		}
+		if compatibility := collectJailBaseCompatibility(w.values); compatibility.Err != nil {
+			return "template_release", compatibility.Err
+		}
 	}
 	if w.currentStepHasField("name") && hasConflictingJailConfig(w.values.Name) {
 		return "name", fmt.Errorf("config already exists: %s", jailConfigPathForName(w.values.Name))
@@ -999,6 +1002,9 @@ func (w jailCreationWizard) validateAllDetailed() (int, string, error) {
 			return idx, fieldID, err
 		}
 	}
+	if fieldID, err := validateJailCreateHostPreflight(w.values); err != nil {
+		return len(steps) - 1, fieldID, err
+	}
 	return -1, "", nil
 }
 
@@ -1017,17 +1023,24 @@ func (w *jailCreationWizard) clearValidationIfFieldMatches(fieldID string) {
 }
 
 func (w *jailCreationWizard) applyValidationError(fieldID string, err error) {
-	w.message = ""
 	if err == nil {
+		w.message = ""
 		w.clearValidationError()
 		return
 	}
 	fieldID = strings.TrimSpace(fieldID)
+	if fieldID == "" {
+		w.validationField = ""
+		w.validationError = ""
+		w.message = err.Error()
+		return
+	}
 	if fieldID != "" {
 		w.focusField(fieldID)
 	}
 	w.validationField = fieldID
 	w.validationError = err.Error()
+	w.message = ""
 }
 
 func (w *jailCreationWizard) focusField(fieldID string) {

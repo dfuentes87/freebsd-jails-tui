@@ -2664,7 +2664,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 			Format:  "Absolute path only. Shared roots like /usr/local/jails/containers are not valid jail roots by themselves.",
 			Examples: []string{
 				"/usr/local/jails/containers/web01",
-				"/usr/local/jails/thick/db01",
+				"/usr/local/jails/containers/db01",
 			},
 		}
 	case "template_release":

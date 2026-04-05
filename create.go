@@ -104,6 +104,12 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	if result.Name == "" {
 		return fail(fmt.Errorf("jail name is required"))
 	}
+	if _, err := validateJailCreateHostPreflight(values); err != nil {
+		return fail(err)
+	}
+	if compatibility := collectJailBaseCompatibility(values); strings.TrimSpace(compatibility.Warning) != "" {
+		logf("warning: %s", compatibility.Warning)
+	}
 	for _, existing := range discoverConfiguredJails() {
 		if existing == result.Name {
 			return fail(fmt.Errorf("jail %q already exists in discovered config", result.Name))
