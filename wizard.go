@@ -69,6 +69,7 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Used by thick, thin, and linux"},
 			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
 			{ID: "bridge_policy", Label: "Bridge policy", Placeholder: "auto-create", Help: "Options: auto-create or require-existing"},
+			{ID: "vnet_host_setup", Label: "Host setup", Placeholder: "runtime", Help: "runtime or persistent"},
 			{ID: "uplink", Label: "Uplink", Placeholder: "em0", Help: "Optional host uplink"},
 			{ID: "ip4", Label: "IPv4", Placeholder: "192.168.1.20/24", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
 			{ID: "ip6", Label: "IPv6", Placeholder: "2001:db8::10/64", Help: "CIDR or 'inherit' (inherit only for non-vnet)"},
@@ -106,6 +107,7 @@ type jailWizardValues struct {
 	Interface       string
 	Bridge          string
 	BridgePolicy    string
+	VNETHostSetup   string
 	Uplink          string
 	IP4             string
 	IP6             string
@@ -542,7 +544,7 @@ func (w jailCreationWizard) visibleFields() []wizardField {
 			if jailType == "thin" {
 				continue
 			}
-		case "bridge", "bridge_policy", "uplink":
+		case "bridge", "bridge_policy", "vnet_host_setup", "uplink":
 			if jailType != "vnet" {
 				continue
 			}
@@ -583,6 +585,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.Bridge
 	case "bridge_policy":
 		return &w.values.BridgePolicy
+	case "vnet_host_setup":
+		return &w.values.VNETHostSetup
 	case "uplink":
 		return &w.values.Uplink
 	case "ip4":
@@ -638,6 +642,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.Bridge
 	case "bridge_policy":
 		return w.values.BridgePolicy
+	case "vnet_host_setup":
+		return w.values.VNETHostSetup
 	case "uplink":
 		return w.values.Uplink
 	case "ip4":
@@ -753,6 +759,12 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 			default:
 				return "bridge_policy", fmt.Errorf("bridge policy must be auto-create or require-existing")
 			}
+			switch effectiveVNETHostSetup(w.values) {
+			case "runtime", "persistent":
+				w.values.VNETHostSetup = effectiveVNETHostSetup(w.values)
+			default:
+				return "vnet_host_setup", fmt.Errorf("host setup must be runtime or persistent")
+			}
 			if strings.TrimSpace(w.values.Uplink) != "" {
 				uplink, err := validateOptionalNetworkInterfaceName(w.values.Uplink, "uplink")
 				if err != nil {
@@ -822,6 +834,9 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		}
 		w.refreshNetworkPrereqs()
 		if err := w.networkPrereqs.blockingError(); err != nil {
+			if len(w.networkPrereqs.RCConfErrors) > 0 {
+				return "vnet_host_setup", err
+			}
 			return blockingPrereqFieldID(w.values), err
 		}
 	}
@@ -1106,6 +1121,7 @@ func (w jailCreationWizard) summaryLines() []string {
 		lines = append(lines,
 			fmt.Sprintf("Bridge: %s", valueOrDash(w.values.Bridge)),
 			fmt.Sprintf("Bridge policy: %s", effectiveBridgePolicy(w.values)),
+			fmt.Sprintf("Host setup: %s", effectiveVNETHostSetup(w.values)),
 			fmt.Sprintf("Uplink: %s", valueOrDash(w.values.Uplink)),
 		)
 	} else {
@@ -1189,6 +1205,22 @@ func (w jailCreationWizard) commandPlanLines() []string {
 	case "vnet":
 		addStep("Ensure VNET host bridge setup is ready:")
 		addDetail(fmt.Sprintf("   # bridge policy: %s", effectiveBridgePolicy(w.values)))
+		addDetail(fmt.Sprintf("   # host setup: %s", effectiveVNETHostSetup(w.values)))
+		if effectiveVNETHostSetup(w.values) == "persistent" {
+			addStep("Persist VNET host networking in rc.conf:")
+			addDetail(fmt.Sprintf("   sysrc cloned_interfaces+=\" %s\"", strings.TrimSpace(w.values.Bridge)))
+			bridgeConfig := "up"
+			if strings.TrimSpace(w.values.Uplink) != "" {
+				bridgeConfig = fmt.Sprintf("addm %s up", strings.TrimSpace(w.values.Uplink))
+			}
+			addDetail(fmt.Sprintf("   sysrc ifconfig_%s=%q", strings.TrimSpace(w.values.Bridge), bridgeConfig))
+			if strings.TrimSpace(w.values.Uplink) != "" {
+				addDetail(fmt.Sprintf("   sysrc ifconfig_%s=up", strings.TrimSpace(w.values.Uplink)))
+			}
+			if strings.TrimSpace(w.values.DefaultRouter) != "" {
+				addDetail(fmt.Sprintf("   sysrc defaultrouter=%s", strings.TrimSpace(w.values.DefaultRouter)))
+			}
+		}
 		if w.networkPrereqs.BridgeCreateNeeded {
 			addDetail(fmt.Sprintf("   ifconfig %s create", strings.TrimSpace(w.values.Bridge)))
 		}
@@ -1374,7 +1406,7 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	switch jailType {
 	case "vnet":
 		lines = append(lines,
-			fmt.Sprintf("  # freebsd-jails-tui: bridge=%s bridge_policy=%s uplink=%s default_router=%s;", strings.TrimSpace(values.Bridge), effectiveBridgePolicy(values), strings.TrimSpace(values.Uplink), strings.TrimSpace(values.DefaultRouter)),
+			fmt.Sprintf("  # freebsd-jails-tui: bridge=%s bridge_policy=%s host_setup=%s uplink=%s default_router=%s;", strings.TrimSpace(values.Bridge), effectiveBridgePolicy(values), effectiveVNETHostSetup(values), strings.TrimSpace(values.Uplink), strings.TrimSpace(values.DefaultRouter)),
 		)
 		lines = append(lines, buildVNETJailConfig(values)...)
 	case "linux":
@@ -1741,6 +1773,15 @@ func linuxCompatRoot(jailPath string, values jailWizardValues) string {
 	return filepath.Join(jailPath, "compat", effectiveLinuxDistro(values))
 }
 
+func effectiveVNETHostSetup(values jailWizardValues) string {
+	switch strings.ToLower(strings.TrimSpace(values.VNETHostSetup)) {
+	case "persistent":
+		return "persistent"
+	default:
+		return "runtime"
+	}
+}
+
 func vnetEpairName(name string) string {
 	hasher := fnv.New32a()
 	_, _ = hasher.Write([]byte(strings.TrimSpace(name)))
@@ -1757,7 +1798,7 @@ func wizardSectionForField(id string) string {
 		return "Root filesystem"
 	case "patch_base":
 		return "Root filesystem"
-	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router":
+	case "interface", "bridge", "bridge_policy", "vnet_host_setup", "uplink", "ip4", "ip6", "default_router":
 		return "Networking"
 	case "startup_order", "dependencies":
 		return "Startup"

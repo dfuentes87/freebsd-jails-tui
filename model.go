@@ -2782,6 +2782,18 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"require-existing to fail unless the named bridge already exists",
 			},
 		}
+	case "vnet_host_setup":
+		return wizardFieldGuide{
+			Purpose: "Choose whether the host bridge/uplink setup is runtime-only or also persisted in rc.conf.",
+			Format:  "runtime or persistent.",
+			Examples: []string{
+				"runtime to prepare the bridge only for the current host session",
+				"persistent to manage rc.conf bridge settings before jail creation",
+			},
+			Notes: []string{
+				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for bridge, uplink, or defaultrouter.",
+			},
+		}
 	case "uplink":
 		return wizardFieldGuide{
 			Purpose: "Optional host interface to attach to the selected bridge.",
@@ -2950,7 +2962,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 
 func wizardFieldUsesNetworkContext(id string) bool {
 	switch id {
-	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router":
+	case "interface", "bridge", "bridge_policy", "vnet_host_setup", "uplink", "ip4", "ip6", "default_router":
 		return true
 	default:
 		return false
@@ -2979,7 +2991,7 @@ func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 func wizardShowsNetworkPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
-		case "interface", "bridge", "uplink", "ip4", "ip6", "default_router":
+		case "interface", "bridge", "vnet_host_setup", "uplink", "ip4", "ip6", "default_router":
 			return true
 		}
 	}
