@@ -1892,12 +1892,12 @@ func (m model) renderWizardView() string {
 		leftPanel := lipgloss.NewStyle().
 			Width(leftWidth).
 			Height(bodyHeight).
-			Padding(0, 1).
+			Padding(1, 1).
 			Render(strings.Join(leftLines[offset:end], "\n"))
 		rightPanel := lipgloss.NewStyle().
 			Width(rightWidth).
 			Height(bodyHeight).
-			Padding(0, 1).
+			Padding(1, 1).
 			Render(strings.Join(m.wizardFieldContextLines(max(12, rightWidth-2)), "\n"))
 		separator := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
@@ -2434,17 +2434,10 @@ func (m model) wizardLines(width int) []string {
 				appendStyledWizardLine(&lines, line, width)
 			}
 		}
-		if normalizedJailType(m.wizard.values.JailType) == "linux" {
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Linux prerequisites"))
-			for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
-				appendStyledWizardLine(&lines, line, width)
-			}
-		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("jail.conf preview"))
 		for _, line := range m.wizard.jailConfPreviewLines() {
-			lines = append(lines, truncate(line, width))
+			appendWrappedLiteralLine(&lines, line, width)
 		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Creation plan"))
@@ -2553,14 +2546,6 @@ func (m model) wizardFieldEntryLayout(width int, inlineHelp bool) ([]string, int
 		}
 	}
 
-	if inlineHelp && normalizedJailType(m.wizard.values.JailType) == "linux" && wizardsShowsLinuxPrereqs(m.wizard.currentStep()) {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
-		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
-			appendStyledWizardLine(&lines, line, width)
-		}
-	}
-
 	return lines, activeLine
 }
 
@@ -2624,13 +2609,6 @@ func (m model) wizardFieldContextLines(width int) []string {
 			appendWrappedStyledWizardLine(&lines, line, width)
 		}
 	}
-	if wizardFieldUsesLinuxContext(field.ID) {
-		appendSection(&lines, width, "Linux prerequisites")
-		for _, line := range linuxWizardContextLines(m.wizard.linuxPrereqs) {
-			appendWrappedStyledWizardLine(&lines, line, width)
-		}
-	}
-
 	return lines
 }
 
@@ -2975,6 +2953,25 @@ func appendWrappedStyledWizardLine(lines *[]string, text string, width int) {
 			continue
 		}
 		*lines = append(*lines, line)
+	}
+}
+
+func appendWrappedLiteralLine(lines *[]string, text string, width int) {
+	if width <= 0 {
+		*lines = append(*lines, "")
+		return
+	}
+	indentLen := len(text) - len(strings.TrimLeft(text, " "))
+	indent := strings.Repeat(" ", indentLen)
+	content := strings.TrimLeft(text, " ")
+	contentWidth := max(8, width-indentLen)
+	wrapped := wrapText(content, contentWidth)
+	if len(wrapped) == 0 {
+		*lines = append(*lines, truncate(text, width))
+		return
+	}
+	for _, line := range wrapped {
+		*lines = append(*lines, truncate(indent+line, width))
 	}
 }
 
