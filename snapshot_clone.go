@@ -13,6 +13,7 @@ type TemplateDatasetSnapshotClonePreview struct {
 	NewName       string
 	NewDataset    string
 	NewMountpoint string
+	ReadonlyAfter bool
 	Err           error
 }
 
@@ -65,6 +66,7 @@ func InspectTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 		return preview
 	}
 	preview.NewName = validatedName
+	preview.ReadonlyAfter = true
 	preview.NewDataset = info.ParentDataset + "/" + preview.NewName
 	preview.NewMountpoint = filepath.Join(info.ParentMountpoint, preview.NewName)
 	if preview.NewDataset, err = validateZFSDatasetName(preview.NewDataset, "template dataset"); err != nil {
@@ -72,6 +74,10 @@ func InspectTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 		return preview
 	}
 	if preview.NewMountpoint, err = validateAbsolutePath(preview.NewMountpoint, "template mountpoint"); err != nil {
+		preview.Err = err
+		return preview
+	}
+	if preview.NewMountpoint, err = validateUnusedMountpointPath(preview.NewMountpoint, "template mountpoint"); err != nil {
 		preview.Err = err
 		return preview
 	}
@@ -101,6 +107,10 @@ func ExecuteTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 	if _, err := runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
 		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.NewDataset)
 		return fail(fmt.Errorf("failed to set mountpoint for %q: %w", preview.NewDataset, err))
+	}
+	if err := finalizeTemplateDatasetReadonly(preview.NewDataset, &logs); err != nil {
+		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.NewDataset)
+		return fail(err)
 	}
 	result.Logs = logs
 	return result

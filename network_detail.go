@@ -29,6 +29,7 @@ func collectJailNetworkSummary(detail JailDetail) *JailNetworkSummary {
 	if jailType == "vnet" {
 		summary.Configured["Bridge"] = valueOrDash(values.Bridge)
 		summary.Configured["Bridge policy"] = valueOrDash(effectiveBridgePolicy(values))
+		summary.Configured["Host setup"] = valueOrDash(effectiveVNETHostSetup(values))
 		summary.Configured["Uplink"] = valueOrDash(values.Uplink)
 	} else {
 		summary.Configured["Interface"] = valueOrDash(values.Interface)
@@ -73,6 +74,7 @@ func detailNetworkWizardValues(detail JailDetail) jailWizardValues {
 	if values.JailType == "vnet" {
 		values.Bridge = firstNonEmpty(metadata["bridge"], parseBridgeFromRaw(detail.JailConfRaw))
 		values.BridgePolicy = firstNonEmpty(metadata["bridge_policy"], "auto-create")
+		values.VNETHostSetup = firstNonEmpty(metadata["host_setup"], "runtime")
 		values.Uplink = firstNonEmpty(metadata["uplink"], parseUplinkFromRaw(detail.JailConfRaw, values.Bridge))
 		values.DefaultRouter = firstNonEmpty(metadata["default_router"], parseDefaultRouterFromRaw(detail.JailConfRaw))
 	} else {

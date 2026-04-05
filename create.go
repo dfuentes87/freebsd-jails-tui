@@ -49,6 +49,10 @@ type TemplateDatasetPreview struct {
 	SourceKind        string
 	ResolvedSource    string
 	Action            string
+	PatchSelected     bool
+	PatchEligible     bool
+	PatchRelease      string
+	PatchNote         string
 	ParentDataset     string
 	ParentMountpoint  string
 	Dataset           string
@@ -104,6 +108,12 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	if result.Name == "" {
 		return fail(fmt.Errorf("jail name is required"))
 	}
+	if _, err := validateJailCreateHostPreflight(values); err != nil {
+		return fail(err)
+	}
+	if compatibility := collectJailBaseCompatibility(values); strings.TrimSpace(compatibility.Warning) != "" {
+		logf("warning: %s", compatibility.Warning)
+	}
 	for _, existing := range discoverConfiguredJails() {
 		if existing == result.Name {
 			return fail(fmt.Errorf("jail %q already exists in discovered config", result.Name))
@@ -154,10 +164,21 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return fail(err)
 	}
 	addCleanup(rootCleanup)
-	if normalizedJailType(values.JailType) == "linux" {
-		if err := ensureLinuxHostReady(&logs); err != nil {
+	patchDecision := resolveFreeBSDPatchDecision(values.TemplateRelease, values.PatchBase)
+	if patchDecision.Err != nil {
+		return fail(patchDecision.Err)
+	}
+	if patchDecision.Effective {
+		if err := patchFreeBSDRoot(jailPath, &logs); err != nil {
 			return fail(err)
 		}
+	}
+	if normalizedJailType(values.JailType) == "linux" {
+		linuxCleanup, err := ensureLinuxHostReady(&logs)
+		if err != nil {
+			return fail(err)
+		}
+		addCleanup(linuxCleanup)
 	}
 
 	mountSpecs := parseMountPointSpecs(values.MountPoints)
@@ -186,6 +207,11 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return fail(err)
 	}
 	addCleanup(startupCleanup)
+	persistentRctlCleanup, err := syncPersistentJailRctlRules(values, result.Name, &logs)
+	if err != nil {
+		return fail(err)
+	}
+	addCleanup(persistentRctlCleanup)
 
 	if _, err := runLoggedCommand(&logs, "service", "jail", "start", result.Name); err != nil {
 		return fail(err)
@@ -474,14 +500,65 @@ func seedGuestBaseFiles(jailPath string, logs *[]string) error {
 	return nil
 }
 
-func ensureLinuxHostReady(logs *[]string) error {
-	if _, err := runLoggedCommand(logs, "sysrc", "linux_enable=YES"); err != nil {
-		return fmt.Errorf("failed to enable linux ABI on host: %w", err)
+func ensureLinuxHostReady(logs *[]string) (func(), error) {
+	if _, err := os.Stat("/etc/rc.d/linux"); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("linux ABI host service script /etc/rc.d/linux is not present")
+		}
+		return nil, fmt.Errorf("failed to inspect linux host service script: %w", err)
 	}
-	if _, err := runLoggedCommand(logs, "service", "linux", "start"); err != nil {
-		return fmt.Errorf("failed to start linux ABI service on host: %w", err)
+
+	previousEnable, err := readRCConfValue("linux_enable")
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect host linux_enable setting: %w", err)
 	}
-	return nil
+	previousEnable = strings.TrimSpace(previousEnable)
+	previouslyEnabled := isEnabledRCValue(previousEnable)
+	previouslyRunning := exec.Command("service", "linux", "onestatus").Run() == nil
+
+	changedEnable := false
+	if !previouslyEnabled {
+		if _, err := runLoggedCommand(logs, "sysrc", "linux_enable=YES"); err != nil {
+			return nil, fmt.Errorf("failed to enable linux ABI on host: %w", err)
+		}
+		changedEnable = true
+	}
+	startedService := false
+	if !previouslyRunning {
+		if _, err := runLoggedCommand(logs, "service", "linux", "start"); err != nil {
+			if changedEnable {
+				if previousEnable == "" {
+					_, _ = runLoggedCommand(logs, "sysrc", "-x", "linux_enable")
+				} else {
+					_, _ = runLoggedCommand(logs, "sysrc", "linux_enable="+previousEnable)
+				}
+			}
+			return nil, fmt.Errorf("failed to start linux ABI service on host: %w", err)
+		}
+		startedService = true
+	}
+
+	if !changedEnable && !startedService {
+		return nil, nil
+	}
+	return func() {
+		if startedService {
+			if _, err := runLoggedCommand(logs, "service", "linux", "stop"); err != nil {
+				*logs = append(*logs, "  rollback warning: failed to stop linux ABI service: "+err.Error())
+			}
+		}
+		if changedEnable {
+			if previousEnable == "" {
+				if _, err := runLoggedCommand(logs, "sysrc", "-x", "linux_enable"); err != nil {
+					*logs = append(*logs, "  rollback warning: failed to clear linux_enable: "+err.Error())
+				}
+			} else {
+				if _, err := runLoggedCommand(logs, "sysrc", "linux_enable="+previousEnable); err != nil {
+					*logs = append(*logs, "  rollback warning: failed to restore linux_enable: "+err.Error())
+				}
+			}
+		}
+	}, nil
 }
 
 func ensureLinuxCompatPaths(jailPath string, values jailWizardValues, logs *[]string) error {
@@ -507,7 +584,11 @@ func bootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]st
 	distro := effectiveLinuxDistro(values)
 	release := effectiveLinuxRelease(values)
 	target := filepath.ToSlash(filepath.Join("/compat", distro))
-	mirror := linuxMirrorURL(values)
+	mirrorInfo, err := resolveLinuxMirror(values)
+	if err != nil {
+		return err
+	}
+	mirror := mirrorInfo.BaseURL
 
 	if jailExecutableExists(jailName, filepath.ToSlash(filepath.Join(target, "bin", "sh"))) {
 		*logs = append(*logs, "Linux userland already present under "+target+"; skipping debootstrap.")
@@ -539,12 +620,20 @@ func maybeBootstrapLinuxUserland(values jailWizardValues, jailName string, logs 
 }
 
 func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]string) error {
+	mirrorInfo, err := resolveLinuxMirror(values)
+	if err != nil {
+		return err
+	}
 	hasIPv4Route := checkLinuxRouteFamily(jailName, "inet", logs)
 	hasIPv6Route := checkLinuxRouteFamily(jailName, "inet6", logs)
 	if !hasIPv4Route && !hasIPv6Route {
+		if err := checkLinuxGenericFetchReachability(mirrorInfo.PreflightURL, jailName, logs); err == nil {
+			*logs = append(*logs, "Linux bootstrap preflight: shared-stack fetch succeeded without an explicit default route probe.")
+			return nil
+		}
 		return fmt.Errorf("linux bootstrap preflight failed: no IPv4 or IPv6 default route inside the jail")
 	}
-	host := linuxMirrorHost(values)
+	host := mirrorInfo.Host
 	if host == "" {
 		return fmt.Errorf("linux bootstrap preflight failed: could not determine mirror host")
 	}
@@ -561,7 +650,7 @@ func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]s
 	if hasIPv6Route && !hasIPv6DNS && !hasIPv4Route {
 		return fmt.Errorf("linux bootstrap preflight failed: DNS returned no IPv6 answers for %s", host)
 	}
-	if err := checkLinuxFetchReachability(values, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
+	if err := checkLinuxFetchReachability(mirrorInfo.PreflightURL, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
 		return err
 	}
 	return nil
@@ -580,8 +669,7 @@ func checkLinuxRouteFamily(jailName, family string, logs *[]string) bool {
 	return err == nil
 }
 
-func checkLinuxFetchReachability(values jailWizardValues, jailName string, hasIPv4Route, hasIPv6Route bool, logs *[]string) error {
-	preflightURL := linuxPreflightURL(values)
+func checkLinuxFetchReachability(preflightURL, jailName string, hasIPv4Route, hasIPv6Route bool, logs *[]string) error {
 	var failures []string
 	if hasIPv4Route {
 		if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-4", "-qo", "/dev/null", preflightURL); err == nil {
@@ -601,6 +689,17 @@ func checkLinuxFetchReachability(values jailWizardValues, jailName string, hasIP
 		failures = append(failures, "no usable IP family available for fetch")
 	}
 	return fmt.Errorf("linux bootstrap preflight failed: could not fetch %s (%s)", preflightURL, strings.Join(failures, ", "))
+}
+
+func checkLinuxGenericFetchReachability(preflightURL, jailName string, logs *[]string) error {
+	if strings.TrimSpace(preflightURL) == "" {
+		return fmt.Errorf("linux bootstrap preflight failed: no preflight URL available")
+	}
+	_, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-qo", "/dev/null", preflightURL)
+	if err != nil {
+		return fmt.Errorf("linux bootstrap preflight failed: generic fetch to %s failed: %w", preflightURL, err)
+	}
+	return nil
 }
 
 func checkLinuxDNSFamilies(jailName, host string, logs *[]string) (bool, bool, error) {
@@ -642,10 +741,10 @@ func hostArch() string {
 }
 
 func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
-	return ExecuteTemplateDatasetCreateWithParent(sourceInput, nil)
+	return ExecuteTemplateDatasetCreateWithParent(sourceInput, nil, "auto")
 }
 
-func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent) TemplateDatasetResult {
+func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetResult {
 	result := TemplateDatasetResult{}
 	logs := make([]string, 0, 24)
 	fail := func(err error) TemplateDatasetResult {
@@ -675,6 +774,10 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 	if cleanup != nil {
 		defer cleanup()
 	}
+	patchDecision := resolveFreeBSDPatchDecision(sourceInput, patchPreference)
+	if patchDecision.Err != nil {
+		return fail(patchDecision.Err)
+	}
 
 	childDataset := parent.Name + "/" + templateName
 	childMountpoint := filepath.Join(parent.Mountpoint, templateName)
@@ -684,6 +787,9 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 	}
 	validatedChildMountpoint, err := validateAbsolutePath(childMountpoint, "template mountpoint")
 	if err != nil {
+		return fail(err)
+	}
+	if validatedChildMountpoint, err = validateUnusedMountpointPath(validatedChildMountpoint, "template mountpoint"); err != nil {
 		return fail(err)
 	}
 	result.Parent = parent.Name
@@ -719,6 +825,14 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 			return fail(fmt.Errorf("failed to extract template archive into %q: %w", result.Dataset, err))
 		}
 	}
+	if patchDecision.Effective {
+		if err := patchFreeBSDRoot(result.Mountpoint, &logs); err != nil {
+			return fail(err)
+		}
+	}
+	if err := finalizeTemplateDatasetReadonly(result.Dataset, &logs); err != nil {
+		return fail(err)
+	}
 
 	success = true
 	result.Logs = logs
@@ -726,12 +840,21 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 }
 
 func InspectTemplateDatasetCreate(sourceInput string) TemplateDatasetPreview {
-	return InspectTemplateDatasetCreateWithParent(sourceInput, nil)
+	return InspectTemplateDatasetCreateWithParent(sourceInput, nil, "auto")
 }
 
-func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent) TemplateDatasetPreview {
+func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetPreview {
 	preview := TemplateDatasetPreview{
 		SourceInput: strings.TrimSpace(sourceInput),
+	}
+	patchDecision := resolveFreeBSDPatchDecision(preview.SourceInput, patchPreference)
+	preview.PatchSelected = patchDecision.Effective
+	preview.PatchEligible = patchDecision.Eligible
+	preview.PatchRelease = patchDecision.ReleaseVersion
+	preview.PatchNote = patchDecision.Note
+	if patchDecision.Err != nil {
+		preview.Err = patchDecision.Err
+		return preview
 	}
 
 	parent, err := resolveTemplateDatasetParent(parentOverride)
@@ -761,6 +884,10 @@ func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		return preview
 	}
 	if preview.Mountpoint, err = validateAbsolutePath(preview.Mountpoint, "template mountpoint"); err != nil {
+		preview.Err = err
+		return preview
+	}
+	if preview.Mountpoint, err = validateUnusedMountpointPath(preview.Mountpoint, "template mountpoint"); err != nil {
 		preview.Err = err
 		return preview
 	}
@@ -845,6 +972,12 @@ func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
 				values.LinuxRelease = strings.TrimSpace(value)
 			case "linux_bootstrap":
 				values.LinuxBootstrap = strings.TrimSpace(value)
+			case "linux_mirror_mode":
+				values.LinuxMirrorMode = strings.TrimSpace(value)
+			case "linux_mirror_url":
+				if strings.TrimSpace(value) != "-" {
+					values.LinuxMirrorURL = strings.TrimSpace(value)
+				}
 			}
 		}
 	}
@@ -1317,6 +1450,9 @@ func writeJailConfigFile(configPath string, lines []string, logs *[]string) erro
 }
 
 func applyRctlLimits(values jailWizardValues, jailName string, logs *[]string) error {
+	if !hasAnyRctlLimits(values) {
+		return nil
+	}
 	if strings.TrimSpace(values.CPUPercent) != "" {
 		if _, err := runLoggedCommand(logs, "rctl", "-a", fmt.Sprintf("jail:%s:pcpu:deny=%s", jailName, strings.TrimSpace(values.CPUPercent))); err != nil {
 			return fmt.Errorf("failed to apply CPU rctl limit: %w", err)
@@ -1354,6 +1490,17 @@ func runLoggedCommand(logs *[]string, name string, args ...string) (string, erro
 		return text, fmt.Errorf("%s: %w", command, err)
 	}
 	return text, nil
+}
+
+func finalizeTemplateDatasetReadonly(dataset string, logs *[]string) error {
+	dataset = strings.TrimSpace(dataset)
+	if dataset == "" {
+		return fmt.Errorf("template dataset is required")
+	}
+	if _, err := runLoggedCommand(logs, "zfs", "set", "readonly=on", dataset); err != nil {
+		return fmt.Errorf("failed to finalize template dataset %q as readonly: %w", dataset, err)
+	}
+	return nil
 }
 
 func zfsDatasetExists(dataset string) bool {

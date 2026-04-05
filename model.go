@@ -117,6 +117,18 @@ type zfsOpenMsg struct {
 	result zfsOpenResult
 }
 
+type zfsPropertyStateMsg struct {
+	properties zfsEditablePropertyState
+	err        error
+}
+
+type zfsPropertyApplyMsg struct {
+	properties zfsEditablePropertyState
+	logs       []string
+	err        error
+	message    string
+}
+
 type tickMsg time.Time
 
 type screenMode int
@@ -179,6 +191,7 @@ type templateDatasetCreateState struct {
 	parentEdit       bool
 	parentField      int
 	parentCustom     bool
+	patchBase        string
 }
 
 type model struct {
@@ -198,6 +211,7 @@ type model struct {
 	detailScroll       int
 	detailShowAdvanced bool
 	detailNotice       string
+	wizardScroll       int
 	zfsPanel           zfsPanelState
 	wizard             jailCreationWizard
 	wizardApplying     bool
@@ -265,9 +279,9 @@ func linuxBootstrapCmd(detail JailDetail) tea.Cmd {
 	}
 }
 
-func templateDatasetCreateCmd(sourceInput string, parentOverride *templateDatasetParent) tea.Cmd {
+func templateDatasetCreateCmd(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteTemplateDatasetCreateWithParent(sourceInput, parentOverride)
+		result := ExecuteTemplateDatasetCreateWithParent(sourceInput, parentOverride, patchPreference)
 		return templateDatasetApplyMsg{result: result}
 	}
 }
@@ -347,6 +361,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.boundDetailScroll()
+		m.boundWizardScroll()
 		m.boundHelpScroll()
 		return m, nil
 	case snapshotMsg:
@@ -402,8 +417,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.zfsPanel.loading = false
 		m.zfsPanel.snapshots = msg.snapshots
 		m.zfsPanel.err = msg.err
-		m.zfsPanel.message = msg.message
+		if msg.err != nil || m.zfsPanel.message == "" || strings.HasPrefix(strings.ToLower(m.zfsPanel.message), "loading") || strings.HasPrefix(strings.ToLower(m.zfsPanel.message), "refreshing") {
+			m.zfsPanel.message = msg.message
+		}
 		m.zfsPanel.boundCursor(m.zfsListHeight())
+		return m, nil
+	case zfsPropertyStateMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.zfsPanel.err = msg.err
+			m.zfsPanel.message = msg.err.Error()
+			return m, nil
+		}
+		m.zfsPanel.propertyState = msg.properties
+		if m.zfsPanel.propertyEditMode {
+			m.zfsPanel.syncPropertyEditValue()
+		}
 		return m, nil
 	case zfsActionMsg:
 		if m.mode != screenZFSPanel {
@@ -413,14 +444,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.zfsPanel.logs = msg.logs
 		m.zfsPanel.err = msg.err
 		m.zfsPanel.message = msg.message
-		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
+	case zfsPropertyApplyMsg:
+		if m.mode != screenZFSPanel {
+			return m, nil
+		}
+		m.zfsPanel.actionRunning = false
+		m.zfsPanel.logs = msg.logs
+		m.zfsPanel.err = msg.err
+		m.zfsPanel.message = msg.message
+		if msg.err == nil {
+			m.zfsPanel.propertyState = msg.properties
+			m.zfsPanel.propertyEditMode = false
+			if m.zfsPanel.sourceDetail.ZFS != nil {
+				m.zfsPanel.sourceDetail.ZFS.Compression = msg.properties.Compression
+				m.zfsPanel.sourceDetail.ZFS.Quota = msg.properties.Quota
+				m.zfsPanel.sourceDetail.ZFS.Reservation = msg.properties.Reservation
+			}
+		}
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case wizardApplyMsg:
 		m.wizardApplying = false
 		m.wizard.setExecutionResult(msg.result)
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
 			if len(msg.result.Warnings) > 0 {
-				m.notice = fmt.Sprintf("Jail %s created and started with warnings: %s", msg.result.Name, msg.result.Warnings[0])
+				m.notice = fmt.Sprintf("Jail %s created and started with warnings: %s", msg.result.Name, summarizeCreationWarning(msg.result.Warnings[0]))
 			} else {
 				m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
 			}
@@ -628,7 +677,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailLoading = false
 		m.mode = screenZFSPanel
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenDashboard, m.detail)
-		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case tickMsg:
 		return m, pollCmd()
 	case tea.KeyMsg:
@@ -726,6 +775,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c", "n":
 		m.mode = screenCreateWizard
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
+		m.wizardScroll = 0
 		m.notice = ""
 		return m, nil
 	case "i", "I":
@@ -851,7 +901,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = screenZFSPanel
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail, m.detail)
-		return m, listZFSSnapshotsCmd(m.zfsPanel.dataset)
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case "x", "X":
 		jail, ok := m.detailJail()
 		if !ok {
@@ -903,6 +953,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.wizard.endThinDatasetSelect()
 			m.wizard.message = "Thin template dataset selection canceled."
+			m.ensureWizardFieldVisible()
 			return m, nil
 		case "j", "down", "tab":
 			m.wizard.thinDatasetCursor++
@@ -948,6 +999,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.values.TemplateRelease = option.Value
 			m.wizard.endThinDatasetSelect()
 			m.wizard.message = fmt.Sprintf("Selected thin template dataset: %s", option.Label)
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
 		m.wizard.boundThinDatasetCursor()
@@ -958,6 +1010,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "left":
 			m.wizard.endUserlandSelect()
 			m.wizard.message = "Userland selection canceled."
+			m.ensureWizardFieldVisible()
 			return m, nil
 		case "j", "down", "tab":
 			m.wizard.userlandCursor++
@@ -982,6 +1035,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.values.TemplateRelease = option.Value
 			m.wizard.endUserlandSelect()
 			m.wizard.message = fmt.Sprintf("Selected userland: %s", option.Label)
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
 		m.wizard.boundUserlandCursor()
@@ -1050,11 +1104,14 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.wizard.values.Interface) == "" {
 				m.wizard.values.Interface = "em0"
 			}
+			m.wizard.clearValidationError()
 			m.wizard.refreshLinuxPrereqs()
 			m.wizard.refreshNetworkPrereqs()
 			m.wizard.normalizeStep()
 			m.wizard.endTemplateMode()
 			m.wizard.message = fmt.Sprintf("Template %q loaded.", template.Name)
+			m.wizardScroll = 0
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
 		m.wizard.boundTemplateCursor()
@@ -1063,6 +1120,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if !m.wizardApplying && !m.wizard.isConfirmationStep() && msg.Type == tea.KeyRunes {
 		m.wizard.appendToActive(string(msg.Runes))
+		m.boundWizardScroll()
 		return m, nil
 	}
 
@@ -1079,32 +1137,67 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.wizard.prevStep()
+		m.wizardScroll = 0
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "right":
 		if m.wizardApplying {
 			return m, nil
 		}
 		if err := m.wizard.nextStep(); err != nil {
+			m.ensureWizardFieldVisible()
 			return m, nil
 		}
+		m.wizardScroll = 0
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "tab", "down":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.nextField()
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "shift+tab", "up":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.prevField()
+		m.ensureWizardFieldVisible()
+		return m, nil
+	case "pgdown":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll += m.wizardBodyHeight()
+		m.boundWizardScroll()
+		return m, nil
+	case "pgup":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll -= m.wizardBodyHeight()
+		m.boundWizardScroll()
+		return m, nil
+	case "home":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll = 0
+		return m, nil
+	case "end":
+		if m.wizardApplying {
+			return m, nil
+		}
+		m.wizardScroll = 1 << 30
+		m.boundWizardScroll()
 		return m, nil
 	case "s", "S", "ctrl+s":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.beginTemplateSave()
+		m.wizardScroll = 0
 		return m, nil
 	case "l", "L", "ctrl+l":
 		if m.wizardApplying {
@@ -1114,6 +1207,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.message = err.Error()
 			return m, nil
 		}
+		m.wizardScroll = 0
 		return m, nil
 	case "ctrl+u":
 		if m.wizardApplying {
@@ -1123,6 +1217,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.message = err.Error()
 			return m, nil
 		}
+		m.wizardScroll = 0
 		return m, nil
 	case "ctrl+t":
 		if m.wizardApplying {
@@ -1142,11 +1237,18 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.wizardApplying {
 				return m, nil
 			}
-			if err := m.wizard.validateAll(); err != nil {
-				m.wizard.message = err.Error()
+			if stepIdx, fieldID, err := m.wizard.validateAllDetailed(); err != nil {
+				if stepIdx >= 0 {
+					m.wizard.step = stepIdx
+				}
+				m.wizard.normalizeField()
+				m.wizard.applyValidationError(fieldID, err)
+				m.wizardScroll = 0
+				m.ensureWizardFieldVisible()
 				return m, nil
 			}
 			m.wizard.clearExecutionResult()
+			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
 			return m, createJailCmd(m.wizard.values)
@@ -1155,12 +1257,15 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		_ = m.wizard.nextStep()
+		m.wizardScroll = 0
+		m.ensureWizardFieldVisible()
 		return m, nil
 	case "backspace", "delete":
 		if m.wizardApplying {
 			return m, nil
 		}
 		m.wizard.backspaceActive()
+		m.boundWizardScroll()
 		return m, nil
 	}
 
@@ -1353,6 +1458,25 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.templateCreate.message = "Edit parent dataset and mountpoint, then press enter to create the parent."
 		return m, nil
+	case "p", "P":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeCreate || m.templateCreate.parentEdit {
+			return m, nil
+		}
+		decision := resolveFreeBSDPatchDecision(m.templateCreate.sourceInput, m.templateCreate.patchBase)
+		if !decision.Eligible {
+			m.templateCreate.message = "Patch-to-latest is only available for official FreeBSD release tags and recognizable base.txz release archives."
+			return m, nil
+		}
+		normalized, _ := normalizeFreeBSDPatchPreference(m.templateCreate.patchBase)
+		if normalized == "no" {
+			m.templateCreate.patchBase = "auto"
+			m.templateCreate.message = "Template patch-to-latest restored to automatic mode."
+		} else {
+			m.templateCreate.patchBase = "no"
+			m.templateCreate.message = "Template patch-to-latest disabled for this create."
+		}
+		m.templateCreate.refreshPreview()
+		return m, nil
 	case "enter":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
@@ -1401,7 +1525,7 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Creating template dataset..."
 			m.templateCreate.logs = nil
 			m.templateCreate.applying = true
-			return m, templateDatasetCreateCmd(m.templateCreate.sourceInput, m.templateCreate.parentOverride())
+			return m, templateDatasetCreateCmd(m.templateCreate.sourceInput, m.templateCreate.parentOverride(), m.templateCreate.patchBase)
 		}
 		if m.templateCreate.mode == templateManagerModeRename {
 			if m.templateCreate.renamePreview.Err != nil {
@@ -1597,19 +1721,22 @@ func (m model) helpLines(width int) []string {
 		truncate("c: create snapshot", width),
 		truncate("r: rollback selected snapshot (confirmation required)", width),
 		truncate("n: clone selected snapshot as a new jail", width),
+		truncate("e: edit compression, quota, or reservation on an exact jail dataset", width),
 		truncate("selected snapshot details show creation time, used size, and rollback implications", width),
 		truncate("x: refresh snapshot list", width),
 		truncate("esc: cancel prompt or return to detail", width),
 		"",
 		sectionStyle.Render("Creation Wizard"),
-		truncate("steps 1-5 are shown together on one page", width),
+		truncate("common jail settings are on one page; linux adds a bootstrap step before confirmation", width),
 		truncate("tab/shift+tab/up/down: move field", width),
+		truncate("pgup/pgdown: scroll long wizard pages", width),
 		truncate("enter/right: next step", width),
 		truncate("left: previous step", width),
 		truncate("s/l on the confirmation step: save/load templates", width),
 		truncate("ctrl+u: open userland selector", width),
 		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
 		truncate("startup order updates rc.conf jail_list; dependencies write depend in jail.conf", width),
+		truncate("linux step supports default or custom bootstrap mirrors; retry uses the saved mirror choice", width),
 		truncate("vnet preflight checks bridge/uplink host state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create", width),
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
@@ -1632,13 +1759,12 @@ func (m model) renderDestroyView() string {
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
 	bodyWidth := max(12, m.width-2)
-	lines := []string{"", sectionStyle.Render("Confirmation")}
+	lines := []string{sectionStyle.Render("Confirmation")}
 	for _, line := range m.destroy.preview {
 		lines = append(lines, truncate(line, bodyWidth))
 	}
 	if len(m.destroy.logs) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Execution output"))
+		appendSection(&lines, bodyWidth, "Execution output")
 		maxLogs := min(12, len(m.destroy.logs))
 		for _, line := range m.destroy.logs[len(m.destroy.logs)-maxLogs:] {
 			lines = append(lines, truncate(line, bodyWidth))
@@ -1776,20 +1902,48 @@ func (m model) renderWizardView() string {
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := max(4, m.height-3)
-	lines := m.wizardLines(max(12, m.width-2))
-	body := lipgloss.NewStyle().
-		Width(m.width).
-		Height(bodyHeight).
-		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
+	hint := m.wizardFooterHint()
+	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
+	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	body := ""
+	if leftWidth, rightWidth, ok := m.wizardSplitPaneWidths(); ok {
+		leftLines, _ := m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
+		offset, end := wizardViewportBounds(len(leftLines), m.wizardScroll, bodyHeight)
+		leftPanel := lipgloss.NewStyle().
+			Width(leftWidth).
+			Height(bodyHeight).
+			Padding(1, 1).
+			Render(strings.Join(leftLines[offset:end], "\n"))
+		rightPanel := lipgloss.NewStyle().
+			Width(rightWidth).
+			Height(bodyHeight).
+			Padding(1, 1).
+			Render(strings.Join(m.wizardFieldContextLines(max(12, rightWidth-2)), "\n"))
+		separator := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render(strings.Repeat("|\n", bodyHeight-1) + "|")
+		body = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, separator, rightPanel)
+	}
+	if body == "" {
+		lines := m.wizardLines(max(12, m.width-2))
+		offset, end := wizardViewportBounds(len(lines), m.wizardScroll, bodyHeight)
+		body = lipgloss.NewStyle().
+			Width(m.width).
+			Height(bodyHeight).
+			Padding(1, 1).
+			Render(strings.Join(lines[offset:end], "\n"))
+	}
 
-	hint := "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m model) wizardFooterHint() string {
+	hint := "type to edit | tab/shift+tab/up/down: fields | pgup/pgdown: scroll | ctrl+u: userland select | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	if normalizedJailType(m.wizard.values.JailType) == "thin" {
-		hint = "type to edit | tab/shift+tab/up/down: fields | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
+		hint = "type to edit | tab/shift+tab/up/down: fields | pgup/pgdown: scroll | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	}
 	if m.wizard.isConfirmationStep() {
-		hint = "enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
+		hint = "pgup/pgdown: scroll | enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.templateMode == wizardTemplateModeSave {
 		hint = "Template save: type name | enter: save | backspace: edit | esc: cancel | ctrl+c: quit"
@@ -1809,9 +1963,52 @@ func (m model) renderWizardView() string {
 	if m.wizardApplying {
 		hint = "Applying changes... please wait | ctrl+c: quit"
 	}
-	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
+	return hint
+}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+func (m model) wizardBodyHeight() int {
+	step := m.wizard.currentStep()
+	title := titleStyle.Render("Jail Creation Wizard")
+	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
+	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	footer := m.renderFooterWithMessage(m.wizardFooterHint(), m.wizard.message, footerStyle)
+	return max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+}
+
+func (m model) wizardSplitPaneWidths() (int, int, bool) {
+	if !m.wizardUsesSplitPane() {
+		return 0, 0, false
+	}
+	leftWidth := max(48, (m.width-1)*3/5)
+	if leftWidth > m.width-34 {
+		leftWidth = m.width - 34
+	}
+	if leftWidth < 40 {
+		leftWidth = 40
+	}
+	rightWidth := m.width - leftWidth - 1
+	if rightWidth < 32 {
+		return 0, 0, false
+	}
+	return leftWidth, rightWidth, true
+}
+
+func wizardViewportBounds(totalLines, scroll, height int) (int, int) {
+	if height <= 0 {
+		height = 1
+	}
+	maxOffset := max(0, totalLines-height)
+	if scroll < 0 {
+		scroll = 0
+	}
+	if scroll > maxOffset {
+		scroll = maxOffset
+	}
+	end := min(totalLines, scroll+height)
+	if end < scroll {
+		end = scroll
+	}
+	return scroll, end
 }
 
 func (m model) renderTemplateDatasetCreateView() string {
@@ -1856,12 +2053,12 @@ func (m model) renderTemplateDatasetCreateView() string {
 		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.mode == templateManagerModeCreate {
-		hint = "type source | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
+		hint = "type source | p: toggle patch | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
 		if m.templateCreate.parentEdit {
 			hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
 		}
 		if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
-			hint = "type source | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | esc: back | ctrl+c: quit"
+			hint = "type source | p: toggle patch | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | esc: back | ctrl+c: quit"
 		}
 	}
 	if m.templateCreate.mode == templateManagerModeRename {
@@ -1939,15 +2136,15 @@ func (m model) templateManagerDetailLines(width int) []string {
 	lines := []string{}
 	switch m.templateCreate.mode {
 	case templateManagerModeCreate:
-		lines = append(lines, sectionStyle.Render("Create Template Dataset"))
-		lines = append(lines, truncate("Supported sources: local directory, local archive, release tag, custom https URL, or a named userland entry.", width))
+		appendSection(&lines, width, "Create template dataset",
+			"Sources: local directory, local archive, release tag, custom URL, or named userland entry.",
+		)
 		sourceDisplay := m.templateCreate.sourceInput
 		if strings.TrimSpace(sourceDisplay) == "" {
 			sourceDisplay = "(15.0-RELEASE)"
 		}
 		lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> Template/Release: "+sourceDisplay, width)))
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Preview"))
+		appendSection(&lines, width, "Preview")
 		preview := m.templateCreate.preview
 		parentDataset := preview.ParentDataset
 		parentMountpoint := preview.ParentMountpoint
@@ -1990,6 +2187,11 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if preview.Mountpoint != "" {
 			lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
 		}
+		lines = append(lines, truncate("Patch to latest level: "+yesNoText(preview.PatchSelected), width))
+		if preview.PatchRelease != "" {
+			lines = append(lines, truncate("Patch release: "+preview.PatchRelease, width))
+		}
+		lines = append(lines, truncate("Readonly after create: yes", width))
 		if preview.SourceKind != "" {
 			lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
 		}
@@ -2000,14 +2202,20 @@ func (m model) templateManagerDetailLines(width int) []string {
 			lines = append(lines, truncate("Create action: "+preview.Action, width))
 		}
 		if preview.NeedsParentCreate {
-			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent dataset or edit the values first.", width))
-		} else if preview.Err != nil {
+			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent or edit the values first.", width))
+		}
+		if strings.TrimSpace(preview.PatchNote) != "" {
+			for _, line := range wrapText(preview.PatchNote, width) {
+				lines = append(lines, truncate(line, width))
+			}
+		}
+		if preview.Err != nil {
 			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
 				lines = append(lines, wizardErrorStyle.Render(line))
 			}
 		}
 	case templateManagerModeRename:
-		lines = append(lines, sectionStyle.Render("Rename Template Dataset"))
+		appendSection(&lines, width, "Rename template dataset")
 		preview := m.templateCreate.renamePreview
 		current := preview.Current
 		if current.Name == "" {
@@ -2015,12 +2223,17 @@ func (m model) templateManagerDetailLines(width int) []string {
 		} else {
 			lines = append(lines, truncate("Current dataset: "+current.Name, width))
 			lines = append(lines, truncate("Current mountpoint: "+current.Mountpoint, width))
+			lines = append(lines, truncate("Current readonly: "+yesNoText(current.Readonly), width))
 			lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.renameInput, filepath.Base(current.Name)), width)))
 			if preview.NewDataset != "" {
 				lines = append(lines, truncate("Renamed dataset: "+preview.NewDataset, width))
 			}
 			if preview.NewMountpoint != "" {
 				lines = append(lines, truncate("New mountpoint: "+preview.NewMountpoint, width))
+			}
+			lines = append(lines, truncate("Readonly after rename: "+yesNoText(preview.ReadonlyPreserved), width))
+			if !current.Readonly {
+				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: current template dataset is writable; handbook-style templates should be readonly.", width)))
 			}
 			if len(preview.UpdatedWizardTemplates) > 0 {
 				lines = append(lines, truncate("Saved wizard templates updated on rename: "+strings.Join(preview.UpdatedWizardTemplates, ", "), width))
@@ -2032,7 +2245,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 		}
 	case templateManagerModeDestroy:
-		lines = append(lines, sectionStyle.Render("Destroy Template Dataset"))
+		appendSection(&lines, width, "Destroy template dataset")
 		preview := m.templateCreate.destroyPreview
 		current := preview.Current
 		if current.Name == "" {
@@ -2040,10 +2253,14 @@ func (m model) templateManagerDetailLines(width int) []string {
 		} else {
 			lines = append(lines, truncate("Dataset: "+current.Name, width))
 			lines = append(lines, truncate("Mountpoint: "+current.Mountpoint, width))
+			lines = append(lines, truncate("Readonly: "+yesNoText(preview.Readonly), width))
 			lines = append(lines, truncate("Destroy scope: zfs destroy -r "+preview.DestroyScope, width))
 			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", current.SnapshotCount), width))
 			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(current.CloneDependents)), width))
 			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(preview.ReferencedTemplates)), width))
+			if !preview.Readonly {
+				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: this template dataset is writable; handbook-style templates should be readonly.", width)))
+			}
 			if len(current.CloneDependents) > 0 {
 				lines = append(lines, truncate("Dependents: "+strings.Join(current.CloneDependents, ", "), width))
 			}
@@ -2057,7 +2274,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 		}
 	case templateManagerModeClone:
-		lines = append(lines, sectionStyle.Render("Clone Template Snapshot"))
+		appendSection(&lines, width, "Clone template snapshot")
 		item, ok := m.templateCreate.selectedItem()
 		if !ok {
 			lines = append(lines, "No template dataset selected.")
@@ -2065,8 +2282,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 		}
 		lines = append(lines, truncate("Dataset: "+item.Name, width))
 		lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.cloneName, filepath.Base(item.Name)+"-clone"), width)))
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Snapshots"))
+		appendSection(&lines, width, "Snapshots")
 		if m.templateCreate.cloneLoading {
 			lines = append(lines, "Loading snapshots...")
 			break
@@ -2084,8 +2300,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 			lines = append(lines, row)
 		}
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Preview"))
+		appendSection(&lines, width, "Preview")
 		preview := m.templateCreate.clonePreview
 		if preview.Snapshot != "" {
 			lines = append(lines, truncate("Snapshot: "+preview.Snapshot, width))
@@ -2096,19 +2311,23 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if preview.NewMountpoint != "" {
 			lines = append(lines, truncate("Clone mountpoint: "+preview.NewMountpoint, width))
 		}
+		if preview.NewDataset != "" {
+			lines = append(lines, truncate("Readonly after clone: "+yesNoText(preview.ReadonlyAfter), width))
+		}
 		if preview.Err != nil {
 			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
 				lines = append(lines, wizardErrorStyle.Render(line))
 			}
 		}
 	default:
-		lines = append(lines, sectionStyle.Render("Inspect"))
+		appendSection(&lines, width, "Inspect")
 		item, ok := m.templateCreate.selectedItem()
 		if !ok {
 			lines = append(lines, "No template dataset selected.")
 		} else {
 			lines = append(lines, truncate("Dataset: "+item.Name, width))
 			lines = append(lines, truncate("Mountpoint: "+item.Mountpoint, width))
+			lines = append(lines, truncate("Readonly: "+yesNoText(item.Readonly), width))
 			lines = append(lines, truncate("Used: "+item.Used+"  Avail: "+item.Avail, width))
 			lines = append(lines, truncate("Refer: "+item.Refer+"  Compression: "+item.Compression, width))
 			lines = append(lines, truncate("Quota: "+valueOrDash(item.Quota)+"  Reservation: "+valueOrDash(item.Reservation), width))
@@ -2119,13 +2338,16 @@ func (m model) templateManagerDetailLines(width int) []string {
 			lines = append(lines, truncate(fmt.Sprintf("Child datasets: %d", len(item.ChildDatasets)), width))
 			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(item.CloneDependents)), width))
 			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(item.WizardTemplateRefs)), width))
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Safety"))
+			appendSection(&lines, width, "Safety")
 			lines = append(lines, truncate("Rename allowed: "+yesNoText(item.RenameAllowed), width))
 			lines = append(lines, truncate("Destroy allowed: "+yesNoText(item.DestroyAllowed), width))
 			if len(item.SafetyIssues) > 0 {
 				for _, issue := range item.SafetyIssues {
-					lines = append(lines, wizardErrorStyle.Render(truncate("Issue: "+issue, width)))
+					prefix := "Issue: "
+					if strings.Contains(strings.ToLower(issue), "writable") {
+						prefix = "Warning: "
+					}
+					lines = append(lines, wizardErrorStyle.Render(truncate(prefix+issue, width)))
 				}
 			}
 			if len(item.CloneDependents) > 0 {
@@ -2140,8 +2362,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 		}
 	}
 	if len(m.templateCreate.logs) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Execution output"))
+		appendSection(&lines, width, "Execution output")
 		for _, line := range m.templateCreate.logs {
 			lines = append(lines, truncate(line, width))
 		}
@@ -2254,22 +2475,17 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.summaryLines() {
 			lines = append(lines, truncate(line, width))
 		}
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Network prerequisites"))
-		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
-			appendStyledWizardLine(&lines, line, width)
-		}
-		if normalizedJailType(m.wizard.values.JailType) == "linux" {
+		if shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
 			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Linux prerequisites"))
-			for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
+			lines = append(lines, sectionStyle.Render("Network prerequisites"))
+			for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
 				appendStyledWizardLine(&lines, line, width)
 			}
 		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("jail.conf preview"))
 		for _, line := range m.wizard.jailConfPreviewLines() {
-			lines = append(lines, truncate(line, width))
+			appendWrappedLiteralLine(&lines, line, width)
 		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Creation plan"))
@@ -2291,8 +2507,36 @@ func (m model) wizardLines(width int) []string {
 		return lines
 	}
 
+	lines = append(lines, m.wizardFieldEntryLines(width, true)...)
+	return lines
+}
+
+func (m model) wizardUsesSplitPane() bool {
+	if m.width < 110 {
+		return false
+	}
+	if m.wizard.templateMode != wizardTemplateModeNone || m.wizard.userlandMode || m.wizard.thinDatasetMode {
+		return false
+	}
+	if m.wizard.datasetCreateRunning || m.wizardApplying || m.wizard.isConfirmationStep() {
+		return false
+	}
+	return len(m.wizard.visibleFields()) > 0
+}
+
+func (m model) wizardFieldEntryLines(width int, inlineHelp bool) []string {
+	lines, _ := m.wizardFieldEntryLayout(width, inlineHelp)
+	return lines
+}
+
+func (m model) wizardFieldEntryLayout(width int, inlineHelp bool) ([]string, int) {
+	lines := []string{}
+	activeLine := -1
 	currentSection := ""
 	fields := m.wizard.visibleFields()
+	if len(fields) == 0 {
+		return []string{"No editable fields on this step."}, -1
+	}
 	m.wizard.normalizeField()
 	for idx, field := range fields {
 		section := wizardSectionForField(field.ID)
@@ -2313,27 +2557,36 @@ func (m model) wizardLines(width int) []string {
 		if idx == m.wizard.field {
 			prefix = ">"
 		}
-		line := fmt.Sprintf("%s %s: %s", prefix, field.Label, display)
+		label := m.wizardFieldDisplayLabel(field)
+		line := fmt.Sprintf("%s %s: %s", prefix, label, display)
 		line = truncate(line, width)
 		if idx == m.wizard.field {
 			line = selectedRowStyle.Width(max(1, width)).Render(line)
 		}
 		lines = append(lines, line)
-		if field.Help != "" {
+		if idx == m.wizard.field {
+			activeLine = len(lines) - 1
+		}
+		if inlineHelp && idx == m.wizard.field && field.Help != "" {
+			if field.ID == "template_release" {
+				lines = append(lines, "")
+			}
 			lines = append(lines, truncate("  "+field.Help, width))
 		}
-		if field.ID == "template_release" {
-			lines = append(lines, truncate("  ctrl+u: select from local userland media or official release downloads", width))
+		if inlineHelp && idx == m.wizard.field && field.ID == "template_release" {
+			lines = append(lines, truncate("  ctrl+u: select local userland or release download", width))
 			if normalizedJailType(m.wizard.values.JailType) == "thin" {
-				lines = append(lines, truncate("  ctrl+t: open the template manager and apply an extracted ZFS template dataset mountpoint", width))
+				lines = append(lines, truncate("  ctrl+t: choose an extracted ZFS template dataset", width))
 			}
 		}
-		if field.ID == "name" || field.ID == "dependencies" || field.ID == "interface" || field.ID == "bridge_policy" || field.ID == "uplink" || field.ID == "ip6" {
-			lines = append(lines, "")
+		if idx == m.wizard.field && field.ID == m.wizard.validationField && strings.TrimSpace(m.wizard.validationError) != "" {
+			for _, line := range wrapText("  error: "+m.wizard.validationError, max(8, width-2)) {
+				lines = append(lines, wizardErrorStyle.Render(truncate(line, width)))
+			}
 		}
 	}
 
-	if wizardShowsNetworkPrereqs(step) {
+	if inlineHelp && shouldShowNetworkPrereqs(m.wizard.networkPrereqs) && wizardShowsNetworkPrereqs(m.wizard.currentStep()) {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Network prerequisites"))
 		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
@@ -2341,21 +2594,394 @@ func (m model) wizardLines(width int) []string {
 		}
 	}
 
-	if normalizedJailType(m.wizard.values.JailType) == "linux" && wizardsShowsLinuxPrereqs(step) {
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
-		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
-			appendStyledWizardLine(&lines, line, width)
+	return lines, activeLine
+}
+
+func (m model) wizardFieldContextLines(width int) []string {
+	lines := []string{panelTitleStyle.Render("Field Guide")}
+	field, ok := m.wizard.activeField()
+	if !ok {
+		lines = append(lines, "Select a field to see accepted values and examples.")
+		return lines
+	}
+	lines = append(lines, renderKeyValueLines(width,
+		[2]string{"Field", m.wizardFieldDisplayLabel(field)},
+	)...)
+
+	guide := m.wizardFieldGuide(field)
+	if guide.Purpose != "" {
+		appendSection(&lines, width, "Purpose")
+		for _, line := range wrapText(guide.Purpose, width) {
+			lines = append(lines, line)
+		}
+	}
+	if guide.Format != "" {
+		appendSection(&lines, width, "Accepted format")
+		for _, line := range wrapText(guide.Format, width) {
+			lines = append(lines, line)
+		}
+	}
+	if len(guide.Examples) > 0 {
+		appendSection(&lines, width, "Examples")
+		for _, example := range guide.Examples {
+			for _, line := range wrapText("- "+example, width) {
+				lines = append(lines, line)
+			}
+		}
+	}
+	if len(guide.Notes) > 0 {
+		appendSection(&lines, width, "Notes")
+		for _, note := range guide.Notes {
+			isWarning := looksLikeWarningText(note)
+			for _, line := range wrapText(note, width) {
+				rendered := line
+				if isWarning {
+					rendered = wizardErrorStyle.Render(line)
+				}
+				lines = append(lines, rendered)
+			}
+		}
+	}
+	if len(guide.Shortcuts) > 0 {
+		appendSection(&lines, width, "Shortcuts")
+		for _, shortcut := range guide.Shortcuts {
+			for _, line := range wrapText("- "+shortcut, width) {
+				lines = append(lines, line)
+			}
 		}
 	}
 
+	if wizardFieldUsesNetworkContext(field.ID) && shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
+		appendSection(&lines, width, "Host checks")
+		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+			appendWrappedStyledWizardLine(&lines, line, width)
+		}
+	}
 	return lines
+}
+
+type wizardFieldGuide struct {
+	Purpose   string
+	Format    string
+	Examples  []string
+	Notes     []string
+	Shortcuts []string
+}
+
+func (m model) wizardFieldDisplayLabel(field wizardField) string {
+	if field.ID == "template_release" && normalizedJailType(m.wizard.values.JailType) == "linux" {
+		return "FreeBSD Base/Release"
+	}
+	return field.Label
+}
+
+func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
+	jailType := normalizedJailType(m.wizard.values.JailType)
+	switch field.ID {
+	case "jail_type":
+		return wizardFieldGuide{
+			Purpose: "Choose the jail model. This decides how the root is provisioned and how networking is configured.",
+			Format:  "One of: thick, thin, vnet, linux.",
+			Examples: []string{
+				"thick for a copied root filesystem",
+				"thin for a ZFS template dataset clone",
+				"vnet for bridge-backed virtual networking",
+				"linux for a FreeBSD jail with Linux userland bootstrap",
+			},
+		}
+	case "name":
+		return wizardFieldGuide{
+			Purpose: "The jail name is used for jail.conf, fstab, rctl rules, and several generated paths.",
+			Format:  "Letters, numbers, dot, underscore, and dash only.",
+			Examples: []string{
+				"web01",
+				"db-primary",
+			},
+		}
+	case "hostname":
+		return wizardFieldGuide{
+			Purpose: "Hostname assigned inside the jail. Leave blank to reuse the jail name.",
+			Examples: []string{
+				"web01.example.internal",
+				"pkg-cache.local",
+			},
+		}
+	case "dataset":
+		return wizardFieldGuide{
+			Purpose: "Absolute jail root path. The final path must end with the jail name.",
+			Format:  "Absolute path only. Shared roots like /usr/local/jails/containers are not valid jail roots by themselves.",
+			Examples: []string{
+				"/usr/local/jails/containers/web01",
+				"/usr/local/jails/containers/db01",
+			},
+		}
+	case "template_release":
+		guide := wizardFieldGuide{
+			Purpose: "Source used to populate the FreeBSD jail root.",
+			Format:  "Local path, FreeBSD release tag, named userland source, or custom https URL.",
+			Examples: []string{
+				"15.0-RELEASE",
+				"/usr/local/jails/media/base.txz",
+				"https://download.freebsd.org/ftp/releases/amd64/amd64/15.0-RELEASE/base.txz",
+			},
+			Shortcuts: []string{
+				"ctrl+u selects a discovered local userland source or release download",
+			},
+		}
+		switch jailType {
+		case "thin":
+			guide.Notes = append(guide.Notes,
+				"Thin jails require an extracted ZFS template dataset mountpoint, not a release tag or archive, at create time.",
+			)
+			guide.Shortcuts = append(guide.Shortcuts, "ctrl+t opens Template Manager to select or create a reusable dataset")
+		case "linux":
+			guide.Purpose = "Source used to build the FreeBSD jail base before Linux userland is bootstrapped under /compat."
+			guide.Notes = append(guide.Notes, "This is still a FreeBSD base/root source. The Linux bootstrap family and release are configured on the next step.")
+		}
+		return guide
+	case "patch_base":
+		return wizardFieldGuide{
+			Purpose: "Controls whether the extracted FreeBSD jail base is patched to the latest level with freebsd-update before first start.",
+			Format:  "auto, yes, or no. auto patches only official FreeBSD release tags and recognizable base.txz release archives.",
+			Examples: []string{
+				"auto to patch official release sources and skip custom roots",
+				"yes to require patching for an official release source",
+				"no to skip patching even for an official release source",
+			},
+			Notes: []string{
+				"Thin jails do not use this field. Their base should be patched at the template dataset stage instead.",
+			},
+		}
+	case "interface":
+		return wizardFieldGuide{
+			Purpose: "Host interface used by shared-stack jails.",
+			Format:  "Existing host interface name.",
+			Examples: []string{
+				"em0",
+				"igb0",
+			},
+			Notes: []string{
+				"Required for thick, thin, and linux jails. VNET jails use bridge and uplink instead.",
+			},
+		}
+	case "bridge":
+		return wizardFieldGuide{
+			Purpose: "Bridge device used for VNET connectivity.",
+			Format:  "Bridge interface name such as bridge0.",
+			Examples: []string{
+				"bridge0",
+				"bridge1",
+			},
+		}
+	case "bridge_policy":
+		return wizardFieldGuide{
+			Purpose: "Controls whether the TUI may create a missing bridge before jail creation.",
+			Format:  "auto-create or require-existing.",
+			Examples: []string{
+				"auto-create to let the TUI create bridge0 if it is missing",
+				"require-existing to fail unless the named bridge already exists",
+			},
+		}
+	case "vnet_host_setup":
+		return wizardFieldGuide{
+			Purpose: "Choose whether the host bridge/uplink setup is runtime-only or also persisted in rc.conf.",
+			Format:  "runtime or persistent.",
+			Examples: []string{
+				"runtime to prepare the bridge only for the current host session",
+				"persistent to manage rc.conf bridge settings before jail creation",
+			},
+			Notes: []string{
+				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for bridge, uplink, or defaultrouter.",
+			},
+		}
+	case "uplink":
+		return wizardFieldGuide{
+			Purpose: "Optional host interface to attach to the selected bridge.",
+			Format:  "Existing host interface name or blank.",
+			Examples: []string{
+				"em0",
+				"ix0",
+			},
+			Notes: []string{
+				"Use this when the bridge should be connected to a physical or VLAN-backed host interface.",
+			},
+		}
+	case "ip4":
+		notes := []string{}
+		if jailType == "vnet" {
+			notes = append(notes, "VNET jails require an explicit IPv4 address. inherit is not allowed.")
+		}
+		return wizardFieldGuide{
+			Purpose: "Primary IPv4 address assigned to the jail.",
+			Format:  "CIDR address, or inherit for non-VNET jails.",
+			Examples: []string{
+				"192.168.1.20/24",
+				"inherit",
+			},
+			Notes: notes,
+		}
+	case "ip6":
+		notes := []string{}
+		if jailType == "vnet" {
+			notes = append(notes, "VNET jails require an explicit IPv6 address when IPv6 is used. inherit is not allowed.")
+		}
+		return wizardFieldGuide{
+			Purpose: "Optional IPv6 address assigned to the jail.",
+			Format:  "CIDR address, or inherit for non-VNET jails.",
+			Examples: []string{
+				"2001:db8::20/64",
+				"inherit",
+			},
+			Notes: notes,
+		}
+	case "default_router":
+		return wizardFieldGuide{
+			Purpose: "Optional default gateway configured for the jail.",
+			Format:  "IPv4 or IPv6 address. Leave blank if routing is handled elsewhere.",
+			Examples: []string{
+				"192.168.1.1",
+				"2001:db8::1",
+			},
+		}
+	case "startup_order":
+		return wizardFieldGuide{
+			Purpose: "Optional position for this jail in rc.conf jail_list.",
+			Format:  "Positive integer, or blank to append when jail_list is already managed.",
+			Examples: []string{
+				"1",
+				"5",
+			},
+			Notes: []string{
+				"Leaving this blank preserves the default FreeBSD behavior when jail_list is currently unset.",
+			},
+		}
+	case "dependencies":
+		return wizardFieldGuide{
+			Purpose: "Optional jail names used for depend ordering in jail.conf.",
+			Format:  "Space- or comma-separated jail names.",
+			Examples: []string{
+				"db01 cache01",
+				"router01, storage01",
+			},
+			Notes: []string{
+				"Dependencies refine startup order beyond plain jail_list position.",
+			},
+		}
+	case "cpu_percent":
+		return wizardFieldGuide{
+			Purpose: "Optional rctl CPU cap for the jail.",
+			Format:  "Integer from 1 to 100.",
+			Examples: []string{
+				"25",
+				"50",
+			},
+		}
+	case "memory_limit":
+		return wizardFieldGuide{
+			Purpose: "Optional rctl memory limit.",
+			Format:  "Integer with optional size suffix K, M, G, T, or P.",
+			Examples: []string{
+				"512M",
+				"2G",
+			},
+		}
+	case "process_limit":
+		return wizardFieldGuide{
+			Purpose: "Optional rctl maximum process count.",
+			Format:  "Positive integer.",
+			Examples: []string{
+				"256",
+				"1024",
+			},
+		}
+	case "mount_points":
+		return wizardFieldGuide{
+			Purpose: "Optional extra mount targets created through mount.fstab.",
+			Format:  "Comma-separated list of target-only entries or source:target pairs.",
+			Examples: []string{
+				"/var/cache/pkg",
+				"/data:/srv/data, /logs:/var/log/app",
+			},
+			Notes: []string{
+				"Mount targets must stay inside the jail root after normalization.",
+			},
+		}
+	case "linux_distro":
+		return wizardFieldGuide{
+			Purpose: "Bootstrap family passed to debootstrap and used for the compat root name.",
+			Format:  "Free-form family name. Ubuntu and Debian have built-in default mirrors; other families require a custom mirror.",
+			Examples: []string{
+				"ubuntu",
+				"debian",
+				"devuan",
+			},
+		}
+	case "linux_release":
+		return wizardFieldGuide{
+			Purpose: "Free-form codename, suite, or release string passed directly to debootstrap.",
+			Examples: []string{
+				"noble",
+				"bookworm",
+				"trixie",
+			},
+		}
+	case "linux_bootstrap":
+		return wizardFieldGuide{
+			Purpose: "Choose whether Linux userland should be bootstrapped immediately after jail creation.",
+			Format:  "auto or skip.",
+			Examples: []string{
+				"auto to run networking preflight and debootstrap now",
+				"skip to create the jail first and retry later from detail view",
+			},
+		}
+	case "linux_mirror_mode":
+		return wizardFieldGuide{
+			Purpose: "Choose whether bootstrap uses the built-in distro mirror or a custom base URL.",
+			Format:  "default or custom. default only works for bootstrap families ubuntu and debian.",
+			Examples: []string{
+				"default",
+				"custom",
+			},
+		}
+	case "linux_mirror_url":
+		return wizardFieldGuide{
+			Purpose: "Base repository URL used for Linux bootstrap, readiness checks, and retry.",
+			Format:  "http or https base URL with a host.",
+			Examples: []string{
+				"https://archive.ubuntu.com/ubuntu",
+				"https://deb.debian.org/debian",
+			},
+			Notes: []string{
+				"Enter the repository base URL, not a full Release file URL.",
+			},
+		}
+	default:
+		return wizardFieldGuide{Purpose: field.Help}
+	}
+}
+
+func wizardFieldUsesNetworkContext(id string) bool {
+	switch id {
+	case "interface", "bridge", "bridge_policy", "vnet_host_setup", "uplink", "ip4", "ip6", "default_router":
+		return true
+	default:
+		return false
+	}
+}
+
+func wizardFieldUsesLinuxContext(id string) bool {
+	switch id {
+	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
+		return true
+	default:
+		return false
+	}
 }
 
 func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
-		case "linux_distro", "linux_release", "linux_bootstrap":
+		case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
 			return true
 		}
 	}
@@ -2365,9 +2991,22 @@ func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 func wizardShowsNetworkPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
-		case "interface", "bridge", "uplink", "ip4", "ip6", "default_router":
+		case "interface", "bridge", "vnet_host_setup", "uplink", "ip4", "ip6", "default_router":
 			return true
 		}
+	}
+	return false
+}
+
+func shouldShowNetworkPrereqs(prereqs NetworkWizardPrereqs) bool {
+	if strings.TrimSpace(prereqs.InspectError) != "" || len(prereqs.Errors) > 0 || len(prereqs.Warnings) > 0 {
+		return true
+	}
+	if strings.TrimSpace(prereqs.RouterStatus) != "" && !strings.EqualFold(strings.TrimSpace(prereqs.RouterStatus), "ok") {
+		return true
+	}
+	if prereqs.BridgeCreateNeeded || prereqs.UplinkAttachNeeded {
+		return true
 	}
 	return false
 }
@@ -2380,6 +3019,35 @@ func appendStyledWizardLine(lines *[]string, text string, width int) {
 	*lines = append(*lines, truncate(text, width))
 }
 
+func appendWrappedStyledWizardLine(lines *[]string, text string, width int) {
+	for _, line := range wrapText(text, max(8, width)) {
+		if looksLikeWarningText(text) {
+			*lines = append(*lines, wizardErrorStyle.Render(line))
+			continue
+		}
+		*lines = append(*lines, line)
+	}
+}
+
+func appendWrappedLiteralLine(lines *[]string, text string, width int) {
+	if width <= 0 {
+		*lines = append(*lines, "")
+		return
+	}
+	indentLen := len(text) - len(strings.TrimLeft(text, " "))
+	indent := strings.Repeat(" ", indentLen)
+	content := strings.TrimLeft(text, " ")
+	contentWidth := max(8, width-indentLen)
+	wrapped := wrapText(content, contentWidth)
+	if len(wrapped) == 0 {
+		*lines = append(*lines, truncate(text, width))
+		return
+	}
+	for _, line := range wrapped {
+		*lines = append(*lines, truncate(indent+line, width))
+	}
+}
+
 func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 	lines := []string{
 		"Host Linux ABI will be enabled with: sysrc linux_enable=YES",
@@ -2387,10 +3055,38 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(prereqs.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
+		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap mirror host: %s", valueOrDash(prereqs.MirrorHost)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
 		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
+	}
+	if prereqs.ResolveError != "" {
+		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
+	}
+	if prereqs.Host.EnableReadError != "" {
+		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
+	}
+	for _, reason := range prereqs.Host.EnableDrift {
+		lines = append(lines, "Warning: linux_enable drift: "+reason)
+	}
+	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
+		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
+	}
+	return lines
+}
+
+func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
+	lines := []string{
+		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
+		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
+		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
+		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
+		"Auto bootstrap requires route, DNS, and fetch access inside the running jail.",
+		"Skip mode creates the jail first; use b in jail detail to retry bootstrap later.",
+	}
+	if prereqs.ResolveError != "" {
+		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
 	}
 	if prereqs.Host.EnableReadError != "" {
 		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
@@ -2406,9 +3102,6 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 
 func (m model) detailLines(width int) []string {
 	lines := make([]string, 0, 64)
-	appendLine := func(text string) {
-		lines = append(lines, truncate(text, max(1, width)))
-	}
 
 	jail, hasJail := m.detailJail()
 	state := "STOPPED"
@@ -2426,74 +3119,83 @@ func (m model) detailLines(width int) []string {
 		memText = fmt.Sprintf("%dMB", jail.MemoryMB)
 	}
 
-	lines = append(lines, sectionStyle.Render("Overview"))
-	appendLine("Name: " + valueOrDash(m.detail.Name))
-	appendLine("State: " + state)
-	appendLine("JID: " + jidText)
-	appendLine("CPU: " + cpuText)
-	appendLine("Memory: " + memText)
-	appendLine("Path: " + valueOrDash(m.detail.Path))
-	appendLine("Hostname: " + valueOrDash(m.detail.Hostname))
-	appendLine("")
+	appendRenderedSection(&lines, "Overview", renderKeyValueLines(width,
+		[2]string{"Name", m.detail.Name},
+		[2]string{"State", state},
+		[2]string{"JID", jidText},
+		[2]string{"CPU", cpuText},
+		[2]string{"Memory", memText},
+		[2]string{"Path", m.detail.Path},
+		[2]string{"Hostname", m.detail.Hostname},
+	))
 
-	lines = append(lines, sectionStyle.Render("Configured state"))
-	appendLine("Source: " + valueOrDash(m.detail.JailConfSource))
+	appendSection(&lines, width, "Configured state")
+	lines = append(lines, renderKeyValueLines(width, [2]string{"Source", m.detail.JailConfSource})...)
 	if len(m.detail.JailConfValues) == 0 && len(m.detail.JailConfFlags) == 0 {
-		appendLine("No matching jail block found.")
+		lines = append(lines, truncate("No matching jail block found.", width))
 	} else {
 		for _, key := range sortedKeys(m.detail.JailConfValues) {
-			appendLine(fmt.Sprintf("%s = %s", key, m.detail.JailConfValues[key]))
+			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detailDisplayConfigValue(m.detail.JailConfValues[key])})...)
 		}
 		for _, flag := range m.detail.JailConfFlags {
-			appendLine(flag)
+			lines = append(lines, renderKeyValueLines(width, [2]string{flag, "enabled"})...)
 		}
 	}
-	appendLine("")
 
-	lines = append(lines, sectionStyle.Render("Startup policy"))
+	appendSection(&lines, width, "Startup policy")
 	if m.detail.StartupConfig == nil {
-		appendLine("Startup policy unavailable.")
+		lines = append(lines, truncate("Startup policy unavailable.", width))
 	} else {
 		if m.detail.StartupConfig.InJailList {
-			appendLine(fmt.Sprintf("jail_list position: %d of %d", m.detail.StartupConfig.Position, len(m.detail.StartupConfig.JailList)))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"jail_list position", fmt.Sprintf("%d of %d", m.detail.StartupConfig.Position, len(m.detail.StartupConfig.JailList))},
+			)...)
 		} else if len(m.detail.StartupConfig.JailList) == 0 {
-			appendLine("jail_list: empty (all configured jails start unless depend changes the order)")
+			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "empty"})...)
 		} else {
-			appendLine("jail_list: not present (manual start required when jail_list is used)")
+			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "not present (manual start required when jail_list is used)"})...)
 		}
-		appendLine("Dependencies: " + dependencySummary(strings.Join(m.detail.StartupConfig.Dependencies, " ")))
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Dependencies", dependencySummary(strings.Join(m.detail.StartupConfig.Dependencies, " "))})...)
 		if len(m.detail.StartupConfig.JailList) > 0 {
-			appendLine("Effective jail_list: " + strings.Join(m.detail.StartupConfig.JailList, " "))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Effective jail_list", strings.Join(m.detail.StartupConfig.JailList, " ")})...)
 		}
 		if m.detail.StartupConfig.ReadError != "" {
 			lines = append(lines, wizardErrorStyle.Render(truncate("jail_list read error: "+m.detail.StartupConfig.ReadError, max(1, width))))
 		}
 	}
-	appendLine("")
 
-	lines = append(lines, sectionStyle.Render("Runtime state"))
-	appendLine("State: " + state)
-	appendLine("CPU: " + cpuText)
-	appendLine("Memory: " + memText)
+	appendRenderedSection(&lines, "Runtime state", renderKeyValueLines(width,
+		[2]string{"State", state},
+		[2]string{"CPU", cpuText},
+		[2]string{"Memory", memText},
+	))
+	runtimeNotes := make([]string, 0, 2)
 	if len(m.detail.RuntimeValues) == 0 {
-		appendLine("No running runtime record for this jail.")
+		runtimeNotes = append(runtimeNotes, "No running runtime record for this jail.")
 	} else {
 		for _, key := range orderedRuntimeKeys(m.detail.RuntimeValues) {
-			appendLine(fmt.Sprintf("%s: %s", key, m.detail.RuntimeValues[key]))
+			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.RuntimeValues[key]})...)
 		}
 	}
 	if !m.detailShowAdvanced {
-		appendLine("Raw runtime/default parameters hidden; press a to show.")
+		runtimeNotes = append(runtimeNotes, "Raw runtime/default parameters hidden; press a to show.")
 	}
-	appendLine("")
 
 	if m.detail.NetworkSummary != nil {
-		lines = append(lines, sectionStyle.Render("Network summary"))
+		appendSection(&lines, width, "Network summary")
+		networkLabelWidth := 25
+		if width < 72 {
+			networkLabelWidth = 20
+		}
+		networkPairs := make([][2]string, 0, len(m.detail.NetworkSummary.Configured)+len(m.detail.NetworkSummary.Runtime))
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Configured) {
-			appendLine(fmt.Sprintf("Configured %s: %s", key, m.detail.NetworkSummary.Configured[key]))
+			networkPairs = append(networkPairs, [2]string{"Configured " + key, m.detail.NetworkSummary.Configured[key]})
 		}
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Runtime) {
-			appendLine(fmt.Sprintf("Runtime %s: %s", key, m.detail.NetworkSummary.Runtime[key]))
+			networkPairs = append(networkPairs, [2]string{"Runtime " + key, m.detail.NetworkSummary.Runtime[key]})
+		}
+		if len(networkPairs) > 0 {
+			lines = append(lines, renderKeyValueLinesWithLabelWidth(width, networkLabelWidth, networkPairs...)...)
 		}
 		if len(m.detail.NetworkSummary.Validation) > 0 {
 			for _, line := range m.detail.NetworkSummary.Validation {
@@ -2501,66 +3203,93 @@ func (m model) detailLines(width int) []string {
 					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 					continue
 				}
-				appendLine(line)
+				lines = append(lines, renderInformationalKeyValueWithLabelWidth(width, networkLabelWidth, line)...)
 			}
 		}
-		appendLine("")
 	}
 
-	if m.detailShowAdvanced {
-		lines = append(lines, sectionStyle.Render("Advanced runtime parameters"))
-		if len(m.detail.AdvancedRuntimeFields) == 0 {
-			appendLine("No additional runtime/default parameters.")
-		} else {
-			for _, key := range sortedKeys(m.detail.AdvancedRuntimeFields) {
-				appendLine(fmt.Sprintf("%s = %s", key, m.detail.AdvancedRuntimeFields[key]))
-			}
-		}
-		appendLine("")
-	}
-
-	lines = append(lines, sectionStyle.Render("ZFS dataset"))
+	appendSection(&lines, width, "ZFS dataset")
 	if m.detail.ZFS == nil {
-		appendLine("No dataset matched the jail path.")
+		lines = append(lines, truncate("No dataset matched the jail path.", width))
 	} else {
-		appendLine("Dataset: " + m.detail.ZFS.Name)
-		appendLine("Mountpoint: " + m.detail.ZFS.Mountpoint)
-		appendLine("Match: " + m.detail.ZFS.MatchType)
-		appendLine("Used: " + m.detail.ZFS.Used)
-		appendLine("Avail: " + m.detail.ZFS.Avail)
-		appendLine("Refer: " + m.detail.ZFS.Refer)
-		appendLine("Compression: " + m.detail.ZFS.Compression)
-		appendLine("Quota: " + m.detail.ZFS.Quota)
-		appendLine("Reservation: " + m.detail.ZFS.Reservation)
+		lines = append(lines, renderKeyValueLines(width,
+			[2]string{"Dataset", m.detail.ZFS.Name},
+			[2]string{"Mountpoint", m.detail.ZFS.Mountpoint},
+			[2]string{"Match", m.detail.ZFS.MatchType},
+			[2]string{"Used", m.detail.ZFS.Used},
+			[2]string{"Avail", m.detail.ZFS.Avail},
+			[2]string{"Refer", m.detail.ZFS.Refer},
+			[2]string{"Compression", m.detail.ZFS.Compression},
+			[2]string{"Quota", m.detail.ZFS.Quota},
+			[2]string{"Reservation", m.detail.ZFS.Reservation},
+		)...)
 	}
-	appendLine("")
 
-	lines = append(lines, sectionStyle.Render("rctl"))
+	appendSection(&lines, width, "rctl")
+	if m.detail.RctlConfig != nil {
+		lines = append(lines, renderKeyValueLines(width,
+			[2]string{"Limit mode", valueOrDash(m.detail.RctlConfig.Mode)},
+			[2]string{"Configured CPU %", valueOrDash(m.detail.RctlConfig.CPUPercent)},
+			[2]string{"Configured memory", valueOrDash(m.detail.RctlConfig.MemoryLimit)},
+			[2]string{"Configured max processes", valueOrDash(m.detail.RctlConfig.ProcessLimit)},
+			[2]string{"Persistent block in /etc/rctl.conf", yesNoText(m.detail.RctlConfig.Persistent)},
+		)...)
+		if m.detail.RctlConfig.PersistentErr != "" {
+			lines = append(lines, wizardErrorStyle.Render(truncate("rctl.conf check: "+m.detail.RctlConfig.PersistentErr, width)))
+		}
+	}
+	if m.detail.RacctStatus != nil {
+		lines = append(lines, renderKeyValueLines(width,
+			[2]string{"kern.racct.enable", valueOrDash(m.detail.RacctStatus.EffectiveValue)},
+			[2]string{"loader.conf configured", yesNoText(m.detail.RacctStatus.LoaderConfigured)},
+		)...)
+		if m.detail.RacctStatus.ReadError != "" {
+			lines = append(lines, wizardErrorStyle.Render(truncate("racct check: "+m.detail.RacctStatus.ReadError, width)))
+		}
+	}
 	if len(m.detail.RctlRules) == 0 {
-		appendLine("No matching rctl rules.")
+		if m.detail.RctlConfig != nil && m.detail.RctlConfig.Mode == "runtime" {
+			lines = append(lines, truncate("No live rctl rules. Runtime-only limits apply only while the jail is running.", width))
+		} else {
+			lines = append(lines, truncate("No matching rctl rules.", width))
+		}
 	} else {
 		for _, rule := range m.detail.RctlRules {
-			appendLine(rule)
+			lines = append(lines, truncate(rule, width))
 		}
 	}
 
 	if m.detail.LinuxReadiness != nil {
-		appendLine("")
-		lines = append(lines, sectionStyle.Render("Linux readiness"))
+		appendSection(&lines, width, "Linux readiness")
 		for _, line := range m.linuxReadinessLines() {
 			if looksLikeWarningText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 				continue
 			}
-			appendLine(line)
+			lines = append(lines, truncate(line, width))
 		}
 	}
 
 	if len(m.detail.SourceErrors) > 0 {
-		appendLine("")
-		lines = append(lines, sectionStyle.Render("Source errors"))
+		appendSection(&lines, width, "Source errors")
 		for _, source := range sortedKeys(m.detail.SourceErrors) {
 			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
+		}
+	}
+	if len(runtimeNotes) > 0 {
+		appendSection(&lines, width, "Runtime notes")
+		for _, line := range runtimeNotes {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	if m.detailShowAdvanced {
+		appendSection(&lines, width, "Advanced runtime parameters")
+		if len(m.detail.AdvancedRuntimeFields) == 0 {
+			lines = append(lines, truncate("No additional runtime/default parameters.", width))
+		} else {
+			for _, key := range sortedKeys(m.detail.AdvancedRuntimeFields) {
+				lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.AdvancedRuntimeFields[key]})...)
+			}
 		}
 	}
 	return lines
@@ -2603,11 +3332,16 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
+		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
+		fmt.Sprintf("Mirror URL: %s", valueOrDash(readiness.MirrorURL)),
 		fmt.Sprintf("Mirror host: %s", valueOrDash(readiness.MirrorHost)),
 		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
+	}
+	if readiness.MirrorResolveError != "" {
+		lines = append(lines, "Warning: mirror resolution failed: "+readiness.MirrorResolveError)
 	}
 	if readiness.Host.EnableReadError != "" {
 		lines = append(lines, "Warning: host ABI check failed: "+readiness.Host.EnableReadError)
@@ -2670,6 +3404,20 @@ func (m model) detailJail() (Jail, bool) {
 	}, true
 }
 
+func (m model) detailDisplayConfigValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	name := strings.TrimSpace(m.detail.Name)
+	if name == "" {
+		return value
+	}
+	value = strings.ReplaceAll(value, "${name}", name)
+	value = strings.ReplaceAll(value, "$name", name)
+	return value
+}
+
 func (m *model) boundDetailScroll() {
 	if m.mode != screenJailDetail {
 		return
@@ -2686,6 +3434,78 @@ func (m *model) boundDetailScroll() {
 	if m.detailScroll > maxOffset {
 		m.detailScroll = maxOffset
 	}
+}
+
+func (m model) wizardIsFieldEntryMode() bool {
+	return m.mode == screenCreateWizard &&
+		!m.wizardApplying &&
+		!m.wizard.datasetCreateRunning &&
+		!m.wizard.isConfirmationStep() &&
+		m.wizard.templateMode == wizardTemplateModeNone &&
+		!m.wizard.userlandMode &&
+		!m.wizard.thinDatasetMode
+}
+
+func (m *model) boundWizardScroll() {
+	if m.mode != screenCreateWizard {
+		m.wizardScroll = 0
+		return
+	}
+	if m.width <= 0 || m.height <= 0 {
+		m.wizardScroll = 0
+		return
+	}
+
+	var lines []string
+	if leftWidth, _, ok := m.wizardSplitPaneWidths(); ok {
+		lines, _ = m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
+	} else {
+		lines = m.wizardLines(max(12, m.width-2))
+	}
+
+	maxOffset := max(0, len(lines)-m.wizardBodyHeight())
+	if m.wizardScroll < 0 {
+		m.wizardScroll = 0
+	}
+	if m.wizardScroll > maxOffset {
+		m.wizardScroll = maxOffset
+	}
+}
+
+func (m *model) ensureWizardFieldVisible() {
+	if !m.wizardIsFieldEntryMode() || m.width <= 0 || m.height <= 0 {
+		return
+	}
+
+	bodyHeight := m.wizardBodyHeight()
+	if bodyHeight <= 0 {
+		return
+	}
+
+	activeLine := -1
+	if leftWidth, _, ok := m.wizardSplitPaneWidths(); ok {
+		_, activeLine = m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
+	} else {
+		_, activeLine = m.wizardFieldEntryLayout(max(12, m.width-2), true)
+		prefixLines := 2
+		if m.wizard.currentStep().Description != "" {
+			prefixLines = 3
+		}
+		if activeLine >= 0 {
+			activeLine += prefixLines
+		}
+	}
+	if activeLine < 0 {
+		m.boundWizardScroll()
+		return
+	}
+
+	if activeLine < m.wizardScroll {
+		m.wizardScroll = activeLine
+	} else if activeLine >= m.wizardScroll+bodyHeight {
+		m.wizardScroll = activeLine - bodyHeight + 1
+	}
+	m.boundWizardScroll()
 }
 
 func (m model) detailBodyHeight() int {
@@ -2711,6 +3531,7 @@ func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatu
 		returnMode:  returnMode,
 		selectMode:  selectMode,
 		sourceInput: strings.TrimSpace(sourceInput),
+		patchBase:   "auto",
 	}
 	if dataset, mountpoint, ok := suggestTemplateParentDataset(status); ok {
 		state.parentDataset = dataset
@@ -2726,7 +3547,7 @@ func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatu
 }
 
 func (s *templateDatasetCreateState) refreshPreview() {
-	s.preview = InspectTemplateDatasetCreateWithParent(s.sourceInput, s.parentOverride())
+	s.preview = InspectTemplateDatasetCreateWithParent(s.sourceInput, s.parentOverride(), s.patchBase)
 }
 
 func (s *templateDatasetCreateState) refreshRenamePreview() {
@@ -3044,18 +3865,13 @@ func (m model) renderDetailPanel(width, height int) string {
 			state = "RUNNING"
 			jidText = strconv.Itoa(j.JID)
 		}
-		lines = append(lines,
-			fmt.Sprintf("%s %s", detailKeyStyle.Render("Name:"), j.Name),
-			fmt.Sprintf("%s %s", detailKeyStyle.Render("State:"), state),
-			fmt.Sprintf("%s %s", detailKeyStyle.Render("JID:"), jidText),
-			fmt.Sprintf("%s %.2f%%", detailKeyStyle.Render("CPU:"), j.CPUPercent),
-			fmt.Sprintf("%s %dMB", detailKeyStyle.Render("Memory:"), j.MemoryMB),
-			"",
-			"t: open the template manager.",
-			"s: start/stop selected jail.",
-			"z: open ZFS panel for selected jail.",
-			"Press enter for full detail view.",
-		)
+		lines = append(lines, renderKeyValueLines(max(12, width-2),
+			[2]string{"Name", j.Name},
+			[2]string{"State", state},
+			[2]string{"JID", jidText},
+			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
+			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},
+		)...)
 	}
 
 	return lipgloss.NewStyle().
@@ -3125,6 +3941,21 @@ func styleWizardMessage(message string) string {
 	return summaryStyle.Render(message)
 }
 
+func summarizeCreationWarning(message string) string {
+	trimmed := strings.TrimSpace(message)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "linux bootstrap skipped"):
+		return "linux bootstrap skipped; use detail view action 'b' after networking is ready"
+	case strings.Contains(lower, "linux bootstrap preflight failed"):
+		return "linux bootstrap preflight failed; use detail view action 'b' after fixing networking"
+	case strings.Contains(lower, "failed to bootstrap") || strings.Contains(lower, "failed to install debootstrap"):
+		return "linux bootstrap failed; use detail view action 'b' after fixing package access"
+	default:
+		return trimmed
+	}
+}
+
 func looksLikeWarningText(message string) bool {
 	lower := strings.ToLower(message)
 	return strings.Contains(lower, "warning") ||
@@ -3138,6 +3969,84 @@ func looksLikeWarningText(message string) bool {
 		strings.Contains(lower, "refusing") ||
 		strings.Contains(lower, "blocked") ||
 		strings.Contains(lower, "cannot")
+}
+
+func appendSection(lines *[]string, width int, title string, body ...string) {
+	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
+		*lines = append(*lines, "")
+	}
+	*lines = append(*lines, sectionStyle.Render(title))
+	for _, line := range body {
+		*lines = append(*lines, truncate(line, width))
+	}
+}
+
+func appendRenderedSection(lines *[]string, title string, body []string) {
+	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
+		*lines = append(*lines, "")
+	}
+	*lines = append(*lines, sectionStyle.Render(title))
+	*lines = append(*lines, body...)
+}
+
+func renderKeyValueLines(width int, pairs ...[2]string) []string {
+	labelWidth := 25
+	if width < 72 {
+		labelWidth = 20
+	}
+	return renderKeyValueLinesWithLabelWidth(width, labelWidth, pairs...)
+}
+
+func renderKeyValueLinesWithLabelWidth(width, labelWidth int, pairs ...[2]string) []string {
+	lines := make([]string, 0, len(pairs)*2)
+	for _, pair := range pairs {
+		lines = append(lines, renderKeyValue(width, labelWidth, pair[0], pair[1])...)
+	}
+	return lines
+}
+
+func renderKeyValue(width, labelWidth int, label, value string) []string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return []string{truncate(valueOrDash(value), width)}
+	}
+	if labelWidth < 8 {
+		labelWidth = 8
+	}
+	valueWidth := max(8, width-labelWidth-2)
+	wrapped := wrapText(valueOrDash(value), valueWidth)
+	prefix := fmt.Sprintf("%-*s", labelWidth, label+":")
+	lines := make([]string, 0, len(wrapped))
+	if len(wrapped) == 0 {
+		return []string{detailKeyStyle.Render(prefix) + " -"}
+	}
+	lines = append(lines, detailKeyStyle.Render(prefix)+" "+wrapped[0])
+	continuation := strings.Repeat(" ", labelWidth+1)
+	for _, part := range wrapped[1:] {
+		lines = append(lines, continuation+" "+part)
+	}
+	return lines
+}
+
+func renderInformationalKeyValue(width int, line string) []string {
+	labelWidth := 25
+	if width < 72 {
+		labelWidth = 20
+	}
+	return renderInformationalKeyValueWithLabelWidth(width, labelWidth, line)
+}
+
+func renderInformationalKeyValueWithLabelWidth(width, labelWidth int, line string) []string {
+	left, right, ok := strings.Cut(strings.TrimSpace(line), ":")
+	if !ok {
+		return []string{truncate(line, width)}
+	}
+	label := strings.TrimSpace(left)
+	value := strings.TrimSpace(right)
+	if label == "" || value == "" {
+		return []string{truncate(line, width)}
+	}
+	return renderKeyValueLinesWithLabelWidth(width, labelWidth, [2]string{label, value})
 }
 
 func valueOrDash(value string) string {

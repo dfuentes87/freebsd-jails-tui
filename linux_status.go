@@ -20,16 +20,21 @@ type LinuxHostStatus struct {
 
 type LinuxWizardPrereqs struct {
 	Host         LinuxHostStatus
+	MirrorURL    string
 	MirrorHost   string
 	PreflightURL string
+	ResolveError string
 }
 
 type LinuxReadiness struct {
 	Host                 LinuxHostStatus
+	BootstrapFamily      string
 	CompatRoot           string
 	BootstrapMode        string
+	MirrorURL            string
 	MirrorHost           string
 	PreflightURL         string
+	MirrorResolveError   string
 	UserlandPresent      bool
 	RuntimeChecked       bool
 	IPv4Route            bool
@@ -70,10 +75,13 @@ func collectLinuxHostStatus() LinuxHostStatus {
 }
 
 func collectLinuxWizardPrereqs(values jailWizardValues) LinuxWizardPrereqs {
+	mirror, err := resolveLinuxMirror(values)
 	return LinuxWizardPrereqs{
 		Host:         collectLinuxHostStatus(),
-		MirrorHost:   linuxMirrorHost(values),
-		PreflightURL: linuxPreflightURL(values),
+		MirrorURL:    mirror.BaseURL,
+		MirrorHost:   mirror.Host,
+		PreflightURL: mirror.PreflightURL,
+		ResolveError: errorText(err),
 	}
 }
 
@@ -84,11 +92,15 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 
 	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
 	readiness := &LinuxReadiness{
-		Host:          collectLinuxHostStatus(),
-		BootstrapMode: effectiveLinuxBootstrapMode(values),
-		MirrorHost:    linuxMirrorHost(values),
-		PreflightURL:  linuxPreflightURL(values),
+		Host:            collectLinuxHostStatus(),
+		BootstrapFamily: effectiveLinuxDistro(values),
+		BootstrapMode:   effectiveLinuxBootstrapMode(values),
 	}
+	mirror, err := resolveLinuxMirror(values)
+	readiness.MirrorURL = mirror.BaseURL
+	readiness.MirrorHost = mirror.Host
+	readiness.PreflightURL = mirror.PreflightURL
+	readiness.MirrorResolveError = errorText(err)
 	if strings.TrimSpace(detail.Path) != "" {
 		readiness.CompatRoot = linuxCompatRoot(detail.Path, values)
 		readiness.UserlandPresent = linuxUserlandPresent(detail.Path, values)
@@ -102,11 +114,19 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 	readiness.IPv4Route = linuxRouteFamilyAvailable(detail.Name, "inet")
 	readiness.IPv6Route = linuxRouteFamilyAvailable(detail.Name, "inet6")
 	if !readiness.IPv4Route && !readiness.IPv6Route {
+		if readiness.PreflightURL != "" && linuxGenericFetchReachable(detail.Name, readiness.PreflightURL) {
+			populateLinuxHealth(readiness, detail, values)
+			return readiness
+		}
 		readiness.RuntimeError = "No IPv4 or IPv6 default route inside the jail."
 		return readiness
 	}
 	if readiness.MirrorHost == "" {
-		readiness.RuntimeError = "Could not determine Linux bootstrap mirror host."
+		if readiness.MirrorResolveError != "" {
+			readiness.RuntimeError = readiness.MirrorResolveError
+		} else {
+			readiness.RuntimeError = "Could not determine Linux bootstrap mirror host."
+		}
 		return readiness
 	}
 
@@ -180,6 +200,20 @@ func linuxFetchReachable(jailName, url, familyFlag string) bool {
 		return false
 	}
 	return exec.Command("jexec", jailName, "fetch", familyFlag, "-qo", "/dev/null", url).Run() == nil
+}
+
+func linuxGenericFetchReachable(jailName, url string) bool {
+	if strings.TrimSpace(url) == "" {
+		return false
+	}
+	return exec.Command("jexec", jailName, "fetch", "-qo", "/dev/null", url).Run() == nil
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func populateLinuxHealth(readiness *LinuxReadiness, detail JailDetail, values jailWizardValues) {

@@ -49,6 +49,8 @@ type JailDetail struct {
 	JailConfFlags         []string
 	ZFS                   *ZFSDatasetInfo
 	RctlRules             []string
+	RctlConfig            *JailRctlConfig
+	RacctStatus           *RacctStatus
 	LinuxReadiness        *LinuxReadiness
 	SourceErrors          map[string]string
 	LastUpdated           time.Time
@@ -211,6 +213,9 @@ func CollectJailDetail(name string, jid int, pathHint string, now time.Time) (Ja
 	rules, rctlErr := discoverRctlRules(name, detail.JID)
 	addErr("rctl", rctlErr)
 	detail.RctlRules = rules
+	detail.RctlConfig = rctlConfigFromRawLines(detail.JailConfRaw)
+	racct := collectRacctStatus()
+	detail.RacctStatus = &racct
 	detail.RuntimeValues, detail.AdvancedRuntimeFields = classifyDetailRuntime(detail.JLSFields, detail.JailConfValues)
 	detail.NetworkSummary = collectJailNetworkSummary(detail)
 	detail.StartupConfig = collectJailStartupConfig(detail)

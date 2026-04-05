@@ -30,10 +30,14 @@ type jailDestroyPlan struct {
 func ExecuteJailDestroy(target Jail) JailDestroyResult {
 	result := JailDestroyResult{Name: strings.TrimSpace(target.Name)}
 	logs := make([]string, 0, 32)
+	var persistentRctlCleanup func()
 	logf := func(format string, args ...any) {
 		logs = append(logs, fmt.Sprintf(format, args...))
 	}
 	fail := func(err error) JailDestroyResult {
+		if persistentRctlCleanup != nil {
+			persistentRctlCleanup()
+		}
 		result.Logs = logs
 		result.Err = err
 		return result
@@ -57,6 +61,17 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 			return fail(err)
 		}
 	}
+	if err := preflightDestroyPlan(plan); err != nil {
+		return fail(err)
+	}
+
+	configBackup, err := backupFileForMutation(plan.ConfigPath, "destroy-"+result.Name, &logs)
+	if err != nil {
+		return fail(err)
+	}
+	if _, err := backupFileForMutation(plan.FstabPath, "destroy-"+result.Name, &logs); err != nil {
+		return fail(err)
+	}
 
 	if plan.Running {
 		if _, err := runLoggedCommand(&logs, "service", "jail", "stop", result.Name); err != nil {
@@ -65,26 +80,43 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 	}
 
 	removeJailRctlRules(result.Name, &logs)
+	persistentRctlCleanup, err = removePersistentJailRctlRules(result.Name, &logs)
+	if err != nil {
+		return fail(err)
+	}
 
 	if plan.ZFSDataset != "" {
 		if _, err := runLoggedCommand(&logs, "zfs", "destroy", "-r", plan.ZFSDataset); err != nil {
 			return fail(fmt.Errorf("failed to destroy dataset %q: %w", plan.ZFSDataset, err))
 		}
 	} else if plan.JailPath != "" {
+		if err := clearDestroyPathFlags(plan.JailPath, &logs); err != nil {
+			return fail(err)
+		}
 		logs = append(logs, "$ rm -rf "+plan.JailPath)
 		if err := os.RemoveAll(plan.JailPath); err != nil {
 			return fail(fmt.Errorf("failed to remove jail path %q: %w", plan.JailPath, err))
 		}
 	}
 
+	configRemoved := false
 	if err := removeFileIfExists(plan.ConfigPath, &logs); err != nil {
 		return fail(err)
 	}
+	if configBackup != nil {
+		configRemoved = true
+	}
 	if err := removeFileIfExists(plan.FstabPath, &logs); err != nil {
+		if configRemoved {
+			if restoreErr := restoreFileMutationBackup(configBackup, &logs); restoreErr != nil {
+				logs = append(logs, "rollback warning: "+restoreErr.Error())
+			}
+		}
 		return fail(err)
 	}
 
 	logf("Jail %s destroyed successfully.", result.Name)
+	persistentRctlCleanup = nil
 	result.Logs = logs
 	return result
 }
@@ -226,6 +258,55 @@ func validateFallbackDestroyPlan(plan jailDestroyPlan) error {
 	return nil
 }
 
+func preflightDestroyPlan(plan jailDestroyPlan) error {
+	actionable := false
+	if dataset := strings.TrimSpace(plan.ZFSDataset); dataset != "" {
+		if !zfsDatasetExists(dataset) {
+			return fmt.Errorf("matched ZFS dataset %q no longer exists; refresh before destroying", dataset)
+		}
+		actionable = true
+	} else if path := strings.TrimSpace(plan.JailPath); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			actionable = true
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to inspect jail path %q: %w", path, err)
+		}
+	}
+	for _, candidate := range []string{plan.ConfigPath, plan.FstabPath} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			actionable = true
+			continue
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to inspect %q before destroy: %w", candidate, err)
+		}
+	}
+	if !actionable {
+		return fmt.Errorf("nothing exists to destroy for jail %q", strings.TrimSpace(plan.Name))
+	}
+	return nil
+}
+
+func clearDestroyPathFlags(path string, logs *[]string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to inspect jail path %q before clearing file flags: %w", path, err)
+	}
+	if _, err := runLoggedCommand(logs, "chflags", "-R", "0", path); err != nil {
+		return fmt.Errorf("failed to clear file flags under %q: %w", path, err)
+	}
+	return nil
+}
+
 func removeJailRctlRules(name string, logs *[]string) {
 	if _, err := runLoggedCommand(logs, "rctl", "-r", "jail:"+name); err != nil {
 		*logs = append(*logs, "warning: unable to remove rctl rules: "+err.Error())
@@ -255,9 +336,9 @@ func buildDestroyPreview(target Jail) []string {
 	lines := []string{
 		"Destroying a jail will make irreversible changes:",
 		"1. Stop the jail if it is currently running.",
-		"2. Remove jail-specific rctl rules if present.",
+		"2. Remove jail-specific rctl rules and any managed /etc/rctl.conf block for this jail.",
 		"3. Destroy the ZFS dataset recursively only when the jail path matches a dataset mountpoint exactly.",
-		"4. Otherwise remove only the jail root path recursively.",
+		"4. Otherwise clear file flags with chflags -R 0 before removing the jail root path recursively.",
 		"5. Remove /etc/jail.conf.d/<name>.conf and /etc/fstab.<name> when present.",
 		"",
 		fmt.Sprintf("Selected jail: %s", target.Name),
@@ -272,9 +353,15 @@ func buildDestroyPreview(target Jail) []string {
 			lines = append(lines, fmt.Sprintf("Fallback path removal: blocked (%s)", err.Error()))
 		} else {
 			lines = append(lines, "Fallback path removal: allowed for dedicated jail leaf path")
+			if strings.TrimSpace(plan.JailPath) != "" {
+				lines = append(lines, fmt.Sprintf("Pre-step before rm -rf: chflags -R 0 %s", plan.JailPath))
+			}
 		}
 	} else {
 		lines = append(lines, "Matched ZFS dataset: none")
+		if strings.TrimSpace(plan.JailPath) != "" {
+			lines = append(lines, fmt.Sprintf("Pre-step before rm -rf: chflags -R 0 %s", plan.JailPath))
+		}
 	}
 	if strings.TrimSpace(target.Hostname) != "" {
 		lines = append(lines, fmt.Sprintf("Current hostname: %s", target.Hostname))

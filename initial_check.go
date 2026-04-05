@@ -41,6 +41,7 @@ type initialCheckPhase int
 const (
 	initialPhaseLoading initialCheckPhase = iota
 	initialPhaseEnableRCConfirm
+	initialPhaseJailConfPrompt
 	initialPhaseDirsPrompt
 	initialPhaseDirsCustomInput
 	initialPhaseDatasetsPrompt
@@ -55,9 +56,11 @@ type initialConfigStatus struct {
 	NeedsParallelStart bool
 	JailEnableStatus   RCSettingStatus
 	ParallelStatus     RCSettingStatus
+	JailConfStatus     jailConfIncludeStatus
 
-	ExistingJailPaths []string
-	HasJailPath       bool
+	ExistingJailPaths     []string
+	HasJailPath           bool
+	MissingDocJailSubdirs []string
 
 	JailDatasets   []string
 	HasJailDataset bool
@@ -68,6 +71,10 @@ type initialConfigStatus struct {
 
 func (status initialConfigStatus) needsRCFix() bool {
 	return status.NeedsJailEnable || status.NeedsParallelStart
+}
+
+func (status initialConfigStatus) needsJailConfIncludeFix() bool {
+	return status.JailConfStatus.needsFix()
 }
 
 type initialCheckState struct {
@@ -82,6 +89,7 @@ type initialCheckState struct {
 	logs    []string
 
 	skipRC       bool
+	skipJailConf bool
 	skipDirs     bool
 	skipDatasets bool
 
@@ -113,7 +121,11 @@ func (state *initialCheckState) setPhaseFromStatus() {
 		state.phase = initialPhaseEnableRCConfirm
 		return
 	}
-	if !state.status.HasJailPath && !state.skipDirs {
+	if state.status.needsJailConfIncludeFix() && !state.skipJailConf {
+		state.phase = initialPhaseJailConfPrompt
+		return
+	}
+	if (!state.status.HasJailPath || len(state.status.MissingDocJailSubdirs) > 0) && !state.skipDirs {
 		state.phase = initialPhaseDirsPrompt
 		return
 	}
@@ -159,6 +171,9 @@ func initialWizardDestination(status initialConfigStatus) string {
 		base = docJailsPath
 	}
 	base = filepath.Clean(base)
+	if base == docJailsPath {
+		return filepath.Join(base, "containers", "new-jail")
+	}
 	containers := filepath.Join(base, "containers")
 	if info, err := os.Stat(containers); err == nil && info.IsDir() {
 		return filepath.Join(containers, "new-jail")
@@ -311,6 +326,7 @@ func (state *initialCheckState) beginCustomDatasetInput() {
 
 func (state *initialCheckState) resetSkips() {
 	state.skipRC = false
+	state.skipJailConf = false
 	state.skipDirs = false
 	state.skipDatasets = false
 }
@@ -381,6 +397,10 @@ func collectInitialConfigStatus(now time.Time) (initialConfigStatus, error) {
 	status.NeedsParallelStart = !isEnabledRCValue(status.ParallelStartValue)
 	status.JailEnableStatus = collectRCSettingStatus("jail_enable", "YES")
 	status.ParallelStatus = collectRCSettingStatus("jail_parallel_start", "YES")
+	status.JailConfStatus = collectJailConfDIncludeStatus()
+	if strings.TrimSpace(status.JailConfStatus.ReadError) != "" {
+		errs = append(errs, errors.New(status.JailConfStatus.ReadError))
+	}
 
 	for _, path := range []string{"/jail", "/usr/jail", docJailsPath} {
 		info, statErr := os.Stat(path)
@@ -390,6 +410,23 @@ func collectInitialConfigStatus(now time.Time) (initialConfigStatus, error) {
 		status.ExistingJailPaths = append(status.ExistingJailPaths, path)
 	}
 	status.HasJailPath = len(status.ExistingJailPaths) > 0
+	hasDocJailsPath := false
+	for _, path := range status.ExistingJailPaths {
+		if path == docJailsPath {
+			hasDocJailsPath = true
+			break
+		}
+	}
+	if hasDocJailsPath {
+		for _, name := range []string{"media", "templates", "containers"} {
+			path := filepath.Join(docJailsPath, name)
+			info, err := os.Stat(path)
+			if err == nil && info.IsDir() {
+				continue
+			}
+			status.MissingDocJailSubdirs = append(status.MissingDocJailSubdirs, path)
+		}
+	}
 
 	datasets, datasetErr := discoverJailNamedDatasets()
 	if datasetErr != nil {
@@ -548,6 +585,24 @@ func createJailLayoutCmd(basePath string) tea.Cmd {
 	}
 }
 
+func ensureJailConfIncludeCmd() tea.Cmd {
+	return func() tea.Msg {
+		logs := make([]string, 0, 8)
+		if err := ensureJailConfDInclude(&logs); err != nil {
+			return initialActionMsg{
+				logs:    logs,
+				err:     err,
+				message: "Failed updating /etc/jail.conf include.",
+			}
+		}
+		return initialActionMsg{
+			logs:    logs,
+			message: "/etc/jail.conf now includes /etc/jail.conf.d/*.conf.",
+			refresh: true,
+		}
+	}
+}
+
 func createDefaultDatasetLayoutCmd() tea.Cmd {
 	return createDatasetLayoutCmd(
 		docDatasetBase,
@@ -623,6 +678,23 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "N", "s", "S":
 			m.initCheck.skipRC = true
 			m.initCheck.message = "Skipped rc.conf updates."
+			m.initCheck.setPhaseFromStatus()
+			return m, nil
+		case "r", "R":
+			m.initCheck.resetSkips()
+			m.initCheck.loading = true
+			return m, collectInitialConfigCmd()
+		}
+
+	case initialPhaseJailConfPrompt:
+		switch key {
+		case "y", "Y", "enter":
+			m.initCheck.applying = true
+			m.initCheck.message = "Updating /etc/jail.conf include..."
+			return m, ensureJailConfIncludeCmd()
+		case "n", "N", "s", "S":
+			m.initCheck.skipJailConf = true
+			m.initCheck.message = "Skipped /etc/jail.conf include update."
 			m.initCheck.setPhaseFromStatus()
 			return m, nil
 		case "r", "R":
@@ -817,88 +889,116 @@ func (m model) renderInitialCheckView() string {
 
 func (m model) initialCheckLines(width int) []string {
 	lines := make([]string, 0, 64)
-	appendLine := func(line string) {
-		lines = append(lines, truncate(line, width))
-	}
 
 	if m.initCheck.loading {
-		appendLine("Running initial checks...")
+		lines = append(lines, truncate("Running initial checks...", width))
 		return lines
 	}
-	lines = append(lines, sectionStyle.Render("rc.conf checks"))
-	appendLine(fmt.Sprintf("jail_enable = %s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable)))
+	appendRenderedSection(&lines, "rc.conf checks", renderKeyValueLines(width,
+		[2]string{"jail_enable", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable))},
+	))
 	for _, line := range rcSettingDriftLines(m.initCheck.status.JailEnableStatus) {
 		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
 	}
-	appendLine(fmt.Sprintf("jail_parallel_start = %s (%s)", displayRCValue(m.initCheck.status.ParallelStartValue), checkStatusText(!m.initCheck.status.NeedsParallelStart)))
+	lines = append(lines, renderKeyValueLines(width,
+		[2]string{"jail_parallel_start", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.ParallelStartValue), checkStatusText(!m.initCheck.status.NeedsParallelStart))},
+	)...)
 	for _, line := range rcSettingDriftLines(m.initCheck.status.ParallelStatus) {
 		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
 	}
-	appendLine("")
-
-	lines = append(lines, sectionStyle.Render("Jail path checks"))
-	if m.initCheck.status.HasJailPath {
-		appendLine("Found jail paths:")
-		for _, path := range m.initCheck.status.ExistingJailPaths {
-			appendLine("  - " + path)
-		}
-	} else {
-		appendLine("No jail path found at /jail, /usr/jail, or /usr/local/jails.")
+	appendSection(&lines, width, "jail.conf checks")
+	includeState := "missing"
+	if m.initCheck.status.JailConfStatus.IncludePresent {
+		includeState = "present"
 	}
-	appendLine("")
+	if strings.TrimSpace(m.initCheck.status.JailConfStatus.ReadError) != "" {
+		includeState = "error"
+	}
+	lines = append(lines, renderKeyValueLines(width,
+		[2]string{"jail.conf path", valueOrDash(m.initCheck.status.JailConfStatus.ConfigPath)},
+		[2]string{"jail.conf.d include", includeState},
+	)...)
+	lines = append(lines, truncate("Expected include: "+jailConfDInclude, width))
+	if strings.TrimSpace(m.initCheck.status.JailConfStatus.ReadError) != "" {
+		lines = append(lines, wizardErrorStyle.Render(truncate("  "+m.initCheck.status.JailConfStatus.ReadError, width)))
+	}
 
-	lines = append(lines, sectionStyle.Render("ZFS dataset checks"))
-	if m.initCheck.status.HasJailDataset {
-		appendLine("Datasets containing \"jail\":")
-		for _, dataset := range m.initCheck.status.JailDatasets {
-			appendLine("  - " + dataset)
+	appendSection(&lines, width, "Jail path checks")
+	if m.initCheck.status.HasJailPath {
+		lines = append(lines, truncate("Found jail paths:", width))
+		for _, path := range m.initCheck.status.ExistingJailPaths {
+			lines = append(lines, truncate("  - "+path, width))
 		}
 	} else {
-		appendLine("No ZFS dataset containing \"jail\" was found.")
+		lines = append(lines, truncate("No jail path found at /jail, /usr/jail, or /usr/local/jails.", width))
+	}
+
+	appendSection(&lines, width, "ZFS dataset checks")
+	if m.initCheck.status.HasJailDataset {
+		lines = append(lines, truncate("Datasets containing \"jail\":", width))
+		for _, dataset := range m.initCheck.status.JailDatasets {
+			lines = append(lines, truncate("  - "+dataset, width))
+		}
+	} else {
+		lines = append(lines, truncate("No ZFS dataset containing \"jail\" was found.", width))
 	}
 
 	if len(m.initCheck.status.Errors) > 0 {
-		appendLine("")
-		lines = append(lines, sectionStyle.Render("Check warnings"))
+		appendSection(&lines, width, "Check warnings")
 		for _, err := range m.initCheck.status.Errors {
 			lines = append(lines, wizardErrorStyle.Render(truncate("  - "+err, width)))
 		}
 	}
 
-	appendLine("")
-	lines = append(lines, sectionStyle.Render("Next action"))
+	appendSection(&lines, width, "Next action")
 
 	switch m.initCheck.phase {
 	case initialPhaseEnableRCConfirm:
-		appendLine("Enable missing rc.conf settings now?")
-		appendLine("y: yes, set to YES | n: skip for now")
+		lines = append(lines, truncate("Enable missing rc.conf settings now?", width))
+		lines = append(lines, truncate("y: set to YES | n: skip", width))
+	case initialPhaseJailConfPrompt:
+		if !m.initCheck.status.JailConfStatus.FileExists {
+			lines = append(lines, truncate("/etc/jail.conf was not found.", width))
+			lines = append(lines, truncate("Create it now with the /etc/jail.conf.d include line?", width))
+		} else {
+			lines = append(lines, truncate("/etc/jail.conf is missing the /etc/jail.conf.d include line.", width))
+			lines = append(lines, truncate("Append it now?", width))
+		}
+		lines = append(lines, truncate("y: update /etc/jail.conf | n: skip", width))
 	case initialPhaseDirsPrompt:
-		appendLine("No jail directory root found.")
-		appendLine("d: create documentation default /usr/local/jails layout")
-		appendLine("c: set custom jail base path")
-		appendLine("n: skip for now")
+		if len(m.initCheck.status.MissingDocJailSubdirs) > 0 {
+			lines = append(lines, truncate("Standard jail subdirectories are missing under /usr/local/jails.", width))
+			lines = append(lines, truncate("Missing:", width))
+			for _, path := range m.initCheck.status.MissingDocJailSubdirs {
+				lines = append(lines, truncate("  - "+path, width))
+			}
+		} else {
+			lines = append(lines, truncate("No jail directory root found.", width))
+		}
+		lines = append(lines, truncate("d: create default /usr/local/jails layout", width))
+		lines = append(lines, truncate("c: set custom jail base path", width))
+		lines = append(lines, truncate("n: skip", width))
 	case initialPhaseDirsCustomInput:
-		appendLine("Custom jail base path:")
-		appendLine("Path: " + m.initCheck.customDirPath)
-		appendLine("enter: create path + media/templates/containers subdirs")
+		lines = append(lines, truncate("Custom jail base path:", width))
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Path", m.initCheck.customDirPath})...)
+		lines = append(lines, truncate("enter: create path and media/templates/containers subdirs", width))
 	case initialPhaseDatasetsPrompt:
-		appendLine("No jail-related ZFS datasets found.")
-		appendLine("d: create documentation default zroot/jails layout")
-		appendLine("c: set custom dataset values")
-		appendLine("n: skip for now")
+		lines = append(lines, truncate("No jail-related ZFS datasets found.", width))
+		lines = append(lines, truncate("d: create default zroot/jails layout", width))
+		lines = append(lines, truncate("c: set custom dataset values", width))
+		lines = append(lines, truncate("n: skip", width))
 	case initialPhaseDatasetsCustomInput:
 		lines = append(lines, m.initialDatasetCustomLines(width)...)
 	case initialPhaseComplete:
-		appendLine("Initial check complete.")
-		appendLine("Press enter to continue to dashboard.")
+		lines = append(lines, truncate("Initial check complete.", width))
+		lines = append(lines, truncate("Press enter to continue to dashboard.", width))
 	}
 
 	if len(m.initCheck.logs) > 0 {
-		appendLine("")
-		lines = append(lines, sectionStyle.Render("Last action logs"))
+		appendSection(&lines, width, "Last action logs")
 		maxLogs := min(6, len(m.initCheck.logs))
 		for _, line := range m.initCheck.logs[len(m.initCheck.logs)-maxLogs:] {
-			appendLine(line)
+			lines = append(lines, truncate(line, width))
 		}
 	}
 
@@ -941,6 +1041,8 @@ func (m model) initialCheckFooterHint() string {
 		return "Running initial checks... | q: quit"
 	case initialPhaseEnableRCConfirm:
 		return "y: enable missing settings | n: skip | r: re-check | q: quit"
+	case initialPhaseJailConfPrompt:
+		return "y: update /etc/jail.conf | n: skip | r: re-check | q: quit"
 	case initialPhaseDirsPrompt:
 		return "d: docs default | c: custom path | n: skip | r: re-check | q: quit"
 	case initialPhaseDirsCustomInput:

@@ -29,6 +29,7 @@ type NetworkWizardPrereqs struct {
 	InterfaceExists    bool
 	Bridge             string
 	BridgePolicy       string
+	HostSetup          string
 	BridgeExists       bool
 	BridgeIsBridge     bool
 	BridgeCreateNeeded bool
@@ -44,6 +45,8 @@ type NetworkWizardPrereqs struct {
 	IP6OverlapWarnings []string
 	DefaultRouter      string
 	RouterStatus       string
+	RCConfWarnings     []string
+	RCConfErrors       []string
 	Warnings           []string
 	Errors             []string
 }
@@ -144,6 +147,7 @@ func collectNetworkWizardPrereqs(values jailWizardValues) NetworkWizardPrereqs {
 		Interface:     strings.TrimSpace(values.Interface),
 		Bridge:        strings.TrimSpace(values.Bridge),
 		BridgePolicy:  effectiveBridgePolicy(values),
+		HostSetup:     effectiveVNETHostSetup(values),
 		Uplink:        strings.TrimSpace(values.Uplink),
 		IP4:           strings.TrimSpace(values.IP4),
 		IP6:           strings.TrimSpace(values.IP6),
@@ -199,6 +203,11 @@ func collectNetworkWizardPrereqs(values jailWizardValues) NetworkWizardPrereqs {
 			}
 		} else {
 			prereqs.Warnings = append(prereqs.Warnings, "no uplink selected; the bridge will stay isolated until you connect it manually")
+		}
+		if prereqs.HostSetup == "persistent" {
+			prereqs.RCConfWarnings, prereqs.RCConfErrors = collectPersistentVNETRCConfDrift(values)
+			prereqs.Warnings = append(prereqs.Warnings, prereqs.RCConfWarnings...)
+			prereqs.Errors = append(prereqs.Errors, prereqs.RCConfErrors...)
 		}
 	default:
 		if prereqs.Interface != "" {
@@ -502,6 +511,9 @@ func networkWizardPrereqLines(prereqs NetworkWizardPrereqs) []string {
 			if prereqs.UplinkAttachNeeded {
 				lines = append(lines, "Uplink setup: uplink will be attached to the bridge before jail start.")
 			}
+			if prereqs.HostSetup != "" {
+				lines = append(lines, fmt.Sprintf("Host setup: %s", prereqs.HostSetup))
+			}
 		} else {
 			lines = append(lines, "Uplink: none selected")
 		}
@@ -553,7 +565,34 @@ func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), er
 	if normalizedJailType(values.JailType) != "vnet" {
 		return nil, nil
 	}
-	return ensureVNETHostReady(prereqs, logs)
+	var cleanups []func()
+	if prereqs.HostSetup == "persistent" {
+		persistCleanup, err := ensurePersistentVNETHostConfig(values, logs)
+		if err != nil {
+			return nil, err
+		}
+		if persistCleanup != nil {
+			cleanups = append(cleanups, persistCleanup)
+		}
+	}
+	runtimeCleanup, err := ensureVNETHostReady(prereqs, logs)
+	if err != nil {
+		for idx := len(cleanups) - 1; idx >= 0; idx-- {
+			cleanups[idx]()
+		}
+		return nil, err
+	}
+	if runtimeCleanup != nil {
+		cleanups = append(cleanups, runtimeCleanup)
+	}
+	if len(cleanups) == 0 {
+		return nil, nil
+	}
+	return func() {
+		for idx := len(cleanups) - 1; idx >= 0; idx-- {
+			cleanups[idx]()
+		}
+	}, nil
 }
 
 func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), error) {
@@ -628,4 +667,160 @@ func uniqueStrings(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func collectPersistentVNETRCConfDrift(values jailWizardValues) ([]string, []string) {
+	if effectiveVNETHostSetup(values) != "persistent" {
+		return nil, nil
+	}
+	var warnings []string
+	var errors []string
+
+	bridge := strings.TrimSpace(values.Bridge)
+	uplink := strings.TrimSpace(values.Uplink)
+	router := strings.TrimSpace(values.DefaultRouter)
+
+	clonedValue, err := readRCConfValue("cloned_interfaces")
+	if err != nil {
+		errors = append(errors, "failed to inspect rc.conf cloned_interfaces: "+err.Error())
+	} else if !stringSliceContains(parseJailListValue(clonedValue), bridge) {
+		warnings = append(warnings, fmt.Sprintf("rc.conf cloned_interfaces does not include %q; persistent setup will add it", bridge))
+	}
+
+	bridgeKey := "ifconfig_" + bridge
+	desiredBridge := persistentBridgeRCValue(values)
+	bridgeValue, err := readRCConfValue(bridgeKey)
+	if err != nil {
+		errors = append(errors, fmt.Sprintf("failed to inspect rc.conf %s: %v", bridgeKey, err))
+	} else if strings.TrimSpace(bridgeValue) == "" {
+		warnings = append(warnings, fmt.Sprintf("rc.conf %s is missing; persistent setup will write %q", bridgeKey, desiredBridge))
+	} else if strings.TrimSpace(bridgeValue) != desiredBridge {
+		errors = append(errors, fmt.Sprintf("rc.conf %s is %q, expected %q for persistent setup", bridgeKey, bridgeValue, desiredBridge))
+	}
+
+	if uplink != "" {
+		uplinkKey := "ifconfig_" + uplink
+		uplinkValue, err := readRCConfValue(uplinkKey)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("failed to inspect rc.conf %s: %v", uplinkKey, err))
+		} else if strings.TrimSpace(uplinkValue) == "" {
+			warnings = append(warnings, fmt.Sprintf("rc.conf %s is missing; persistent setup will write %q", uplinkKey, "up"))
+		} else if strings.TrimSpace(uplinkValue) != "up" {
+			errors = append(errors, fmt.Sprintf("rc.conf %s is %q; persistent setup refuses to overwrite it with %q", uplinkKey, uplinkValue, "up"))
+		}
+	}
+
+	if router != "" {
+		routerValue, err := readRCConfValue("defaultrouter")
+		if err != nil {
+			errors = append(errors, "failed to inspect rc.conf defaultrouter: "+err.Error())
+		} else if strings.TrimSpace(routerValue) == "" {
+			warnings = append(warnings, fmt.Sprintf("rc.conf defaultrouter is missing; persistent setup will write %q", router))
+		} else if strings.TrimSpace(routerValue) != router {
+			errors = append(errors, fmt.Sprintf("rc.conf defaultrouter is %q, expected %q for persistent setup", routerValue, router))
+		}
+	}
+
+	return uniqueStrings(warnings), uniqueStrings(errors)
+}
+
+func persistentBridgeRCValue(values jailWizardValues) string {
+	uplink := strings.TrimSpace(values.Uplink)
+	if uplink == "" {
+		return "up"
+	}
+	return fmt.Sprintf("addm %s up", uplink)
+}
+
+func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (func(), error) {
+	warnings, errors := collectPersistentVNETRCConfDrift(values)
+	for _, warning := range warnings {
+		*logs = append(*logs, "network rc.conf: "+warning)
+	}
+	if len(errors) > 0 {
+		return nil, fmt.Errorf("%s", errors[0])
+	}
+
+	restoreActions := make([]func(), 0, 4)
+	backupPaths := []string{"/etc/rc.conf", "/etc/rc.conf.local"}
+	for _, path := range backupPaths {
+		if _, err := backupFileForMutation(path, "vnet-host-rcconf", logs); err != nil {
+			return nil, err
+		}
+	}
+
+	restoreKey := func(key, oldValue string) func() {
+		return func() {
+			var err error
+			if strings.TrimSpace(oldValue) == "" {
+				_, err = runLoggedCommand(logs, "sysrc", "-x", key)
+			} else {
+				_, err = runLoggedCommand(logs, "sysrc", key+"="+oldValue)
+			}
+			if err != nil {
+				*logs = append(*logs, fmt.Sprintf("  rollback warning: failed to restore %s: %v", key, err))
+			}
+		}
+	}
+
+	clonedOld, err := readRCConfValue("cloned_interfaces")
+	if err != nil {
+		return nil, err
+	}
+	newCloned := formatJailListValue(applyJailListPosition(parseJailListValue(clonedOld), strings.TrimSpace(values.Bridge), 0))
+	if strings.TrimSpace(newCloned) != strings.TrimSpace(clonedOld) {
+		restoreActions = append(restoreActions, restoreKey("cloned_interfaces", clonedOld))
+		if _, err := runLoggedCommand(logs, "sysrc", "cloned_interfaces="+newCloned); err != nil {
+			return nil, fmt.Errorf("failed to update cloned_interfaces: %w", err)
+		}
+	}
+
+	bridgeKey := "ifconfig_" + strings.TrimSpace(values.Bridge)
+	bridgeOld, err := readRCConfValue(bridgeKey)
+	if err != nil {
+		return nil, err
+	}
+	desiredBridge := persistentBridgeRCValue(values)
+	if strings.TrimSpace(bridgeOld) != desiredBridge {
+		restoreActions = append(restoreActions, restoreKey(bridgeKey, bridgeOld))
+		if _, err := runLoggedCommand(logs, "sysrc", bridgeKey+"="+desiredBridge); err != nil {
+			return nil, fmt.Errorf("failed to update %s: %w", bridgeKey, err)
+		}
+	}
+
+	if uplink := strings.TrimSpace(values.Uplink); uplink != "" {
+		uplinkKey := "ifconfig_" + uplink
+		uplinkOld, err := readRCConfValue(uplinkKey)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(uplinkOld) != "up" {
+			restoreActions = append(restoreActions, restoreKey(uplinkKey, uplinkOld))
+			if _, err := runLoggedCommand(logs, "sysrc", uplinkKey+"=up"); err != nil {
+				return nil, fmt.Errorf("failed to update %s: %w", uplinkKey, err)
+			}
+		}
+	}
+
+	if router := strings.TrimSpace(values.DefaultRouter); router != "" {
+		routerOld, err := readRCConfValue("defaultrouter")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(routerOld) != router {
+			restoreActions = append(restoreActions, restoreKey("defaultrouter", routerOld))
+			if _, err := runLoggedCommand(logs, "sysrc", "defaultrouter="+router); err != nil {
+				return nil, fmt.Errorf("failed to update defaultrouter: %w", err)
+			}
+		}
+	}
+
+	if len(restoreActions) == 0 {
+		return nil, nil
+	}
+	return func() {
+		for idx := len(restoreActions) - 1; idx >= 0; idx-- {
+			restoreActions[idx]()
+		}
+	}, nil
 }
