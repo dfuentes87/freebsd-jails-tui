@@ -191,6 +191,7 @@ type templateDatasetCreateState struct {
 	parentEdit       bool
 	parentField      int
 	parentCustom     bool
+	patchBase        string
 }
 
 type model struct {
@@ -278,9 +279,9 @@ func linuxBootstrapCmd(detail JailDetail) tea.Cmd {
 	}
 }
 
-func templateDatasetCreateCmd(sourceInput string, parentOverride *templateDatasetParent) tea.Cmd {
+func templateDatasetCreateCmd(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteTemplateDatasetCreateWithParent(sourceInput, parentOverride)
+		result := ExecuteTemplateDatasetCreateWithParent(sourceInput, parentOverride, patchPreference)
 		return templateDatasetApplyMsg{result: result}
 	}
 }
@@ -1457,6 +1458,25 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.templateCreate.message = "Edit parent dataset and mountpoint, then press enter to create the parent."
 		return m, nil
+	case "p", "P":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeCreate || m.templateCreate.parentEdit {
+			return m, nil
+		}
+		decision := resolveFreeBSDPatchDecision(m.templateCreate.sourceInput, m.templateCreate.patchBase)
+		if !decision.Eligible {
+			m.templateCreate.message = "Patch-to-latest is only available for official FreeBSD release tags and recognizable base.txz release archives."
+			return m, nil
+		}
+		normalized, _ := normalizeFreeBSDPatchPreference(m.templateCreate.patchBase)
+		if normalized == "no" {
+			m.templateCreate.patchBase = "auto"
+			m.templateCreate.message = "Template patch-to-latest restored to automatic mode."
+		} else {
+			m.templateCreate.patchBase = "no"
+			m.templateCreate.message = "Template patch-to-latest disabled for this create."
+		}
+		m.templateCreate.refreshPreview()
+		return m, nil
 	case "enter":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
@@ -1505,7 +1525,7 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Creating template dataset..."
 			m.templateCreate.logs = nil
 			m.templateCreate.applying = true
-			return m, templateDatasetCreateCmd(m.templateCreate.sourceInput, m.templateCreate.parentOverride())
+			return m, templateDatasetCreateCmd(m.templateCreate.sourceInput, m.templateCreate.parentOverride(), m.templateCreate.patchBase)
 		}
 		if m.templateCreate.mode == templateManagerModeRename {
 			if m.templateCreate.renamePreview.Err != nil {
@@ -2033,12 +2053,12 @@ func (m model) renderTemplateDatasetCreateView() string {
 		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.mode == templateManagerModeCreate {
-		hint = "type source | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
+		hint = "type source | p: toggle patch | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
 		if m.templateCreate.parentEdit {
 			hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
 		}
 		if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
-			hint = "type source | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | esc: back | ctrl+c: quit"
+			hint = "type source | p: toggle patch | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | esc: back | ctrl+c: quit"
 		}
 	}
 	if m.templateCreate.mode == templateManagerModeRename {
@@ -2167,6 +2187,10 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if preview.Mountpoint != "" {
 			lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
 		}
+		lines = append(lines, truncate("Patch to latest level: "+yesNoText(preview.PatchSelected), width))
+		if preview.PatchRelease != "" {
+			lines = append(lines, truncate("Patch release: "+preview.PatchRelease, width))
+		}
 		lines = append(lines, truncate("Readonly after create: yes", width))
 		if preview.SourceKind != "" {
 			lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
@@ -2179,7 +2203,13 @@ func (m model) templateManagerDetailLines(width int) []string {
 		}
 		if preview.NeedsParentCreate {
 			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent or edit the values first.", width))
-		} else if preview.Err != nil {
+		}
+		if strings.TrimSpace(preview.PatchNote) != "" {
+			for _, line := range wrapText(preview.PatchNote, width) {
+				lines = append(lines, truncate(line, width))
+			}
+		}
+		if preview.Err != nil {
 			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
 				lines = append(lines, wizardErrorStyle.Render(line))
 			}
@@ -2709,6 +2739,19 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 			guide.Notes = append(guide.Notes, "This is still a FreeBSD base/root source. The Linux bootstrap family and release are configured on the next step.")
 		}
 		return guide
+	case "patch_base":
+		return wizardFieldGuide{
+			Purpose: "Controls whether the extracted FreeBSD jail base is patched to the latest level with freebsd-update before first start.",
+			Format:  "auto, yes, or no. auto patches only official FreeBSD release tags and recognizable base.txz release archives.",
+			Examples: []string{
+				"auto to patch official release sources and skip custom roots",
+				"yes to require patching for an official release source",
+				"no to skip patching even for an official release source",
+			},
+			Notes: []string{
+				"Thin jails do not use this field. Their base should be patched at the template dataset stage instead.",
+			},
+		}
 	case "interface":
 		return wizardFieldGuide{
 			Purpose: "Host interface used by shared-stack jails.",
@@ -3451,6 +3494,7 @@ func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatu
 		returnMode:  returnMode,
 		selectMode:  selectMode,
 		sourceInput: strings.TrimSpace(sourceInput),
+		patchBase:   "auto",
 	}
 	if dataset, mountpoint, ok := suggestTemplateParentDataset(status); ok {
 		state.parentDataset = dataset
@@ -3466,7 +3510,7 @@ func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatu
 }
 
 func (s *templateDatasetCreateState) refreshPreview() {
-	s.preview = InspectTemplateDatasetCreateWithParent(s.sourceInput, s.parentOverride())
+	s.preview = InspectTemplateDatasetCreateWithParent(s.sourceInput, s.parentOverride(), s.patchBase)
 }
 
 func (s *templateDatasetCreateState) refreshRenamePreview() {

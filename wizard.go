@@ -65,6 +65,7 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Full jail root path"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL"},
+			{ID: "patch_base", Label: "Patch FreeBSD base", Placeholder: "auto", Help: "auto, yes, or no"},
 			{ID: "interface", Label: "Interface", Placeholder: "em0", Help: "Used by thick, thin, and linux"},
 			{ID: "bridge", Label: "Bridge", Placeholder: "bridge0", Help: "Required for vnet jails"},
 			{ID: "bridge_policy", Label: "Bridge policy", Placeholder: "auto-create", Help: "Options: auto-create or require-existing"},
@@ -110,6 +111,7 @@ type jailWizardValues struct {
 	IP6             string
 	DefaultRouter   string
 	Hostname        string
+	PatchBase       string
 	StartupOrder    string
 	Dependencies    string
 	LinuxDistro     string
@@ -536,6 +538,10 @@ func (w jailCreationWizard) visibleFields() []wizardField {
 			if jailType == "vnet" {
 				continue
 			}
+		case "patch_base":
+			if jailType == "thin" {
+				continue
+			}
 		case "bridge", "bridge_policy", "uplink":
 			if jailType != "vnet" {
 				continue
@@ -587,6 +593,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.DefaultRouter
 	case "hostname":
 		return &w.values.Hostname
+	case "patch_base":
+		return &w.values.PatchBase
 	case "startup_order":
 		return &w.values.StartupOrder
 	case "dependencies":
@@ -640,6 +648,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.DefaultRouter
 	case "hostname":
 		return w.values.Hostname
+	case "patch_base":
+		return w.values.PatchBase
 	case "startup_order":
 		return w.values.StartupOrder
 	case "dependencies":
@@ -712,6 +722,12 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		}
 		if compatibility := collectJailBaseCompatibility(w.values); compatibility.Err != nil {
 			return "template_release", compatibility.Err
+		}
+	}
+	if w.currentStepHasField("patch_base") {
+		decision := resolveFreeBSDPatchDecision(w.values.TemplateRelease, w.values.PatchBase)
+		if decision.Err != nil {
+			return "patch_base", decision.Err
 		}
 	}
 	if w.currentStepHasField("name") && hasConflictingJailConfig(w.values.Name) {
@@ -1083,6 +1099,9 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("Memory limit: %s", valueOrDash(w.values.MemoryLimit)),
 		fmt.Sprintf("Process limit: %s", valueOrDash(w.values.ProcessLimit)),
 	}
+	if normalizedJailType(w.values.JailType) != "thin" {
+		lines = append(lines, fmt.Sprintf("Patch FreeBSD base: %s", freeBSDPatchSummary(w.values.TemplateRelease, w.values.PatchBase)))
+	}
 	if normalizedJailType(w.values.JailType) == "vnet" {
 		lines = append(lines,
 			fmt.Sprintf("Bridge: %s", valueOrDash(w.values.Bridge)),
@@ -1157,6 +1176,13 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		addDetail(fmt.Sprintf("   mkdir -p %s", destination))
 		addStep("Provision jail root from selected template/release:")
 		addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
+	}
+	if normalizedJailType(w.values.JailType) != "thin" {
+		patchDecision := resolveFreeBSDPatchDecision(w.values.TemplateRelease, w.values.PatchBase)
+		if patchDecision.Effective {
+			addStep("Patch extracted FreeBSD base to latest level:")
+			addDetail(fmt.Sprintf("   freebsd-update -b %s fetch install", destination))
+		}
 	}
 
 	switch jailType {
@@ -1654,6 +1680,24 @@ func linuxMirrorMetadataValue(values jailWizardValues) string {
 	return info.BaseURL
 }
 
+func freeBSDPatchSummary(sourceInput, preference string) string {
+	decision := resolveFreeBSDPatchDecision(sourceInput, preference)
+	if decision.Err != nil {
+		return "invalid"
+	}
+	switch decision.Preference {
+	case "yes":
+		return "yes"
+	case "no":
+		return "no"
+	default:
+		if decision.Effective {
+			return "auto (yes)"
+		}
+		return "auto (no)"
+	}
+}
+
 func effectiveLinuxMirrorSummary(values jailWizardValues) string {
 	info, err := resolveLinuxMirror(values)
 	if err != nil {
@@ -1697,6 +1741,8 @@ func wizardSectionForField(id string) string {
 	case "name", "hostname":
 		return "Identity"
 	case "dataset", "template_release":
+		return "Root filesystem"
+	case "patch_base":
 		return "Root filesystem"
 	case "interface", "bridge", "bridge_policy", "uplink", "ip4", "ip6", "default_router":
 		return "Networking"

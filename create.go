@@ -49,6 +49,10 @@ type TemplateDatasetPreview struct {
 	SourceKind        string
 	ResolvedSource    string
 	Action            string
+	PatchSelected     bool
+	PatchEligible     bool
+	PatchRelease      string
+	PatchNote         string
 	ParentDataset     string
 	ParentMountpoint  string
 	Dataset           string
@@ -160,6 +164,15 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return fail(err)
 	}
 	addCleanup(rootCleanup)
+	patchDecision := resolveFreeBSDPatchDecision(values.TemplateRelease, values.PatchBase)
+	if patchDecision.Err != nil {
+		return fail(patchDecision.Err)
+	}
+	if patchDecision.Effective {
+		if err := patchFreeBSDRoot(jailPath, &logs); err != nil {
+			return fail(err)
+		}
+	}
 	if normalizedJailType(values.JailType) == "linux" {
 		linuxCleanup, err := ensureLinuxHostReady(&logs)
 		if err != nil {
@@ -723,10 +736,10 @@ func hostArch() string {
 }
 
 func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
-	return ExecuteTemplateDatasetCreateWithParent(sourceInput, nil)
+	return ExecuteTemplateDatasetCreateWithParent(sourceInput, nil, "auto")
 }
 
-func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent) TemplateDatasetResult {
+func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetResult {
 	result := TemplateDatasetResult{}
 	logs := make([]string, 0, 24)
 	fail := func(err error) TemplateDatasetResult {
@@ -755,6 +768,10 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 	}
 	if cleanup != nil {
 		defer cleanup()
+	}
+	patchDecision := resolveFreeBSDPatchDecision(sourceInput, patchPreference)
+	if patchDecision.Err != nil {
+		return fail(patchDecision.Err)
 	}
 
 	childDataset := parent.Name + "/" + templateName
@@ -803,6 +820,11 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 			return fail(fmt.Errorf("failed to extract template archive into %q: %w", result.Dataset, err))
 		}
 	}
+	if patchDecision.Effective {
+		if err := patchFreeBSDRoot(result.Mountpoint, &logs); err != nil {
+			return fail(err)
+		}
+	}
 	if err := finalizeTemplateDatasetReadonly(result.Dataset, &logs); err != nil {
 		return fail(err)
 	}
@@ -813,12 +835,21 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 }
 
 func InspectTemplateDatasetCreate(sourceInput string) TemplateDatasetPreview {
-	return InspectTemplateDatasetCreateWithParent(sourceInput, nil)
+	return InspectTemplateDatasetCreateWithParent(sourceInput, nil, "auto")
 }
 
-func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent) TemplateDatasetPreview {
+func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetPreview {
 	preview := TemplateDatasetPreview{
 		SourceInput: strings.TrimSpace(sourceInput),
+	}
+	patchDecision := resolveFreeBSDPatchDecision(preview.SourceInput, patchPreference)
+	preview.PatchSelected = patchDecision.Effective
+	preview.PatchEligible = patchDecision.Eligible
+	preview.PatchRelease = patchDecision.ReleaseVersion
+	preview.PatchNote = patchDecision.Note
+	if patchDecision.Err != nil {
+		preview.Err = patchDecision.Err
+		return preview
 	}
 
 	parent, err := resolveTemplateDatasetParent(parentOverride)
