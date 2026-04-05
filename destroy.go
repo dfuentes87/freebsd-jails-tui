@@ -333,13 +333,14 @@ func removeFileIfExists(path string, logs *[]string) error {
 
 func buildDestroyPreview(target Jail) []string {
 	plan := buildJailDestroyPlan(target, &[]string{})
+	name := strings.TrimSpace(target.Name)
 	lines := []string{
 		"Destroying a jail will make irreversible changes:",
 		"1. Stop the jail if it is currently running.",
 		"2. Remove jail-specific rctl rules and any managed /etc/rctl.conf block for this jail.",
 		"3. Destroy the ZFS dataset recursively only when the jail path matches a dataset mountpoint exactly.",
 		"4. Otherwise clear file flags with chflags -R 0 before removing the jail root path recursively.",
-		"5. Remove /etc/jail.conf.d/<name>.conf and /etc/fstab.<name> when present.",
+		fmt.Sprintf("5. Remove /etc/jail.conf.d/%s.conf and /etc/fstab.%s if present.", name, name),
 		"",
 		fmt.Sprintf("Selected jail: %s", target.Name),
 		fmt.Sprintf("Current JID: %s", valueOrDash(jailJIDText(target))),

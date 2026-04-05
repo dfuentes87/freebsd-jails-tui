@@ -42,6 +42,9 @@ var (
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("45"))
+	detailSectionStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("39"))
 	wizardActionStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("230")).
@@ -3119,7 +3122,7 @@ func (m model) detailLines(width int) []string {
 		memText = fmt.Sprintf("%dMB", jail.MemoryMB)
 	}
 
-	appendRenderedSection(&lines, "Overview", renderKeyValueLines(width,
+	appendRenderedSectionWithStyle(&lines, detailSectionStyle, "Overview", renderKeyValueLines(width,
 		[2]string{"Name", m.detail.Name},
 		[2]string{"State", state},
 		[2]string{"JID", jidText},
@@ -3129,7 +3132,7 @@ func (m model) detailLines(width int) []string {
 		[2]string{"Hostname", m.detail.Hostname},
 	))
 
-	appendSection(&lines, width, "Configured state")
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "Configured state")
 	lines = append(lines, renderKeyValueLines(width, [2]string{"Source", m.detail.JailConfSource})...)
 	if len(m.detail.JailConfValues) == 0 && len(m.detail.JailConfFlags) == 0 {
 		lines = append(lines, truncate("No matching jail block found.", width))
@@ -3142,7 +3145,7 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 
-	appendSection(&lines, width, "Startup policy")
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "Startup policy")
 	if m.detail.StartupConfig == nil {
 		lines = append(lines, truncate("Startup policy unavailable.", width))
 	} else {
@@ -3164,7 +3167,7 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 
-	appendRenderedSection(&lines, "Runtime state", renderKeyValueLines(width,
+	appendRenderedSectionWithStyle(&lines, detailSectionStyle, "Runtime state", renderKeyValueLines(width,
 		[2]string{"State", state},
 		[2]string{"CPU", cpuText},
 		[2]string{"Memory", memText},
@@ -3182,7 +3185,7 @@ func (m model) detailLines(width int) []string {
 	}
 
 	if m.detail.NetworkSummary != nil {
-		appendSection(&lines, width, "Network summary")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Network summary")
 		networkLabelWidth := 25
 		if width < 72 {
 			networkLabelWidth = 20
@@ -3208,7 +3211,7 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 
-	appendSection(&lines, width, "ZFS dataset")
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "ZFS dataset")
 	if m.detail.ZFS == nil {
 		lines = append(lines, truncate("No dataset matched the jail path.", width))
 	} else {
@@ -3225,7 +3228,7 @@ func (m model) detailLines(width int) []string {
 		)...)
 	}
 
-	appendSection(&lines, width, "rctl")
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "rctl")
 	if m.detail.RctlConfig != nil {
 		lines = append(lines, renderKeyValueLines(width,
 			[2]string{"Limit mode", valueOrDash(m.detail.RctlConfig.Mode)},
@@ -3260,7 +3263,7 @@ func (m model) detailLines(width int) []string {
 	}
 
 	if m.detail.LinuxReadiness != nil {
-		appendSection(&lines, width, "Linux readiness")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Linux readiness")
 		for _, line := range m.linuxReadinessLines() {
 			if looksLikeWarningText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
@@ -3271,19 +3274,19 @@ func (m model) detailLines(width int) []string {
 	}
 
 	if len(m.detail.SourceErrors) > 0 {
-		appendSection(&lines, width, "Source errors")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Source errors")
 		for _, source := range sortedKeys(m.detail.SourceErrors) {
 			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
 		}
 	}
 	if len(runtimeNotes) > 0 {
-		appendSection(&lines, width, "Runtime notes")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Runtime notes")
 		for _, line := range runtimeNotes {
 			lines = append(lines, truncate(line, width))
 		}
 	}
 	if m.detailShowAdvanced {
-		appendSection(&lines, width, "Advanced runtime parameters")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Advanced runtime parameters")
 		if len(m.detail.AdvancedRuntimeFields) == 0 {
 			lines = append(lines, truncate("No additional runtime/default parameters.", width))
 		} else {
@@ -3349,7 +3352,7 @@ func (m model) linuxReadinessLines() []string {
 	for _, reason := range readiness.Host.EnableDrift {
 		lines = append(lines, "Warning: linux_enable drift: "+reason)
 	}
-	if readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
+	if readiness.RuntimeChecked && readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
 		lines = append(lines, "Warning: linux service status check failed: "+readiness.Host.ServiceStatusErr)
 	}
 	if readiness.RuntimeChecked {
@@ -3972,20 +3975,28 @@ func looksLikeWarningText(message string) bool {
 }
 
 func appendSection(lines *[]string, width int, title string, body ...string) {
+	appendSectionWithStyle(lines, width, sectionStyle, title, body...)
+}
+
+func appendSectionWithStyle(lines *[]string, width int, style lipgloss.Style, title string, body ...string) {
 	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
 		*lines = append(*lines, "")
 	}
-	*lines = append(*lines, sectionStyle.Render(title))
+	*lines = append(*lines, style.Render(title))
 	for _, line := range body {
 		*lines = append(*lines, truncate(line, width))
 	}
 }
 
 func appendRenderedSection(lines *[]string, title string, body []string) {
+	appendRenderedSectionWithStyle(lines, sectionStyle, title, body)
+}
+
+func appendRenderedSectionWithStyle(lines *[]string, style lipgloss.Style, title string, body []string) {
 	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
 		*lines = append(*lines, "")
 	}
-	*lines = append(*lines, sectionStyle.Render(title))
+	*lines = append(*lines, style.Render(title))
 	*lines = append(*lines, body...)
 }
 
