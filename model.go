@@ -1792,7 +1792,7 @@ func (m model) renderDestroyView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) helpBodyHeight() int {
@@ -1882,19 +1882,14 @@ func (m model) renderJailDetailView() string {
 	}
 	hint += " | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
 	message := ""
-	footerRenderer := footerStyle
 	if m.detailErr != nil {
 		message = "warning: " + m.detailErr.Error()
-		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	} else if m.detailNotice != "" {
 		message = m.detailNotice
-		if looksLikeWarningText(m.detailNotice) {
-			footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
-		}
 	} else if m.detailLoading {
 		message = "loading detail..."
 	}
-	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
+	footer := m.renderFooterWithMessage(hint, message, footerStyle)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
