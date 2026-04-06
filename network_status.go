@@ -678,7 +678,6 @@ func collectPersistentVNETRCConfDrift(values jailWizardValues) ([]string, []stri
 
 	bridge := strings.TrimSpace(values.Bridge)
 	uplink := strings.TrimSpace(values.Uplink)
-	router := strings.TrimSpace(values.DefaultRouter)
 
 	clonedValue, err := readRCConfValue("cloned_interfaces")
 	if err != nil {
@@ -707,17 +706,6 @@ func collectPersistentVNETRCConfDrift(values jailWizardValues) ([]string, []stri
 			warnings = append(warnings, fmt.Sprintf("rc.conf %s is missing; persistent setup will write %q", uplinkKey, "up"))
 		} else if strings.TrimSpace(uplinkValue) != "up" {
 			errors = append(errors, fmt.Sprintf("rc.conf %s is %q; persistent setup refuses to overwrite it with %q", uplinkKey, uplinkValue, "up"))
-		}
-	}
-
-	if router != "" {
-		routerValue, err := readRCConfValue("defaultrouter")
-		if err != nil {
-			errors = append(errors, "failed to inspect rc.conf defaultrouter: "+err.Error())
-		} else if strings.TrimSpace(routerValue) == "" {
-			warnings = append(warnings, fmt.Sprintf("rc.conf defaultrouter is missing; persistent setup will write %q", router))
-		} else if strings.TrimSpace(routerValue) != router {
-			errors = append(errors, fmt.Sprintf("rc.conf defaultrouter is %q, expected %q for persistent setup", routerValue, router))
 		}
 	}
 
@@ -798,19 +786,6 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 			restoreActions = append(restoreActions, restoreKey(uplinkKey, uplinkOld))
 			if _, err := runLoggedCommand(logs, "sysrc", uplinkKey+"=up"); err != nil {
 				return nil, fmt.Errorf("failed to update %s: %w", uplinkKey, err)
-			}
-		}
-	}
-
-	if router := strings.TrimSpace(values.DefaultRouter); router != "" {
-		routerOld, err := readRCConfValue("defaultrouter")
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(routerOld) != router {
-			restoreActions = append(restoreActions, restoreKey("defaultrouter", routerOld))
-			if _, err := runLoggedCommand(logs, "sysrc", "defaultrouter="+router); err != nil {
-				return nil, fmt.Errorf("failed to update defaultrouter: %w", err)
 			}
 		}
 	}

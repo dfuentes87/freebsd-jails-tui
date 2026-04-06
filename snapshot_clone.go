@@ -176,6 +176,13 @@ func InspectJailSnapshotClone(detail JailDetail, snapshot, newName, destination 
 				return preview
 			}
 			preview.FstabPath = jailFstabPathForName(preview.NewName)
+			if _, err := os.Stat(preview.FstabPath); err == nil {
+				preview.Err = fmt.Errorf("fstab file %q already exists", preview.FstabPath)
+				return preview
+			} else if !os.IsNotExist(err) {
+				preview.Err = fmt.Errorf("failed to inspect fstab file %q: %w", preview.FstabPath, err)
+				return preview
+			}
 		}
 	}
 	return preview
@@ -296,7 +303,20 @@ func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("failed to create directory for %q: %w", dst, err)
 	}
-	if err := os.WriteFile(dst, content, 0o644); err != nil {
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("refusing to overwrite existing file %q", dst)
+		}
+		return fmt.Errorf("failed to create %q: %w", dst, err)
+	}
+	if _, err := out.Write(content); err != nil {
+		out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("failed to write %q: %w", dst, err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
 		return fmt.Errorf("failed to write %q: %w", dst, err)
 	}
 	return nil

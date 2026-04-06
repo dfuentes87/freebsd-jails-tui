@@ -2789,7 +2789,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"persistent to manage rc.conf bridge settings before jail creation",
 			},
 			Notes: []string{
-				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for bridge, uplink, or defaultrouter.",
+				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for the bridge or uplink.",
 			},
 		}
 	case "uplink":

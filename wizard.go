@@ -1217,9 +1217,6 @@ func (w jailCreationWizard) commandPlanLines() []string {
 			if strings.TrimSpace(w.values.Uplink) != "" {
 				addDetail(fmt.Sprintf("   sysrc ifconfig_%s=up", strings.TrimSpace(w.values.Uplink)))
 			}
-			if strings.TrimSpace(w.values.DefaultRouter) != "" {
-				addDetail(fmt.Sprintf("   sysrc defaultrouter=%s", strings.TrimSpace(w.values.DefaultRouter)))
-			}
 		}
 		if w.networkPrereqs.BridgeCreateNeeded {
 			addDetail(fmt.Sprintf("   ifconfig %s create", strings.TrimSpace(w.values.Bridge)))
