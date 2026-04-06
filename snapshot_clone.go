@@ -300,23 +300,14 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read %q: %w", src, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("failed to create directory for %q: %w", dst, err)
-	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	info, err := os.Stat(src)
 	if err != nil {
+		return fmt.Errorf("failed to inspect %q: %w", src, err)
+	}
+	if err := writeFileAtomicExclusive(dst, content, info.Mode().Perm()); err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("refusing to overwrite existing file %q", dst)
 		}
-		return fmt.Errorf("failed to create %q: %w", dst, err)
-	}
-	if _, err := out.Write(content); err != nil {
-		out.Close()
-		_ = os.Remove(dst)
-		return fmt.Errorf("failed to write %q: %w", dst, err)
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(dst)
 		return fmt.Errorf("failed to write %q: %w", dst, err)
 	}
 	return nil

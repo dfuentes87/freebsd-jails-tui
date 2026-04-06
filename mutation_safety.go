@@ -126,3 +126,83 @@ func copyFileContents(src, dst string, mode os.FileMode) error {
 	}
 	return nil
 }
+
+func writeFileAtomicReplace(dst string, content []byte, mode os.FileMode) error {
+	dst = strings.TrimSpace(dst)
+	if dst == "" {
+		return fmt.Errorf("destination path is required")
+	}
+	dir := filepath.Dir(dst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func writeFileAtomicExclusive(dst string, content []byte, mode os.FileMode) error {
+	dst = strings.TrimSpace(dst)
+	if dst == "" {
+		return fmt.Errorf("destination path is required")
+	}
+	dir := filepath.Dir(dst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(tmpPath, dst); err != nil {
+		if os.IsExist(err) {
+			return os.ErrExist
+		}
+		return err
+	}
+	cleanup = false
+	_ = os.Remove(tmpPath)
+	return nil
+}

@@ -134,7 +134,7 @@ func ensureJailConfDInclude(logs *[]string) error {
 			*logs = append(*logs, "$ write "+status.ConfigPath)
 		}
 	}
-	if err := os.WriteFile(status.ConfigPath, []byte(content), 0o644); err != nil {
+	if err := writeFileAtomicReplace(status.ConfigPath, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write %s: %w", status.ConfigPath, err)
 	}
 	return nil

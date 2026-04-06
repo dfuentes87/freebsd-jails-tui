@@ -1405,7 +1405,7 @@ func configureMountPoints(name, jailPath string, specs []mountPointSpec, logs *[
 	}
 	content := strings.Join(fstabLines, "\n") + "\n"
 	*logs = append(*logs, fmt.Sprintf("$ write %s", fstabPath))
-	if err := os.WriteFile(fstabPath, []byte(content), 0o644); err != nil {
+	if err := writeFileAtomicExclusive(fstabPath, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("failed to write %q: %w", fstabPath, err)
 	}
 	return fstabPath, nil
@@ -1443,7 +1443,7 @@ func writeJailConfigFile(configPath string, lines []string, logs *[]string) erro
 	}
 	content := strings.Join(lines, "\n") + "\n"
 	*logs = append(*logs, fmt.Sprintf("$ write %s", configPath))
-	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+	if err := writeFileAtomicExclusive(configPath, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write %q: %w", configPath, err)
 	}
 	return nil
