@@ -14,6 +14,12 @@ type fileMutationBackup struct {
 	BackupPath   string
 }
 
+type managedPathBackup struct {
+	Path       string
+	Existed    bool
+	FileBackup *fileMutationBackup
+}
+
 func backupFileForMutation(path, category string, logs *[]string) (*fileMutationBackup, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -70,6 +76,57 @@ func restoreFileMutationBackup(backup *fileMutationBackup, logs *[]string) error
 		*logs = append(*logs, fmt.Sprintf("restore: %s <- %s", backup.OriginalPath, backup.BackupPath))
 	}
 	return nil
+}
+
+func backupPathsForMutation(paths []string, category string, logs *[]string) ([]managedPathBackup, error) {
+	backups := make([]managedPathBackup, 0, len(paths))
+	seen := map[string]struct{}{}
+	for _, raw := range paths {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+
+		_, statErr := os.Stat(path)
+		existed := statErr == nil
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("failed to inspect %q before backup: %w", path, statErr)
+		}
+
+		backup, err := backupFileForMutation(path, category, logs)
+		if err != nil {
+			return nil, err
+		}
+		backups = append(backups, managedPathBackup{
+			Path:       path,
+			Existed:    existed,
+			FileBackup: backup,
+		})
+	}
+	return backups, nil
+}
+
+func restorePathMutationBackups(backups []managedPathBackup, logs *[]string) {
+	for idx := len(backups) - 1; idx >= 0; idx-- {
+		backup := backups[idx]
+		if backup.FileBackup != nil {
+			if err := restoreFileMutationBackup(backup.FileBackup, logs); err != nil {
+				if logs != nil {
+					*logs = append(*logs, "rollback warning: "+err.Error())
+				}
+			}
+			continue
+		}
+		if !backup.Existed {
+			if err := removeFileIfExists(backup.Path, logs); err != nil && logs != nil {
+				*logs = append(*logs, "rollback warning: "+err.Error())
+			}
+		}
+	}
 }
 
 func mutationBackupDir(category string) (string, error) {

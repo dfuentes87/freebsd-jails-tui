@@ -516,9 +516,38 @@ func ensureLinuxHostReady(logs *[]string) (func(), error) {
 	previouslyEnabled := isEnabledRCValue(previousEnable)
 	previouslyRunning := exec.Command("service", "linux", "onestatus").Run() == nil
 
+	rcConfPaths := []string{"/etc/rc.conf", "/etc/rc.conf.local"}
+	var rcConfBackups []managedPathBackup
+	backupsReady := false
+	ensureBackups := func() error {
+		if backupsReady {
+			return nil
+		}
+		backups, err := backupPathsForMutation(rcConfPaths, "linux-host-rcconf", logs)
+		if err != nil {
+			return err
+		}
+		rcConfBackups = backups
+		backupsReady = true
+		return nil
+	}
+	restoreBackups := func() {
+		if !backupsReady {
+			return
+		}
+		restorePathMutationBackups(rcConfBackups, logs)
+	}
+
 	changedEnable := false
 	if !previouslyEnabled {
+		if err := ensureRCSettingSafeToMutate("linux_enable"); err != nil {
+			return nil, err
+		}
+		if err := ensureBackups(); err != nil {
+			return nil, err
+		}
 		if _, err := runLoggedCommand(logs, "sysrc", "linux_enable=YES"); err != nil {
+			restoreBackups()
 			return nil, fmt.Errorf("failed to enable linux ABI on host: %w", err)
 		}
 		changedEnable = true
@@ -527,11 +556,7 @@ func ensureLinuxHostReady(logs *[]string) (func(), error) {
 	if !previouslyRunning {
 		if _, err := runLoggedCommand(logs, "service", "linux", "start"); err != nil {
 			if changedEnable {
-				if previousEnable == "" {
-					_, _ = runLoggedCommand(logs, "sysrc", "-x", "linux_enable")
-				} else {
-					_, _ = runLoggedCommand(logs, "sysrc", "linux_enable="+previousEnable)
-				}
+				restoreBackups()
 			}
 			return nil, fmt.Errorf("failed to start linux ABI service on host: %w", err)
 		}
@@ -548,15 +573,7 @@ func ensureLinuxHostReady(logs *[]string) (func(), error) {
 			}
 		}
 		if changedEnable {
-			if previousEnable == "" {
-				if _, err := runLoggedCommand(logs, "sysrc", "-x", "linux_enable"); err != nil {
-					*logs = append(*logs, "  rollback warning: failed to clear linux_enable: "+err.Error())
-				}
-			} else {
-				if _, err := runLoggedCommand(logs, "sysrc", "linux_enable="+previousEnable); err != nil {
-					*logs = append(*logs, "  rollback warning: failed to restore linux_enable: "+err.Error())
-				}
-			}
+			restoreBackups()
 		}
 	}, nil
 }
