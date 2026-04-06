@@ -2182,37 +2182,33 @@ func (m model) templateManagerDetailLines(width int) []string {
 			lines = append(lines, mountLine)
 		}
 		if preview.Dataset != "" {
-			lines = append(lines, truncate("Derived dataset: "+preview.Dataset, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Derived dataset", preview.Dataset})...)
 		}
 		if preview.Mountpoint != "" {
-			lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Target mountpoint", preview.Mountpoint})...)
 		}
-		lines = append(lines, truncate("Patch to latest level: "+yesNoText(preview.PatchSelected), width))
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Patch to latest level", yesNoText(preview.PatchSelected)})...)
 		if preview.PatchRelease != "" {
-			lines = append(lines, truncate("Patch release: "+preview.PatchRelease, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Patch release", preview.PatchRelease})...)
 		}
-		lines = append(lines, truncate("Readonly after create: yes", width))
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Readonly after create", "yes"})...)
 		if preview.SourceKind != "" {
-			lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Source type", preview.SourceKind})...)
 		}
 		if preview.ResolvedSource != "" {
-			lines = append(lines, truncate("Resolved source: "+preview.ResolvedSource, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Resolved source", preview.ResolvedSource})...)
 		}
 		if preview.Action != "" {
-			lines = append(lines, truncate("Create action: "+preview.Action, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Create action", preview.Action})...)
 		}
 		if preview.NeedsParentCreate {
-			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent or edit the values first.", width))
+			appendWrappedText(&lines, width, "No templates parent dataset was discovered. Create the proposed parent or edit the values first.")
 		}
 		if strings.TrimSpace(preview.PatchNote) != "" {
-			for _, line := range wrapText(preview.PatchNote, width) {
-				lines = append(lines, truncate(line, width))
-			}
+			appendWrappedText(&lines, width, preview.PatchNote)
 		}
 		if preview.Err != nil {
-			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-				lines = append(lines, wizardErrorStyle.Render(line))
-			}
+			appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 		}
 	case templateManagerModeRename:
 		appendSection(&lines, width, "Rename template dataset")
@@ -2221,27 +2217,27 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if current.Name == "" {
 			lines = append(lines, "No template dataset selected.")
 		} else {
-			lines = append(lines, truncate("Current dataset: "+current.Name, width))
-			lines = append(lines, truncate("Current mountpoint: "+current.Mountpoint, width))
-			lines = append(lines, truncate("Current readonly: "+yesNoText(current.Readonly), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Current dataset", current.Name},
+				[2]string{"Current mountpoint", current.Mountpoint},
+				[2]string{"Current readonly", yesNoText(current.Readonly)},
+			)...)
 			lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.renameInput, filepath.Base(current.Name)), width)))
 			if preview.NewDataset != "" {
-				lines = append(lines, truncate("Renamed dataset: "+preview.NewDataset, width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Renamed dataset", preview.NewDataset})...)
 			}
 			if preview.NewMountpoint != "" {
-				lines = append(lines, truncate("New mountpoint: "+preview.NewMountpoint, width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"New mountpoint", preview.NewMountpoint})...)
 			}
-			lines = append(lines, truncate("Readonly after rename: "+yesNoText(preview.ReadonlyPreserved), width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Readonly after rename", yesNoText(preview.ReadonlyPreserved)})...)
 			if !current.Readonly {
-				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: current template dataset is writable; handbook-style templates should be readonly.", width)))
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Warning: current template dataset is writable; handbook-style templates should be readonly.")
 			}
 			if len(preview.UpdatedWizardTemplates) > 0 {
-				lines = append(lines, truncate("Saved wizard templates updated on rename: "+strings.Join(preview.UpdatedWizardTemplates, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Saved wizard templates updated on rename", strings.Join(preview.UpdatedWizardTemplates, ", ")})...)
 			}
 			if preview.Err != nil {
-				for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-					lines = append(lines, wizardErrorStyle.Render(line))
-				}
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 			}
 		}
 	case templateManagerModeDestroy:
@@ -2251,26 +2247,26 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if current.Name == "" {
 			lines = append(lines, "No template dataset selected.")
 		} else {
-			lines = append(lines, truncate("Dataset: "+current.Name, width))
-			lines = append(lines, truncate("Mountpoint: "+current.Mountpoint, width))
-			lines = append(lines, truncate("Readonly: "+yesNoText(preview.Readonly), width))
-			lines = append(lines, truncate("Destroy scope: zfs destroy -r "+preview.DestroyScope, width))
-			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", current.SnapshotCount), width))
-			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(current.CloneDependents)), width))
-			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(preview.ReferencedTemplates)), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Dataset", current.Name},
+				[2]string{"Mountpoint", current.Mountpoint},
+				[2]string{"Readonly", yesNoText(preview.Readonly)},
+				[2]string{"Destroy scope", "zfs destroy -r " + preview.DestroyScope},
+				[2]string{"Snapshots", fmt.Sprintf("%d", current.SnapshotCount)},
+				[2]string{"Clone dependents", fmt.Sprintf("%d", len(current.CloneDependents))},
+				[2]string{"Saved wizard template refs", fmt.Sprintf("%d", len(preview.ReferencedTemplates))},
+			)...)
 			if !preview.Readonly {
-				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: this template dataset is writable; handbook-style templates should be readonly.", width)))
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Warning: this template dataset is writable; handbook-style templates should be readonly.")
 			}
 			if len(current.CloneDependents) > 0 {
-				lines = append(lines, truncate("Dependents: "+strings.Join(current.CloneDependents, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependents", strings.Join(current.CloneDependents, ", ")})...)
 			}
 			if len(preview.ReferencedTemplates) > 0 {
-				lines = append(lines, truncate("Referenced by: "+strings.Join(preview.ReferencedTemplates, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Referenced by", strings.Join(preview.ReferencedTemplates, ", ")})...)
 			}
 			if preview.Err != nil {
-				for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-					lines = append(lines, wizardErrorStyle.Render(line))
-				}
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 			}
 		}
 	case templateManagerModeClone:
@@ -2303,21 +2299,19 @@ func (m model) templateManagerDetailLines(width int) []string {
 		appendSection(&lines, width, "Preview")
 		preview := m.templateCreate.clonePreview
 		if preview.Snapshot != "" {
-			lines = append(lines, truncate("Snapshot: "+preview.Snapshot, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Snapshot", preview.Snapshot})...)
 		}
 		if preview.NewDataset != "" {
-			lines = append(lines, truncate("Clone dataset: "+preview.NewDataset, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Clone dataset", preview.NewDataset})...)
 		}
 		if preview.NewMountpoint != "" {
-			lines = append(lines, truncate("Clone mountpoint: "+preview.NewMountpoint, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Clone mountpoint", preview.NewMountpoint})...)
 		}
 		if preview.NewDataset != "" {
-			lines = append(lines, truncate("Readonly after clone: "+yesNoText(preview.ReadonlyAfter), width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Readonly after clone", yesNoText(preview.ReadonlyAfter)})...)
 		}
 		if preview.Err != nil {
-			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-				lines = append(lines, wizardErrorStyle.Render(line))
-			}
+			appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 		}
 	default:
 		appendSection(&lines, width, "Inspect")
@@ -2325,46 +2319,52 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if !ok {
 			lines = append(lines, "No template dataset selected.")
 		} else {
-			lines = append(lines, truncate("Dataset: "+item.Name, width))
-			lines = append(lines, truncate("Mountpoint: "+item.Mountpoint, width))
-			lines = append(lines, truncate("Readonly: "+yesNoText(item.Readonly), width))
-			lines = append(lines, truncate("Used: "+item.Used+"  Avail: "+item.Avail, width))
-			lines = append(lines, truncate("Refer: "+item.Refer+"  Compression: "+item.Compression, width))
-			lines = append(lines, truncate("Quota: "+valueOrDash(item.Quota)+"  Reservation: "+valueOrDash(item.Reservation), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Dataset", item.Name},
+				[2]string{"Mountpoint", item.Mountpoint},
+				[2]string{"Readonly", yesNoText(item.Readonly)},
+				[2]string{"Used", item.Used + "  Avail: " + item.Avail},
+				[2]string{"Refer", item.Refer + "  Compression: " + item.Compression},
+				[2]string{"Quota", valueOrDash(item.Quota) + "  Reservation: " + valueOrDash(item.Reservation)},
+			)...)
 			if strings.TrimSpace(item.Origin) != "" && item.Origin != "-" {
-				lines = append(lines, truncate("Origin: "+item.Origin, width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Origin", item.Origin})...)
 			}
-			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", item.SnapshotCount), width))
-			lines = append(lines, truncate(fmt.Sprintf("Child datasets: %d", len(item.ChildDatasets)), width))
-			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(item.CloneDependents)), width))
-			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(item.WizardTemplateRefs)), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Snapshots", fmt.Sprintf("%d", item.SnapshotCount)},
+				[2]string{"Child datasets", fmt.Sprintf("%d", len(item.ChildDatasets))},
+				[2]string{"Clone dependents", fmt.Sprintf("%d", len(item.CloneDependents))},
+				[2]string{"Saved wizard template refs", fmt.Sprintf("%d", len(item.WizardTemplateRefs))},
+			)...)
 			appendSection(&lines, width, "Safety")
-			lines = append(lines, truncate("Rename allowed: "+yesNoText(item.RenameAllowed), width))
-			lines = append(lines, truncate("Destroy allowed: "+yesNoText(item.DestroyAllowed), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Rename allowed", yesNoText(item.RenameAllowed)},
+				[2]string{"Destroy allowed", yesNoText(item.DestroyAllowed)},
+			)...)
 			if len(item.SafetyIssues) > 0 {
 				for _, issue := range item.SafetyIssues {
 					prefix := "Issue: "
 					if strings.Contains(strings.ToLower(issue), "writable") {
 						prefix = "Warning: "
 					}
-					lines = append(lines, wizardErrorStyle.Render(truncate(prefix+issue, width)))
+					appendWrappedStyledText(&lines, width, wizardErrorStyle, prefix+issue)
 				}
 			}
 			if len(item.CloneDependents) > 0 {
-				lines = append(lines, truncate("Dependents: "+strings.Join(item.CloneDependents, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependents", strings.Join(item.CloneDependents, ", ")})...)
 			}
 			if len(item.ChildDatasets) > 0 {
-				lines = append(lines, truncate("Child datasets: "+strings.Join(item.ChildDatasets, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Child datasets", strings.Join(item.ChildDatasets, ", ")})...)
 			}
 			if len(item.WizardTemplateRefs) > 0 {
-				lines = append(lines, truncate("Saved template refs: "+strings.Join(item.WizardTemplateRefs, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Saved template refs", strings.Join(item.WizardTemplateRefs, ", ")})...)
 			}
 		}
 	}
 	if len(m.templateCreate.logs) > 0 {
 		appendSection(&lines, width, "Execution output")
 		for _, line := range m.templateCreate.logs {
-			lines = append(lines, truncate(line, width))
+			appendWrappedText(&lines, width, line)
 		}
 	}
 	return lines
@@ -4003,6 +4003,18 @@ func appendRenderedSectionWithStyle(lines *[]string, style lipgloss.Style, title
 	}
 	*lines = append(*lines, style.Render(title))
 	*lines = append(*lines, body...)
+}
+
+func appendWrappedText(lines *[]string, width int, text string) {
+	for _, line := range wrapText(text, max(8, width)) {
+		*lines = append(*lines, line)
+	}
+}
+
+func appendWrappedStyledText(lines *[]string, width int, style lipgloss.Style, text string) {
+	for _, line := range wrapText(text, max(8, width)) {
+		*lines = append(*lines, style.Render(line))
+	}
 }
 
 func renderKeyValueLines(width int, pairs ...[2]string) []string {
