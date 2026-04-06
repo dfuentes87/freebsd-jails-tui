@@ -127,13 +127,15 @@ func writeWizardTemplates(templates []wizardTemplate) error {
 	}
 	payload = append(payload, '\n')
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
-		return fmt.Errorf("failed to write template file: %w", err)
+	if _, err := os.Stat(path); err == nil {
+		if _, err := backupWizardTemplateStore(nil); err != nil {
+			return fmt.Errorf("failed to back up template file: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to inspect template file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to finalize template file: %w", err)
+	if err := writeFileAtomicReplace(path, payload, 0o644); err != nil {
+		return fmt.Errorf("failed to write template file: %w", err)
 	}
 	return nil
 }
