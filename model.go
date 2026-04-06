@@ -381,6 +381,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.initCheck.loading = false
 		m.initCheck.status = msg.status
 		m.initCheck.err = msg.err
+		if strings.EqualFold(strings.TrimSpace(m.initCheck.message), "Refreshing checks...") {
+			m.initCheck.message = ""
+		}
 		m.initCheck.setPhaseFromStatus()
 		return m, nil
 	case initialActionMsg:

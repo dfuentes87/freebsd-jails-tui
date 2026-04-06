@@ -958,7 +958,6 @@ func (m model) initialCheckLines(width int) []string {
 		[2]string{"jail.conf path", valueOrDash(m.initCheck.status.JailConfStatus.ConfigPath)},
 		[2]string{"jail.conf.d include", includeState},
 	)...)
-	lines = append(lines, truncate("Expected include: "+jailConfDInclude, width))
 	if strings.TrimSpace(m.initCheck.status.JailConfStatus.ReadError) != "" {
 		lines = append(lines, wizardErrorStyle.Render(truncate("  "+m.initCheck.status.JailConfStatus.ReadError, width)))
 	}
