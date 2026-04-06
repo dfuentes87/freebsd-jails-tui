@@ -59,7 +59,11 @@ func restoreFileMutationBackup(backup *fileMutationBackup, logs *[]string) error
 	if err != nil {
 		return fmt.Errorf("failed to inspect backup %q: %w", backup.BackupPath, err)
 	}
-	if err := copyFileContents(backup.BackupPath, backup.OriginalPath, info.Mode().Perm()); err != nil {
+	targetPath, err := resolveReplaceTargetPath(backup.OriginalPath)
+	if err != nil {
+		return err
+	}
+	if err := copyFileContents(backup.BackupPath, targetPath, info.Mode().Perm()); err != nil {
 		return fmt.Errorf("failed to restore %q from backup %q: %w", backup.OriginalPath, backup.BackupPath, err)
 	}
 	if logs != nil {
@@ -132,11 +136,15 @@ func writeFileAtomicReplace(dst string, content []byte, mode os.FileMode) error 
 	if dst == "" {
 		return fmt.Errorf("destination path is required")
 	}
-	dir := filepath.Dir(dst)
+	targetPath, err := resolveReplaceTargetPath(dst)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(dst)+".tmp-*")
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(targetPath)+".tmp-*")
 	if err != nil {
 		return err
 	}
@@ -158,7 +166,7 @@ func writeFileAtomicReplace(dst string, content []byte, mode os.FileMode) error 
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, dst); err != nil {
+	if err := os.Rename(tmpPath, targetPath); err != nil {
 		return err
 	}
 	cleanup = false
@@ -205,4 +213,30 @@ func writeFileAtomicExclusive(dst string, content []byte, mode os.FileMode) erro
 	cleanup = false
 	_ = os.Remove(tmpPath)
 	return nil
+}
+
+func resolveReplaceTargetPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("destination path is required")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		return "", fmt.Errorf("failed to inspect %q: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve symlink %q: %w", path, err)
+	}
+	resolved = strings.TrimSpace(resolved)
+	if resolved == "" {
+		return "", fmt.Errorf("resolved symlink target for %q is empty", path)
+	}
+	return resolved, nil
 }

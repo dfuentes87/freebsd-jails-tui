@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,19 @@ type JailRctlConfig struct {
 	ProcessLimit  string
 	Persistent    bool
 	PersistentErr string
+}
+
+type managedRctlBlockMalformedError struct {
+	JailName string
+}
+
+func (e managedRctlBlockMalformedError) Error() string {
+	return fmt.Sprintf("managed rctl block for jail %q is missing end marker in %s; refusing to rewrite it", e.JailName, rctlConfPath)
+}
+
+func isManagedRctlBlockMalformedError(err error) bool {
+	var target managedRctlBlockMalformedError
+	return errors.As(err, &target)
 }
 
 func hasAnyRctlLimits(values jailWizardValues) bool {
@@ -211,7 +225,7 @@ func replaceManagedRctlBlock(lines []string, jailName string, rules []string) ([
 		updated = append(updated, line)
 	}
 	if inBlock {
-		return nil, false, fmt.Errorf("managed rctl block for jail %q is missing end marker in %s; refusing to rewrite it", jailName, rctlConfPath)
+		return nil, false, managedRctlBlockMalformedError{JailName: jailName}
 	}
 	for len(updated) > 0 && strings.TrimSpace(updated[len(updated)-1]) == "" {
 		updated = updated[:len(updated)-1]

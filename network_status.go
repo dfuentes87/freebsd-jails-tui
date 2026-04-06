@@ -737,24 +737,37 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 	}
 	backupPaths := []string{"/etc/rc.conf", "/etc/rc.conf.local"}
 	backups := make([]rcConfBackup, 0, len(backupPaths))
-	for _, path := range backupPaths {
-		_, statErr := os.Stat(path)
-		existed := statErr == nil
-		if statErr != nil && !os.IsNotExist(statErr) {
-			return nil, fmt.Errorf("failed to inspect %s before persistent VNET update: %w", path, statErr)
+	backupsReady := false
+	mutated := false
+
+	ensureBackups := func() error {
+		if backupsReady {
+			return nil
 		}
-		backup, err := backupFileForMutation(path, "vnet-host-rcconf", logs)
-		if err != nil {
-			return nil, err
+		for _, path := range backupPaths {
+			_, statErr := os.Stat(path)
+			existed := statErr == nil
+			if statErr != nil && !os.IsNotExist(statErr) {
+				return fmt.Errorf("failed to inspect %s before persistent VNET update: %w", path, statErr)
+			}
+			backup, err := backupFileForMutation(path, "vnet-host-rcconf", logs)
+			if err != nil {
+				return err
+			}
+			backups = append(backups, rcConfBackup{
+				path:       path,
+				existed:    existed,
+				fileBackup: backup,
+			})
 		}
-		backups = append(backups, rcConfBackup{
-			path:       path,
-			existed:    existed,
-			fileBackup: backup,
-		})
+		backupsReady = true
+		return nil
 	}
 
 	restoreBackups := func() {
+		if !mutated {
+			return
+		}
 		for idx := len(backups) - 1; idx >= 0; idx-- {
 			backup := backups[idx]
 			if backup.fileBackup != nil {
@@ -781,35 +794,56 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 	}
 	newCloned := formatJailListValue(applyJailListPosition(parseJailListValue(clonedOld), strings.TrimSpace(values.Bridge), 0))
 	if strings.TrimSpace(newCloned) != strings.TrimSpace(clonedOld) {
+		if err := ensureBackups(); err != nil {
+			return nil, err
+		}
 		if _, err := runLoggedCommand(logs, "sysrc", "cloned_interfaces="+newCloned); err != nil {
 			return fail(fmt.Errorf("failed to update cloned_interfaces: %w", err))
 		}
+		mutated = true
 	}
 
 	bridgeKey := "ifconfig_" + strings.TrimSpace(values.Bridge)
 	bridgeOld, err := readRCConfValue(bridgeKey)
 	if err != nil {
+		if mutated {
+			return fail(err)
+		}
 		return nil, err
 	}
 	desiredBridge := persistentBridgeRCValue(values)
 	if strings.TrimSpace(bridgeOld) != desiredBridge {
+		if err := ensureBackups(); err != nil {
+			return nil, err
+		}
 		if _, err := runLoggedCommand(logs, "sysrc", bridgeKey+"="+desiredBridge); err != nil {
 			return fail(fmt.Errorf("failed to update %s: %w", bridgeKey, err))
 		}
+		mutated = true
 	}
 
 	if uplink := strings.TrimSpace(values.Uplink); uplink != "" {
 		uplinkKey := "ifconfig_" + uplink
 		uplinkOld, err := readRCConfValue(uplinkKey)
 		if err != nil {
+			if mutated {
+				return fail(err)
+			}
 			return nil, err
 		}
 		if strings.TrimSpace(uplinkOld) != "up" {
+			if err := ensureBackups(); err != nil {
+				return nil, err
+			}
 			if _, err := runLoggedCommand(logs, "sysrc", uplinkKey+"=up"); err != nil {
 				return fail(fmt.Errorf("failed to update %s: %w", uplinkKey, err))
 			}
+			mutated = true
 		}
 	}
 
+	if !mutated {
+		return nil, nil
+	}
 	return restoreBackups, nil
 }

@@ -82,7 +82,12 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 	removeJailRctlRules(result.Name, &logs)
 	persistentRctlCleanup, err = removePersistentJailRctlRules(result.Name, &logs)
 	if err != nil {
-		return fail(err)
+		if isManagedRctlBlockMalformedError(err) {
+			logs = append(logs, "warning: unable to remove managed /etc/rctl.conf block automatically: "+err.Error())
+			logs = append(logs, "warning: leaving /etc/rctl.conf unchanged; repair the managed block manually if needed")
+		} else {
+			return fail(err)
+		}
 	}
 
 	if plan.ZFSDataset != "" {
