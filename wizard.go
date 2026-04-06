@@ -807,7 +807,7 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		if _, err := parseStartupOrderValue(w.values.StartupOrder); err != nil {
 			return "startup_order", err
 		}
-		dependencies, err := parseJailDependencyNames(w.values.Dependencies, w.values.Name)
+		dependencies, err := validateExistingJailDependencies(w.values.Dependencies, w.values.Name)
 		if err != nil {
 			return "dependencies", err
 		}
@@ -1591,6 +1591,31 @@ func parseJailDependencyNames(raw, self string) ([]string, error) {
 		deps = append(deps, token)
 	}
 	sort.Strings(deps)
+	return deps, nil
+}
+
+func validateExistingJailDependencies(raw, self string) ([]string, error) {
+	deps, err := parseJailDependencyNames(raw, self)
+	if err != nil {
+		return nil, err
+	}
+	if len(deps) == 0 {
+		return nil, nil
+	}
+	configured := discoverConfiguredJails()
+	known := make(map[string]struct{}, len(configured))
+	for _, name := range configured {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		known[name] = struct{}{}
+	}
+	for _, dep := range deps {
+		if _, ok := known[dep]; !ok {
+			return nil, fmt.Errorf("dependency %q is not a configured jail", dep)
+		}
+	}
 	return deps, nil
 }
 

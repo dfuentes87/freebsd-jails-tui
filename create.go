@@ -105,6 +105,11 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	if err := validator.validateAll(); err != nil {
 		return fail(err)
 	}
+	validatedDependencies, err := validateExistingJailDependencies(values.Dependencies, result.Name)
+	if err != nil {
+		return fail(err)
+	}
+	values.Dependencies = strings.Join(validatedDependencies, " ")
 	if result.Name == "" {
 		return fail(fmt.Errorf("jail name is required"))
 	}
@@ -279,9 +284,7 @@ func ensureDestinationJailPath(destination string, logs *[]string) (string, func
 		}
 		if existedEmpty {
 			return jailPath, func() {
-				if err := clearDirectoryContents(jailPath, logs); err != nil {
-					*logs = append(*logs, "  rollback warning: "+err.Error())
-				}
+				*logs = append(*logs, "  rollback note: destination existed before create; leaving "+jailPath+" in place for manual review")
 			}, nil
 		}
 		return jailPath, nil, nil

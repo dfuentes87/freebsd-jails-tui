@@ -529,17 +529,58 @@ func discoverJailNamedDatasets() ([]string, error) {
 func enableRCDefaultsCmd(enableJail, enableParallel bool) tea.Cmd {
 	return func() tea.Msg {
 		var logs []string
+		rcConfPaths := []string{"/etc/rc.conf", "/etc/rc.conf.local"}
+		var rcConfBackups []managedPathBackup
+		backupsReady := false
+		ensureBackups := func() error {
+			if backupsReady {
+				return nil
+			}
+			backups, err := backupPathsForMutation(rcConfPaths, "initial-check-rcconf", &logs)
+			if err != nil {
+				return err
+			}
+			rcConfBackups = backups
+			backupsReady = true
+			return nil
+		}
+		restoreBackups := func() {
+			if !backupsReady {
+				return
+			}
+			restorePathMutationBackups(rcConfBackups, &logs)
+		}
+		changed := false
+
 		if enableJail {
-			if _, err := runLoggedCommand(&logs, "sysrc", "jail_enable=YES"); err != nil {
+			if err := ensureRCSettingSafeToMutate("jail_enable"); err != nil {
 				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_enable."}
 			}
+			if err := ensureBackups(); err != nil {
+				return initialActionMsg{logs: logs, err: err, message: "Failed preparing rc.conf backup."}
+			}
+			if _, err := runLoggedCommand(&logs, "sysrc", "jail_enable=YES"); err != nil {
+				restoreBackups()
+				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_enable."}
+			}
+			changed = true
 		}
 		if enableParallel {
-			if _, err := runLoggedCommand(&logs, "sysrc", "jail_parallel_start=YES"); err != nil {
+			if err := ensureRCSettingSafeToMutate("jail_parallel_start"); err != nil {
+				restoreBackups()
 				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_parallel_start."}
 			}
+			if err := ensureBackups(); err != nil {
+				restoreBackups()
+				return initialActionMsg{logs: logs, err: err, message: "Failed preparing rc.conf backup."}
+			}
+			if _, err := runLoggedCommand(&logs, "sysrc", "jail_parallel_start=YES"); err != nil {
+				restoreBackups()
+				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_parallel_start."}
+			}
+			changed = true
 		}
-		if !enableJail && !enableParallel {
+		if !changed {
 			logs = append(logs, "No rc.conf settings required updates.")
 		}
 		return initialActionMsg{
