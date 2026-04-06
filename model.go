@@ -1658,6 +1658,7 @@ func (m model) renderHelpView() string {
 	title := titleStyle.Render("Help / Shortcuts")
 	meta := summaryStyle.Render("Press esc to return")
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 
 	bodyHeight := m.helpBodyHeight()
 	lines := m.helpLines(max(12, m.width-2))
@@ -1677,7 +1678,6 @@ func (m model) renderHelpView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
@@ -1774,13 +1774,6 @@ func (m model) renderDestroyView() string {
 		}
 	}
 
-	bodyHeight := max(5, m.height-3)
-	body := lipgloss.NewStyle().
-		Width(m.width).
-		Height(bodyHeight).
-		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
-
 	hint := "enter/y: destroy jail | esc/n: cancel | q: quit"
 	if m.destroy.applying {
 		hint = "Destroying jail... please wait | q: quit"
@@ -1792,11 +1785,21 @@ func (m model) renderDestroyView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) helpBodyHeight() int {
-	return max(5, m.height-3)
+	title := titleStyle.Render("Help / Shortcuts")
+	meta := summaryStyle.Render("Press esc to return")
+	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
+	return m.pageBodyHeight(header, footer, 0)
 }
 
 func (m *model) boundHelpScroll() {
@@ -1815,7 +1818,8 @@ func (m *model) boundHelpScroll() {
 
 func (m model) renderDashboard() string {
 	header := m.renderHeader()
-	bodyHeight := max(6, m.height-4)
+	footer := m.renderFooter()
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	leftWidth := max(50, (m.width*2)/3)
 	if leftWidth > m.width-24 {
 		leftWidth = m.width - 24
@@ -1830,7 +1834,6 @@ func (m model) renderDashboard() string {
 
 	listPanel := m.renderJailList(leftWidth, bodyHeight)
 	if rightWidth == 0 {
-		footer := m.renderFooter()
 		return lipgloss.JoinVertical(lipgloss.Left, header, "", listPanel, footer)
 	}
 
@@ -1840,7 +1843,6 @@ func (m model) renderDashboard() string {
 		Render(strings.Repeat("|\n", bodyHeight-1) + "|")
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
-	footer := m.renderFooter()
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
@@ -1858,7 +1860,21 @@ func (m model) renderJailDetailView() string {
 	meta := summaryStyle.Render(fmt.Sprintf("Jail:%s  Updated:%s", name, lastUpdated))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := m.detailBodyHeight()
+	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
+	if detailLooksLikeLinuxJail(m.detail) {
+		hint += " | b: retry linux bootstrap"
+	}
+	hint += " | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
+	message := ""
+	if m.detailErr != nil {
+		message = "warning: " + m.detailErr.Error()
+	} else if m.detailNotice != "" {
+		message = m.detailNotice
+	} else if m.detailLoading {
+		message = "loading detail..."
+	}
+	footer := m.renderFooterWithMessage(hint, message, footerStyle)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	contentWidth := max(12, m.width-2)
 	lines := m.detailLines(contentWidth)
 	maxOffset := max(0, len(lines)-bodyHeight)
@@ -1876,21 +1892,6 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
-	if detailLooksLikeLinuxJail(m.detail) {
-		hint += " | b: retry linux bootstrap"
-	}
-	hint += " | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
-	message := ""
-	if m.detailErr != nil {
-		message = "warning: " + m.detailErr.Error()
-	} else if m.detailNotice != "" {
-		message = m.detailNotice
-	} else if m.detailLoading {
-		message = "loading detail..."
-	}
-	footer := m.renderFooterWithMessage(hint, message, footerStyle)
-
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
@@ -1902,7 +1903,7 @@ func (m model) renderWizardView() string {
 
 	hint := m.wizardFooterHint()
 	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
-	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	bodyHeight := m.pageBodyHeight(header, footer, 1)
 	body := ""
 	if leftWidth, rightWidth, ok := m.wizardSplitPaneWidths(); ok {
 		leftLines, _ := m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
@@ -1970,7 +1971,7 @@ func (m model) wizardBodyHeight() int {
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 	footer := m.renderFooterWithMessage(m.wizardFooterHint(), m.wizard.message, footerStyle)
-	return max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	return m.pageBodyHeight(header, footer, 1)
 }
 
 func (m model) wizardSplitPaneWidths() (int, int, bool) {
@@ -2013,39 +2014,6 @@ func (m model) renderTemplateDatasetCreateView() string {
 	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
-
-	bodyHeight := max(6, m.height-3)
-	leftWidth := max(30, m.width/3)
-	if leftWidth > m.width-28 {
-		leftWidth = m.width - 28
-	}
-	if leftWidth < 24 {
-		leftWidth = m.width
-	}
-	rightWidth := m.width - leftWidth - 1
-	if rightWidth < 0 {
-		rightWidth = 0
-	}
-
-	listPanel := lipgloss.NewStyle().
-		Width(leftWidth).
-		Height(bodyHeight).
-		Padding(0, 1).
-		Render(strings.Join(m.templateManagerListLines(max(12, leftWidth-2), bodyHeight), "\n"))
-
-	body := listPanel
-	if rightWidth > 0 {
-		detailPanel := lipgloss.NewStyle().
-			Width(rightWidth).
-			Height(bodyHeight).
-			Padding(0, 1).
-			Render(strings.Join(m.templateManagerDetailLines(max(12, rightWidth-2)), "\n"))
-		separator := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240")).
-			Render(strings.Repeat("|\n", bodyHeight-1) + "|")
-		body = lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
-	}
-
 	hint := "j/k: select | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
 		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
@@ -2090,6 +2058,37 @@ func (m model) renderTemplateDatasetCreateView() string {
 		}
 	}
 	footer := m.renderFooterWithMessage(hint, m.templateCreate.message, footerStyle)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
+	leftWidth := max(30, m.width/3)
+	if leftWidth > m.width-28 {
+		leftWidth = m.width - 28
+	}
+	if leftWidth < 24 {
+		leftWidth = m.width
+	}
+	rightWidth := m.width - leftWidth - 1
+	if rightWidth < 0 {
+		rightWidth = 0
+	}
+
+	listPanel := lipgloss.NewStyle().
+		Width(leftWidth).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(m.templateManagerListLines(max(12, leftWidth-2), bodyHeight), "\n"))
+
+	body := listPanel
+	if rightWidth > 0 {
+		detailPanel := lipgloss.NewStyle().
+			Width(rightWidth).
+			Height(bodyHeight).
+			Padding(0, 1).
+			Render(strings.Join(m.templateManagerDetailLines(max(12, rightWidth-2)), "\n"))
+		separator := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render(strings.Repeat("|\n", bodyHeight-1) + "|")
+		body = lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
@@ -3787,6 +3786,14 @@ func (m model) renderFooterWithMessage(hint, message string, footerRenderer lipg
 
 	lines = append(lines, footerRenderer.Width(width).Render(hint))
 	return strings.Join(lines, "\n")
+}
+
+func (m model) pageBodyHeight(header, footer string, verticalPadding int) int {
+	height := m.height - lipgloss.Height(header) - lipgloss.Height(footer) - 1 - verticalPadding*2
+	if height < 1 {
+		return 1
+	}
+	return height
 }
 
 func (m model) renderJailList(width, height int) string {

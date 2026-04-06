@@ -655,7 +655,7 @@ func (m model) renderZFSPanelView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
-	bodyHeight := max(5, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	lines := m.zfsPanelLines(max(12, m.width-2), bodyHeight)
 	body := lipgloss.NewStyle().
 		Width(m.width).

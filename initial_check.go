@@ -907,7 +907,14 @@ func (m model) renderInitialCheckView() string {
 	meta := summaryStyle.Render("Checked: " + checked)
 	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := max(5, m.height-3)
+	footerRenderer := footerStyle
+	message := m.initCheck.message
+	if m.initCheck.err != nil {
+		message = "error: " + m.initCheck.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	footer := m.renderFooterWithMessage(m.initialCheckFooterHint(), message, footerRenderer)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	lines := m.initialCheckLines(max(12, m.width-2))
 	if len(lines) > bodyHeight {
 		lines = lines[:bodyHeight]
@@ -917,14 +924,6 @@ func (m model) renderInitialCheckView() string {
 		Height(bodyHeight).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
-
-	footerRenderer := footerStyle
-	message := m.initCheck.message
-	if m.initCheck.err != nil {
-		message = "error: " + m.initCheck.err.Error()
-		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
-	}
-	footer := m.renderFooterWithMessage(m.initialCheckFooterHint(), message, footerRenderer)
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
