@@ -15,15 +15,20 @@ import (
 const pollInterval = 2 * time.Second
 
 var (
+	headerBarStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("235"))
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("39")).
+			Background(lipgloss.Color("235")).
 			Padding(0, 1)
 	summaryStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("248"))
+			Foreground(lipgloss.Color("248")).
+			Background(lipgloss.Color("235"))
 	panelTitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("45"))
+			Foreground(lipgloss.Color("45")).
+			Underline(true)
 	selectedRowStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("230")).
 				Background(lipgloss.Color("24"))
@@ -38,13 +43,14 @@ var (
 			Foreground(lipgloss.Color("45"))
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("244")).
+			Background(lipgloss.Color("235")).
 			Padding(0, 1)
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("45"))
+			Foreground(lipgloss.Color("33"))
 	detailSectionStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("39"))
+				Foreground(lipgloss.Color("33"))
 	wizardActionStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("230")).
@@ -75,6 +81,11 @@ type destroyApplyMsg struct {
 
 type jailServiceApplyMsg struct {
 	result jailServiceResult
+}
+
+type bulkServiceApplyMsg struct {
+	results []jailServiceResult
+	action  string
 }
 
 type linuxBootstrapApplyMsg struct {
@@ -145,6 +156,7 @@ const (
 	screenZFSPanel
 	screenDestroyConfirm
 	screenHelp
+	screenUpgradeWizard
 )
 
 type destroyState struct {
@@ -224,6 +236,8 @@ type model struct {
 	helpReturnMode     screenMode
 	helpScroll         int
 	notice             string
+	selectedJails      map[string]struct{}
+	upgrade            upgradeState
 }
 
 func newModel() model {
@@ -237,6 +251,7 @@ func newModel() model {
 	}
 	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 	m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard, false)
+	m.selectedJails = make(map[string]struct{})
 	return m
 }
 
@@ -342,6 +357,33 @@ func openZFSPanelCmd(target Jail) tea.Cmd {
 	return func() tea.Msg {
 		result := resolveZFSPanelTarget(target)
 		return zfsOpenMsg{result: result}
+	}
+}
+
+func bulkToggleServiceCmd(targets []Jail) tea.Cmd {
+	return func() tea.Msg {
+		results := make([]jailServiceResult, 0, len(targets))
+		for _, t := range targets {
+			action := "start"
+			if t.Running {
+				action = "stop"
+			}
+			results = append(results, ExecuteJailServiceAction(t, action))
+		}
+		return bulkServiceApplyMsg{results: results, action: "toggle"}
+	}
+}
+
+func bulkServiceCmd(targets []Jail, action string) tea.Cmd {
+	return func() tea.Msg {
+		results := ExecuteBulkJailServiceAction(targets, action)
+		return bulkServiceApplyMsg{results: results, action: action}
+	}
+}
+
+func upgradeJailCmd(target Jail, workflow upgradeWorkflow) tea.Cmd {
+	return func() tea.Msg {
+		return ExecuteJailUpgrade(target, workflow)
 	}
 }
 
@@ -499,15 +541,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.Err != nil {
 			m.err = msg.result.Err
 			m.notice = ""
+			if m.mode == screenJailDetail {
+				m.detailErr = msg.result.Err
+				m.detailNotice = ""
+			}
 			return m, pollCmd()
 		}
 		m.err = nil
 		actionWord := "started"
 		if msg.result.Action == "stop" {
 			actionWord = "stopped"
+		} else if msg.result.Action == "restart" {
+			actionWord = "restarted"
 		}
 		m.notice = fmt.Sprintf("Jail %s %s.", msg.result.Name, actionWord)
+		if m.mode == screenJailDetail {
+			m.detailNotice = fmt.Sprintf("Jail %s.", actionWord)
+			m.detailErr = nil
+		}
 		return m, pollCmd()
+	case bulkServiceApplyMsg:
+		var failed []string
+		var succeeded []string
+		for _, r := range msg.results {
+			if r.Err != nil {
+				failed = append(failed, r.Name+": "+r.Err.Error())
+			} else {
+				succeeded = append(succeeded, r.Name)
+			}
+		}
+		m.selectedJails = make(map[string]struct{})
+		if len(failed) > 0 {
+			m.err = fmt.Errorf("bulk %s errors: %s", msg.action, strings.Join(failed, "; "))
+			m.notice = ""
+		} else {
+			actionWord := msg.action
+			if actionWord == "toggle" {
+				actionWord = "start/stop applied"
+			} else {
+				actionWord += "ed"
+			}
+			m.err = nil
+			m.notice = fmt.Sprintf("%d jail(s): %s.", len(succeeded), actionWord)
+		}
+		return m, pollCmd()
+	case upgradeApplyMsg:
+		m.upgrade.applying = false
+		m.upgrade.logs = append([]string(nil), msg.logs...)
+		m.upgrade.err = msg.err
+		if msg.err != nil {
+			m.upgrade.message = "Upgrade failed. Review the output above."
+		} else {
+			m.upgrade.message = fmt.Sprintf("Upgrade completed for %s.", msg.name)
+		}
+		return m, nil
 	case linuxBootstrapApplyMsg:
 		if msg.result.Err != nil {
 			m.detailErr = msg.result.Err
@@ -703,6 +790,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = screenHelp
 			return m, nil
 		}
+		if m.mode == screenUpgradeWizard {
+			return m.updateUpgradeWizardKeys(msg)
+		}
 		if m.mode == screenDestroyConfirm {
 			return m.updateDestroyKeys(msg)
 		}
@@ -797,7 +887,41 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		m.err = nil
 		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case "esc":
+		if len(m.selectedJails) > 0 {
+			m.selectedJails = make(map[string]struct{})
+			m.notice = "Selection cleared."
+			return m, nil
+		}
+	case "space":
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		if _, selected := m.selectedJails[jail.Name]; selected {
+			delete(m.selectedJails, jail.Name)
+		} else {
+			m.selectedJails[jail.Name] = struct{}{}
+		}
+	case "ctrl+a":
+		allSelected := len(m.snapshot.Jails) > 0
+		for _, j := range m.snapshot.Jails {
+			if _, ok := m.selectedJails[j.Name]; !ok {
+				allSelected = false
+				break
+			}
+		}
+		if allSelected {
+			m.selectedJails = make(map[string]struct{})
+		} else {
+			for _, j := range m.snapshot.Jails {
+				m.selectedJails[j.Name] = struct{}{}
+			}
+		}
 	case "s", "S":
+		if len(m.selectedJails) > 0 {
+			return m, bulkToggleServiceCmd(m.selectedJailList())
+		}
 		jail, ok := m.selectedJail()
 		if !ok {
 			return m, nil
@@ -807,6 +931,23 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			action = "stop"
 		}
 		return m, jailServiceCmd(jail, action)
+	case "R":
+		if len(m.selectedJails) > 0 {
+			return m, bulkServiceCmd(m.selectedJailList(), "restart")
+		}
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		return m, jailServiceCmd(jail, "restart")
+	case "u", "U":
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		m.upgrade = newUpgradeState(jail, screenDashboard)
+		m.mode = screenUpgradeWizard
+		return m, nil
 	case "z":
 		jail, ok := m.selectedJail()
 		if !ok {
@@ -908,6 +1049,22 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenZFSPanel
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail, m.detail)
 		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
+	case "R":
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, nil
+		}
+		m.detailErr = nil
+		m.detailNotice = "Restarting jail..."
+		return m, jailServiceCmd(jail, "restart")
+	case "u", "U":
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, nil
+		}
+		m.upgrade = newUpgradeState(jail, screenJailDetail)
+		m.mode = screenUpgradeWizard
+		return m, nil
 	case "x", "X":
 		jail, ok := m.detailJail()
 		if !ok {
@@ -1629,6 +1786,123 @@ func (m model) updateHelpKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateUpgradeWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.upgrade.applying {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q":
+		return m, tea.Quit
+	case "esc", "backspace", "left":
+		if !m.upgrade.selecting {
+			m.upgrade.selecting = true
+			m.upgrade.logs = nil
+			m.upgrade.err = nil
+			m.upgrade.message = ""
+			return m, nil
+		}
+		m.mode = m.upgrade.returnMode
+		return m, nil
+	case "j", "down":
+		if m.upgrade.selecting {
+			m.upgrade.cursor++
+			if m.upgrade.cursor >= len(upgradeWorkflowAll) {
+				m.upgrade.cursor = len(upgradeWorkflowAll) - 1
+			}
+		}
+	case "k", "up":
+		if m.upgrade.selecting {
+			m.upgrade.cursor--
+			if m.upgrade.cursor < 0 {
+				m.upgrade.cursor = 0
+			}
+		}
+	case "enter", "right":
+		if m.upgrade.selecting {
+			m.upgrade.workflow = upgradeWorkflowAll[m.upgrade.cursor]
+			m.upgrade.selecting = false
+			m.upgrade.logs = nil
+			m.upgrade.err = nil
+			m.upgrade.message = "Press enter to execute this upgrade workflow."
+			return m, nil
+		}
+		m.upgrade.applying = true
+		m.upgrade.logs = nil
+		m.upgrade.err = nil
+		m.upgrade.message = "Running upgrade..."
+		return m, upgradeJailCmd(m.upgrade.target, m.upgrade.workflow)
+	}
+	return m, nil
+}
+
+func (m model) renderUpgradeWizardView() string {
+	title := titleStyle.Render("Jail Upgrade")
+	meta := detailKeyStyle.Render("Jail:") + " " + selectedRowStyle.Render(valueOrDash(m.upgrade.target.Name))
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
+
+	bodyWidth := max(12, m.width-2)
+	lines := []string{}
+
+	if m.upgrade.selecting {
+		lines = append(lines, sectionStyle.Render("Select Upgrade Workflow"))
+		lines = append(lines, "")
+		for idx, wf := range upgradeWorkflowAll {
+			label := upgradeWorkflowLabel(wf)
+			if idx == m.upgrade.cursor {
+				lines = append(lines, selectedRowStyle.Width(max(1, bodyWidth)).Render(truncate("> "+label, bodyWidth)))
+			} else {
+				lines = append(lines, truncate("  "+label, bodyWidth))
+			}
+		}
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Description"))
+		for _, line := range upgradeWorkflowDescriptionLines(upgradeWorkflowAll[m.upgrade.cursor], m.upgrade.target) {
+			lines = append(lines, truncate(line, bodyWidth))
+		}
+	} else {
+		lines = append(lines, sectionStyle.Render("Upgrade Plan"))
+		lines = append(lines, truncate("Workflow: "+upgradeWorkflowLabel(m.upgrade.workflow), bodyWidth))
+		lines = append(lines, "")
+		for _, line := range upgradeWorkflowDescriptionLines(m.upgrade.workflow, m.upgrade.target) {
+			lines = append(lines, truncate(line, bodyWidth))
+		}
+		if len(m.upgrade.logs) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Execution output"))
+			for _, line := range m.upgrade.logs {
+				lines = append(lines, truncate(line, bodyWidth))
+			}
+		}
+	}
+
+	hint := "j/k: select workflow | enter: confirm | esc: cancel | q: quit"
+	if !m.upgrade.selecting {
+		hint = "enter: run upgrade | esc: back to selection | q: quit"
+		if m.upgrade.applying {
+			hint = "Upgrade in progress... please wait | ctrl+c: quit"
+		}
+	}
+	message := m.upgrade.message
+	footerRenderer := footerStyle
+	if m.upgrade.err != nil {
+		message = "error: " + m.upgrade.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
+}
+
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading dashboard..."
@@ -1648,6 +1922,9 @@ func (m model) View() string {
 	if m.mode == screenDestroyConfirm {
 		return m.renderDestroyView()
 	}
+	if m.mode == screenUpgradeWizard {
+		return m.renderUpgradeWizardView()
+	}
 	if m.mode == screenHelp {
 		return m.renderHelpView()
 	}
@@ -1660,7 +1937,7 @@ func (m model) View() string {
 func (m model) renderHelpView() string {
 	title := titleStyle.Render("Help / Shortcuts")
 	meta := summaryStyle.Render("Press esc to return")
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 
 	bodyHeight := m.helpBodyHeight()
@@ -1702,7 +1979,12 @@ func (m model) helpLines(width int) []string {
 		truncate("c: open jail creation wizard", width),
 		truncate("i: re-run initial config check", width),
 		truncate("t: open template manager", width),
-		truncate("s: start or stop selected jail", width),
+		truncate("s: start or stop selected jail (or all selected)", width),
+		truncate("R: restart selected jail (or all selected)", width),
+		truncate("u: open guided upgrade wizard for selected jail", width),
+		truncate("space: toggle jail selection for bulk actions", width),
+		truncate("ctrl+a: select all jails or clear selection", width),
+		truncate("esc: clear selection (when jails are selected)", width),
 		truncate("z: open ZFS panel for selected jail", width),
 		truncate("x: destroy selected jail (confirmation required)", width),
 		truncate("r: refresh dashboard data", width),
@@ -1713,6 +1995,8 @@ func (m model) helpLines(width int) []string {
 		truncate("startup policy shows jail_list order and configured depend values", width),
 		truncate("network summary shows configured/runtime network state plus host validation", width),
 		truncate("r: refresh selected jail details", width),
+		truncate("R: restart this jail", width),
+		truncate("u: open guided upgrade wizard for this jail", width),
 		truncate("b: retry linux bootstrap for a running linux jail", width),
 		truncate("z: open ZFS integration panel", width),
 		truncate("x: destroy this jail (confirmation required)", width),
@@ -1747,6 +2031,14 @@ func (m model) helpLines(width int) []string {
 		truncate("?: open help page", width),
 		truncate("confirmation enter: execute create actions", width),
 		"",
+		sectionStyle.Render("Upgrade Wizard"),
+		truncate("opened with u from the dashboard or jail detail view", width),
+		truncate("j/k: select upgrade workflow | enter: confirm selection or execute", width),
+		truncate("classic: patches the jail base with freebsd-update; jail does not need to be running", width),
+		truncate("thin template: detects ZFS clone origin, patches the template dataset, creates a post-upgrade snapshot", width),
+		truncate("pkg reinstall: runs pkg upgrade -f inside the jail; starts the jail first if stopped", width),
+		truncate("esc: go back to workflow selection, or return to previous screen", width),
+		"",
 		sectionStyle.Render("Template Manager"),
 		truncate("j/k: select | c: create | n: clone snapshot | r: rename | x: destroy", width),
 		truncate("enter applies the selected mountpoint when opened from the thin-jail wizard", width),
@@ -1762,7 +2054,7 @@ func (m model) helpLines(width int) []string {
 func (m model) renderDestroyView() string {
 	title := titleStyle.Render("Destroy Jail")
 	meta := detailKeyStyle.Render("Selected:") + " " + selectedRowStyle.Render(valueOrDash(m.destroy.target.Name))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	bodyWidth := max(12, m.width-2)
 	lines := []string{sectionStyle.Render("Confirmation")}
@@ -1800,7 +2092,7 @@ func (m model) renderDestroyView() string {
 func (m model) helpBodyHeight() int {
 	title := titleStyle.Render("Help / Shortcuts")
 	meta := summaryStyle.Render("Press esc to return")
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 	return m.pageBodyHeight(header, footer, 0)
 }
@@ -1861,7 +2153,7 @@ func (m model) renderJailDetailView() string {
 		lastUpdated = m.detail.LastUpdated.Format("15:04:05")
 	}
 	meta := summaryStyle.Render(fmt.Sprintf("Jail:%s  Updated:%s", name, lastUpdated))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
 	if detailLooksLikeLinuxJail(m.detail) {
@@ -1902,7 +2194,7 @@ func (m model) renderWizardView() string {
 	step := m.wizard.currentStep()
 	title := titleStyle.Render("Jail Creation Wizard")
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	hint := m.wizardFooterHint()
 	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
@@ -1972,7 +2264,7 @@ func (m model) wizardBodyHeight() int {
 	step := m.wizard.currentStep()
 	title := titleStyle.Render("Jail Creation Wizard")
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 	footer := m.renderFooterWithMessage(m.wizardFooterHint(), m.wizard.message, footerStyle)
 	return m.pageBodyHeight(header, footer, 1)
 }
@@ -2016,7 +2308,7 @@ func wizardViewportBounds(totalLines, scroll, height int) (int, int) {
 func (m model) renderTemplateDatasetCreateView() string {
 	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 	hint := "j/k: select | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
 		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
@@ -3526,6 +3818,16 @@ func (m model) selectedJail() (Jail, bool) {
 	return m.snapshot.Jails[idx], true
 }
 
+func (m model) selectedJailList() []Jail {
+	result := make([]Jail, 0, len(m.selectedJails))
+	for _, jail := range m.snapshot.Jails {
+		if _, ok := m.selectedJails[jail.Name]; ok {
+			result = append(result, jail)
+		}
+	}
+	return result
+}
+
 func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatus, returnMode screenMode, selectMode bool) templateDatasetCreateState {
 	state := templateDatasetCreateState{
 		returnMode:  returnMode,
@@ -3761,16 +4063,23 @@ func (m model) renderHeader() string {
 		m.snapshot.TotalMemoryMB,
 		lastUpdated,
 	))
-	return lipgloss.NewStyle().Width(m.width).Render(title + "  " + summary)
+	return headerBarStyle.Width(m.width).Render(title + "  " + summary)
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | i: initial config | t: template manager | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
+	hint := "j/k: navigate | enter/d: detail | c: create | s: start/stop | R: restart | u: upgrade | space: select | ctrl+a: all | z: ZFS | x: destroy | t: templates | i: config | h: help | r: refresh | q: quit"
 	footerRenderer := footerStyle
 	message := m.notice
 	if m.err != nil {
 		message = "warning: " + m.err.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	if len(m.selectedJails) > 0 && m.err == nil {
+		selMsg := fmt.Sprintf("%d selected | s: start/stop | R: restart | esc: clear selection", len(m.selectedJails))
+		if m.notice != "" {
+			selMsg += " | " + m.notice
+		}
+		message = selMsg
 	}
 	return m.renderFooterWithMessage(hint, message, footerRenderer)
 }
@@ -3831,9 +4140,13 @@ func (m model) renderRows(maxRows, width int) string {
 
 	for idx := start; idx < end; idx++ {
 		jail := m.snapshot.Jails[idx]
-		prefix := " "
+		sel := " "
+		if _, ok := m.selectedJails[jail.Name]; ok {
+			sel = "*"
+		}
+		cursorChar := " "
 		if idx == m.cursor {
-			prefix = ">"
+			cursorChar = ">"
 		}
 		jid := "-"
 		if jail.JID > 0 {
@@ -3841,8 +4154,9 @@ func (m model) renderRows(maxRows, width int) string {
 		}
 
 		line := fmt.Sprintf(
-			"%s %s %-18s JID:%-5s CPU:%6.2f%% MEM:%5dMB",
-			prefix,
+			"%s%s %s %-18s JID:%-5s CPU:%6.2f%% MEM:%5dMB",
+			cursorChar,
+			sel,
 			statusBadge(jail.Running),
 			truncate(jail.Name, 18),
 			jid,

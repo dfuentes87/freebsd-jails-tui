@@ -905,7 +905,7 @@ func (m model) renderInitialCheckView() string {
 		checked = m.initCheck.status.CheckedAt.Format("15:04:05")
 	}
 	meta := summaryStyle.Render("Checked: " + checked)
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	footerRenderer := footerStyle
 	message := m.initCheck.message

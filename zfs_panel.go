@@ -628,7 +628,7 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) renderZFSPanelView() string {
 	title := titleStyle.Render("ZFS Integration Panel")
 	meta := summaryStyle.Render("Dataset: " + valueOrDash(m.zfsPanel.dataset))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	hint := "j/k: select snapshot | c: create snapshot | r: rollback selected | n: clone as jail | e: edit property | x: refresh | esc: back | q: quit"
 	if m.zfsPanel.inputMode {
