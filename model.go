@@ -2268,7 +2268,7 @@ func (m model) wizardFooterHint() string {
 		hint = "Creating template dataset... please wait | ctrl+c: quit"
 	}
 	if m.wizardApplying {
-		hint = "Applying changes... please wait | ctrl+c: quit"
+		hint = "Applying changes... please wait | c: cancel | ctrl+c: quit"
 	}
 	return hint
 }
@@ -2796,13 +2796,15 @@ func (m model) wizardLines(width int) []string {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Execution output"))
 			for _, line := range m.wizard.executionLogs {
-				lines = append(lines, truncate(line, width))
+				appendWrappedLiteralLine(&lines, line, width)
 			}
 		}
 		if m.wizard.executionError != "" {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Execution error"))
-			lines = append(lines, truncate(m.wizard.executionError, width))
+			for _, line := range wrapText(m.wizard.executionError, max(1, width)) {
+				lines = append(lines, truncate(line, width))
+			}
 		}
 		return lines
 	}

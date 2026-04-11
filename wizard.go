@@ -913,6 +913,19 @@ func validateTemplateReleaseInput(values jailWizardValues) error {
 		return nil
 	}
 
+	if source, ok := findTemplateDatasetByName(input); ok {
+		if normalizedJailType(values.JailType) == "thin" {
+			info, err := os.Stat(source)
+			if err != nil || !info.IsDir() {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+			if _, err := exactZFSDatasetForPath(source); err != nil {
+				return fmt.Errorf("thin jails require a template dataset mountpoint; use ctrl+t to select one or press c in the selector to create one")
+			}
+		}
+		return nil
+	}
+
 	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
 		if _, err := neturl.ParseRequestURI(input); err != nil {
 			return fmt.Errorf("template/release URL is invalid")
