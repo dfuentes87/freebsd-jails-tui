@@ -874,6 +874,24 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 	return "", nil
 }
 
+func requiresDownload(input string) bool {
+	input = strings.TrimSpace(input)
+	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
+		return true
+	}
+	if releaseValuePattern.MatchString(strings.ToUpper(input)) {
+		localBaseArchive := "/usr/freebsd-dist/base.txz"
+		if _, err := os.Stat(localBaseArchive); err == nil {
+			return false
+		}
+		if _, ok := findReleaseArchiveInUserland(defaultUserlandDir, input); ok {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 func validateTemplateReleaseInput(values jailWizardValues) error {
 	input := strings.TrimSpace(values.TemplateRelease)
 	if input == "" {
@@ -1191,7 +1209,11 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		addStep("Ensure destination path exists:")
 		addDetail(fmt.Sprintf("   mkdir -p %s", destination))
 		addStep("Provision jail root from selected template/release:")
-		addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
+		if requiresDownload(w.values.TemplateRelease) {
+			addDetail(fmt.Sprintf("   # source: %s (not found locally, will download)", w.values.TemplateRelease))
+		} else {
+			addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
+		}
 	}
 	if normalizedJailType(w.values.JailType) != "thin" {
 		patchDecision := resolveFreeBSDPatchDecision(w.values.TemplateRelease, w.values.PatchBase)

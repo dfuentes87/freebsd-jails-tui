@@ -89,7 +89,7 @@ type TemplateParentDatasetResult struct {
 	Err        error
 }
 
-func ExecuteJailCreation(ctx context.Context, values jailWizardValues) JailCreationResult {
+func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressChan chan<- downloadProgressMsg) JailCreationResult {
 	if strings.TrimSpace(values.JailType) == "" {
 		values.JailType = "thick"
 	}
@@ -188,7 +188,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues) JailCreat
 	addCleanup(pathCleanup)
 	result.JailPath = jailPath
 
-	rootCleanup, err := provisionJailRoot(ctx, values, jailPath, &logs)
+	rootCleanup, err := provisionJailRoot(ctx, values, jailPath, &logs, progressChan)
 	if err != nil {
 		return fail(err)
 	}
@@ -351,24 +351,24 @@ func ensureDestinationJailPath(ctx context.Context, destination string, logs *[]
 	return mountpoint, nil, nil
 }
 
-func provisionJailRoot(ctx context.Context, values jailWizardValues, jailPath string, logs *[]string) (func(), error) {
+func provisionJailRoot(ctx context.Context, values jailWizardValues, jailPath string, logs *[]string, progressChan chan<- downloadProgressMsg) (func(), error) {
 	switch normalizedJailType(values.JailType) {
 	case "thin":
-		return provisionThinJailRoot(ctx, values, jailPath, logs)
+		return provisionThinJailRoot(ctx, values, jailPath, logs, progressChan)
 	case "linux":
-		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan); err != nil {
 			return nil, err
 		}
 		return nil, ensureLinuxCompatPaths(ctx, jailPath, values, logs)
 	default:
-		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan); err != nil {
 			return nil, err
 		}
 		return nil, seedGuestBaseFiles(ctx, jailPath, logs)
 	}
 }
 
-func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease string, logs *[]string) error {
+func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease string, logs *[]string, progressChan chan<- downloadProgressMsg) error {
 	entries, err := os.ReadDir(jailPath)
 	if err != nil {
 		return fmt.Errorf("failed to read jail path %q: %w", jailPath, err)
@@ -381,7 +381,7 @@ func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease st
 		return fmt.Errorf("template/release is required")
 	}
 
-	sourcePath, cleanup, err := resolveTemplateSource(ctx, strings.TrimSpace(templateRelease), logs)
+	sourcePath, cleanup, err := resolveTemplateSource(ctx, strings.TrimSpace(templateRelease), logs, progressChan)
 	if err != nil {
 		return err
 	}
@@ -424,8 +424,8 @@ func ensureThinDestinationPath(ctx context.Context, destination string, logs *[]
 	return jailPath, nil, nil
 }
 
-func provisionThinJailRoot(ctx context.Context, values jailWizardValues, jailPath string, logs *[]string) (func(), error) {
-	sourcePath, cleanup, err := resolveTemplateSource(ctx, strings.TrimSpace(values.TemplateRelease), logs)
+func provisionThinJailRoot(ctx context.Context, values jailWizardValues, jailPath string, logs *[]string, progressChan chan<- downloadProgressMsg) (func(), error) {
+	sourcePath, cleanup, err := resolveTemplateSource(ctx, strings.TrimSpace(values.TemplateRelease), logs, progressChan)
 	if err != nil {
 		return nil, err
 	}
@@ -811,7 +811,7 @@ func ExecuteTemplateDatasetCreateWithParent(ctx context.Context, sourceInput str
 		return fail(fmt.Errorf("could not derive a template dataset name from %q", sourceInput))
 	}
 
-	sourcePath, cleanup, err := resolveTemplateSource(ctx, sourceInput, &logs)
+	sourcePath, cleanup, err := resolveTemplateSource(ctx, sourceInput, &logs, nil)
 	if err != nil {
 		return fail(err)
 	}
@@ -1228,7 +1228,7 @@ func ensureJailConfigDoesNotExist(configPath string) error {
 	return nil
 }
 
-func resolveTemplateSource(ctx context.Context, input string, logs *[]string) (string, func(), error) {
+func resolveTemplateSource(ctx context.Context, input string, logs *[]string, progressChan chan<- downloadProgressMsg) (string, func(), error) {
 	if input == "" {
 		return "", nil, fmt.Errorf("template/release is required")
 	}
@@ -1249,7 +1249,7 @@ func resolveTemplateSource(ctx context.Context, input string, logs *[]string) (s
 
 	// Full URL: download and extract.
 	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
-		return downloadArchiveToTemp(ctx, input, logs)
+		return downloadArchiveToTemp(ctx, input, logs, progressChan)
 	}
 
 	// Release tag: local archive, then media dir, then download.freebsd.org.
@@ -1262,7 +1262,7 @@ func resolveTemplateSource(ctx context.Context, input string, logs *[]string) (s
 			return source, nil, nil
 		}
 
-		return downloadReleaseArchiveToTemp(ctx, input, logs)
+		return downloadReleaseArchiveToTemp(ctx, input, logs, progressChan)
 	}
 
 	return "", nil, fmt.Errorf(
@@ -1284,14 +1284,14 @@ func defaultReleaseBaseURLs(release string) ([]string, error) {
 	return urls, nil
 }
 
-func downloadReleaseArchiveToTemp(ctx context.Context, release string, logs *[]string) (string, func(), error) {
+func downloadReleaseArchiveToTemp(ctx context.Context, release string, logs *[]string, progressChan chan<- downloadProgressMsg) (string, func(), error) {
 	urls, err := defaultReleaseBaseURLs(release)
 	if err != nil {
 		return "", nil, err
 	}
 	var lastErr error
 	for _, url := range urls {
-		path, cleanup, err := downloadArchiveToTemp(ctx, url, logs)
+		path, cleanup, err := downloadArchiveToTemp(ctx, url, logs, progressChan)
 		if err == nil {
 			return path, cleanup, nil
 		}
@@ -1303,7 +1303,28 @@ func downloadReleaseArchiveToTemp(ctx context.Context, release string, logs *[]s
 	return "", nil, fmt.Errorf("unable to download release %s: %w", release, lastErr)
 }
 
-func downloadArchiveToTemp(ctx context.Context, url string, logs *[]string) (string, func(), error) {
+type progressReader struct {
+	io.Reader
+	total int64
+	read  int64
+	ch    chan<- downloadProgressMsg
+}
+
+func (pr *progressReader) Read(p []byte) (n int, err error) {
+	n, err = pr.Reader.Read(p)
+	if n > 0 {
+		pr.read += int64(n)
+		if pr.ch != nil {
+			select {
+			case pr.ch <- downloadProgressMsg{Read: pr.read, Total: pr.total}:
+			default:
+			}
+		}
+	}
+	return n, err
+}
+
+func downloadArchiveToTemp(ctx context.Context, url string, logs *[]string, progressChan chan<- downloadProgressMsg) (string, func(), error) {
 	url = strings.TrimSpace(url)
 	if url == "" {
 		return "", nil, fmt.Errorf("download URL is empty")
@@ -1326,7 +1347,14 @@ func downloadArchiveToTemp(ctx context.Context, url string, logs *[]string) (str
 	if err != nil {
 		return "", nil, fmt.Errorf("failed creating temp archive: %w", err)
 	}
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+
+	reader := &progressReader{
+		Reader: resp.Body,
+		total:  resp.ContentLength,
+		ch:     progressChan,
+	}
+
+	if _, err := io.Copy(tmp, reader); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return "", nil, fmt.Errorf("failed writing temp archive: %w", err)

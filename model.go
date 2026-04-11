@@ -146,6 +146,12 @@ type zfsPropertyApplyMsg struct {
 
 type tickMsg time.Time
 
+type downloadProgressMsg struct {
+	Read  int64
+	Total int64
+	Done  bool
+}
+
 type screenMode int
 
 const (
@@ -232,6 +238,10 @@ type model struct {
 	wizard             jailCreationWizard
 	wizardApplying     bool
 	wizardCancel       context.CancelFunc
+	downloading        bool
+	downloadRead       int64
+	downloadTotal      int64
+	progressChan       chan downloadProgressMsg
 	templateCreate     templateDatasetCreateState
 	destroy            destroyState
 	initCheck          initialCheckState
@@ -271,10 +281,21 @@ func detailCmd(jail Jail) tea.Cmd {
 	}
 }
 
-func createJailCmd(ctx context.Context, values jailWizardValues) tea.Cmd {
+func createJailCmd(ctx context.Context, values jailWizardValues, progressChan chan<- downloadProgressMsg) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteJailCreation(ctx, values)
+		result := ExecuteJailCreation(ctx, values, progressChan)
+		close(progressChan)
 		return wizardApplyMsg{result: result}
+	}
+}
+
+func waitForProgress(c chan downloadProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-c
+		if !ok {
+			return downloadProgressMsg{Done: true}
+		}
+		return msg
 	}
 }
 
@@ -513,8 +534,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
+	case downloadProgressMsg:
+		if msg.Done {
+			m.downloading = false
+			return m, nil
+		}
+		m.downloading = true
+		m.downloadRead = msg.Read
+		m.downloadTotal = msg.Total
+		return m, waitForProgress(m.progressChan)
 	case wizardApplyMsg:
 		m.wizardApplying = false
+		m.downloading = false
 		m.wizard.setExecutionResult(msg.result)
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
@@ -1425,9 +1456,16 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
+			m.downloading = false
+			m.downloadRead = 0
+			m.downloadTotal = 0
+			m.progressChan = make(chan downloadProgressMsg, 100)
 			ctx, cancel := context.WithCancel(context.Background())
 			m.wizardCancel = cancel
-			return m, createJailCmd(ctx, m.wizard.values)
+			return m, tea.Batch(
+				createJailCmd(ctx, m.wizard.values, m.progressChan),
+				waitForProgress(m.progressChan),
+			)
 		}
 		if m.wizardApplying {
 			return m, nil
@@ -2675,6 +2713,20 @@ func (m model) templateManagerDetailLines(width int) []string {
 	return lines
 }
 
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// ... skipping to wizardLines
 func (m model) wizardLines(width int) []string {
 	step := m.wizard.currentStep()
 	lines := []string{sectionStyle.Render(step.Title)}
@@ -2792,6 +2844,22 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.jailConfPreviewLines() {
 			appendWrappedLiteralLine(&lines, line, width)
 		}
+		if m.wizardApplying {
+			if m.downloading && m.downloadTotal > 0 {
+				percent := float64(m.downloadRead) / float64(m.downloadTotal)
+				barWidth := width - 20
+				if barWidth < 10 {
+					barWidth = 10
+				}
+				filled := int(float64(barWidth) * percent)
+				bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+				lines = append(lines, "")
+				lines = append(lines, sectionStyle.Render("Downloading Archive"))
+				lines = append(lines, fmt.Sprintf(" %s %3.0f%%", bar, percent*100))
+				lines = append(lines, fmt.Sprintf(" %s / %s", formatBytes(m.downloadRead), formatBytes(m.downloadTotal)))
+			}
+		}
+
 		if len(m.wizard.executionLogs) > 0 {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Execution output"))
