@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -115,7 +116,7 @@ func looksLikeOfficialFreeBSDReleaseURL(raw string) bool {
 	return strings.Contains(lower, "download.freebsd.org/ftp/releases/") && strings.Contains(lower, "/base.txz")
 }
 
-func patchFreeBSDRoot(rootPath string, logs *[]string) error {
+func patchFreeBSDRoot(ctx context.Context, rootPath string, logs *[]string) error {
 	rootPath = strings.TrimSpace(rootPath)
 	if rootPath == "" {
 		return fmt.Errorf("patch root path is required")
@@ -123,7 +124,7 @@ func patchFreeBSDRoot(rootPath string, logs *[]string) error {
 	if _, err := exec.LookPath("freebsd-update"); err != nil {
 		return fmt.Errorf("freebsd-update is not available on this host")
 	}
-	if _, err := runLoggedCommand(logs, "freebsd-update", "-b", rootPath, "fetch", "install"); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "freebsd-update", "-b", rootPath, "fetch", "install"); err != nil {
 		return fmt.Errorf("failed to patch FreeBSD base under %q: %w", rootPath, err)
 	}
 	return nil

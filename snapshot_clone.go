@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"fmt"
@@ -101,15 +102,15 @@ func ExecuteTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 	}
 	result.Dataset = preview.NewDataset
 	result.Mountpoint = preview.NewMountpoint
-	if _, err := runLoggedCommand(&logs, "zfs", "clone", preview.Snapshot, preview.NewDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "clone", preview.Snapshot, preview.NewDataset); err != nil {
 		return fail(fmt.Errorf("failed to clone template snapshot %q: %w", preview.Snapshot, err))
 	}
-	if _, err := runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.NewDataset)
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.NewDataset)
 		return fail(fmt.Errorf("failed to set mountpoint for %q: %w", preview.NewDataset, err))
 	}
-	if err := finalizeTemplateDatasetReadonly(preview.NewDataset, &logs); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.NewDataset)
+	if err := finalizeTemplateDatasetReadonly(context.Background(), preview.NewDataset, &logs); err != nil {
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.NewDataset)
 		return fail(err)
 	}
 	result.Logs = logs
@@ -215,13 +216,13 @@ func ExecuteJailSnapshotClone(detail JailDetail, snapshot, newName, destination 
 	result.Destination = preview.Destination
 	result.ConfigPath = preview.ConfigPath
 
-	if _, err := runLoggedCommand(&logs, "zfs", "clone", preview.Snapshot, preview.CloneDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "clone", preview.Snapshot, preview.CloneDataset); err != nil {
 		return fail(fmt.Errorf("failed to clone jail snapshot %q: %w", preview.Snapshot, err))
 	}
 	addCleanup(func() {
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.CloneDataset)
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.CloneDataset)
 	})
-	if _, err := runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.Destination, preview.CloneDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.Destination, preview.CloneDataset); err != nil {
 		return fail(fmt.Errorf("failed to set mountpoint for %q: %w", preview.CloneDataset, err))
 	}
 	if !preview.WriteConfig {

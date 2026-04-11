@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"fmt"
@@ -224,16 +225,16 @@ func ExecuteTemplateDatasetRename(dataset, newName string, parentOverride *templ
 		}
 	}
 
-	if _, err := runLoggedCommand(&logs, "zfs", "rename", preview.Current.Name, preview.NewDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "rename", preview.Current.Name, preview.NewDataset); err != nil {
 		return fail(fmt.Errorf("failed to rename template dataset %q: %w", preview.Current.Name, err))
 	}
-	if _, err := runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
 		return fail(fmt.Errorf("failed to set mountpoint for %q: %w", preview.NewDataset, err))
 	}
 	if _, err := rewriteWizardTemplateReleaseReferences(preview.Current.Mountpoint, preview.NewMountpoint); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.Current.Mountpoint, preview.NewDataset)
-		_, _ = runLoggedCommand(&logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.Current.Mountpoint, preview.NewDataset)
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
 		if restoreErr := restoreWizardTemplateStoreBackup(templateBackup, &logs); restoreErr != nil {
 			logs = append(logs, "rollback warning: "+restoreErr.Error())
 		}
@@ -275,7 +276,7 @@ func ExecuteTemplateDatasetDestroy(dataset string, parentOverride *templateDatas
 		return fail(preview.Err)
 	}
 	result.Dataset = preview.Current.Name
-	if _, err := runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.Current.Name); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.Current.Name); err != nil {
 		return fail(fmt.Errorf("failed to destroy template dataset %q: %w", preview.Current.Name, err))
 	}
 	result.Logs = logs

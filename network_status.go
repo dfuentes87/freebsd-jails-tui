@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -551,7 +552,7 @@ func networkWizardPrereqLines(prereqs NetworkWizardPrereqs) []string {
 	return lines
 }
 
-func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), error) {
+func ensureHostNetworkReady(ctx context.Context, values jailWizardValues, logs *[]string) (func(), error) {
 	prereqs := collectNetworkWizardPrereqs(values)
 	for _, warning := range prereqs.Warnings {
 		*logs = append(*logs, "network preflight: "+warning)
@@ -568,7 +569,7 @@ func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), er
 	}
 	var cleanups []func()
 	if prereqs.HostSetup == "persistent" {
-		persistCleanup, err := ensurePersistentVNETHostConfig(values, logs)
+		persistCleanup, err := ensurePersistentVNETHostConfig(ctx, values, logs)
 		if err != nil {
 			return nil, err
 		}
@@ -576,7 +577,7 @@ func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), er
 			cleanups = append(cleanups, persistCleanup)
 		}
 	}
-	runtimeCleanup, err := ensureVNETHostReady(prereqs, logs)
+	runtimeCleanup, err := ensureVNETHostReady(ctx, prereqs, logs)
 	if err != nil {
 		for idx := len(cleanups) - 1; idx >= 0; idx-- {
 			cleanups[idx]()
@@ -596,7 +597,7 @@ func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), er
 	}, nil
 }
 
-func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), error) {
+func ensureVNETHostReady(ctx context.Context, prereqs NetworkWizardPrereqs, logs *[]string) (func(), error) {
 	if strings.TrimSpace(prereqs.Bridge) == "" {
 		return nil, fmt.Errorf("bridge is required for vnet jails")
 	}
@@ -604,7 +605,7 @@ func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), 
 	createdBridge := false
 	attachedUplink := false
 	if prereqs.BridgeCreateNeeded {
-		if out, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "create"); err != nil {
+		if out, err := runLoggedCommand(ctx, logs, "ifconfig", prereqs.Bridge, "create"); err != nil {
 			if !strings.Contains(strings.ToLower(out), "file exists") {
 				return nil, fmt.Errorf("failed to create bridge %q: %w", prereqs.Bridge, err)
 			}
@@ -612,11 +613,11 @@ func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), 
 			createdBridge = true
 		}
 	}
-	if _, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "up"); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "ifconfig", prereqs.Bridge, "up"); err != nil {
 		return nil, fmt.Errorf("failed to bring bridge %q up: %w", prereqs.Bridge, err)
 	}
 	if prereqs.UplinkAttachNeeded && strings.TrimSpace(prereqs.Uplink) != "" {
-		if out, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "addm", prereqs.Uplink, "up"); err != nil {
+		if out, err := runLoggedCommand(ctx, logs, "ifconfig", prereqs.Bridge, "addm", prereqs.Uplink, "up"); err != nil {
 			if !strings.Contains(strings.ToLower(out), "file exists") {
 				return nil, fmt.Errorf("failed to attach uplink %q to bridge %q: %w", prereqs.Uplink, prereqs.Bridge, err)
 			}
@@ -627,12 +628,12 @@ func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), 
 
 	return func() {
 		if attachedUplink && !createdBridge {
-			if _, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "deletem", prereqs.Uplink); err != nil {
+			if _, err := runLoggedCommand(context.Background(), logs, "ifconfig", prereqs.Bridge, "deletem", prereqs.Uplink); err != nil {
 				*logs = append(*logs, fmt.Sprintf("  rollback warning: failed to detach uplink %q from bridge %q: %v", prereqs.Uplink, prereqs.Bridge, err))
 			}
 		}
 		if createdBridge {
-			if _, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "destroy"); err != nil {
+			if _, err := runLoggedCommand(context.Background(), logs, "ifconfig", prereqs.Bridge, "destroy"); err != nil {
 				*logs = append(*logs, fmt.Sprintf("  rollback warning: failed to destroy bridge %q: %v", prereqs.Bridge, err))
 			}
 		}
@@ -721,7 +722,7 @@ func persistentBridgeRCValue(values jailWizardValues) string {
 	return fmt.Sprintf("addm %s up", uplink)
 }
 
-func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (func(), error) {
+func ensurePersistentVNETHostConfig(ctx context.Context, values jailWizardValues, logs *[]string) (func(), error) {
 	warnings, errors := collectPersistentVNETRCConfDrift(values)
 	for _, warning := range warnings {
 		*logs = append(*logs, "network rc.conf: "+warning)
@@ -797,7 +798,7 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 		if err := ensureBackups(); err != nil {
 			return nil, err
 		}
-		if _, err := runLoggedCommand(logs, "sysrc", "cloned_interfaces="+newCloned); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "sysrc", "cloned_interfaces="+newCloned); err != nil {
 			return fail(fmt.Errorf("failed to update cloned_interfaces: %w", err))
 		}
 		mutated = true
@@ -816,7 +817,7 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 		if err := ensureBackups(); err != nil {
 			return nil, err
 		}
-		if _, err := runLoggedCommand(logs, "sysrc", bridgeKey+"="+desiredBridge); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "sysrc", bridgeKey+"="+desiredBridge); err != nil {
 			return fail(fmt.Errorf("failed to update %s: %w", bridgeKey, err))
 		}
 		mutated = true
@@ -835,7 +836,7 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 			if err := ensureBackups(); err != nil {
 				return nil, err
 			}
-			if _, err := runLoggedCommand(logs, "sysrc", uplinkKey+"=up"); err != nil {
+			if _, err := runLoggedCommand(ctx, logs, "sysrc", uplinkKey+"=up"); err != nil {
 				return fail(fmt.Errorf("failed to update %s: %w", uplinkKey, err))
 			}
 			mutated = true

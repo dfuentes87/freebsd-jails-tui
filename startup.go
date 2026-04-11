@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -58,7 +59,7 @@ func formatJailListValue(list []string) string {
 	return strings.Join(list, " ")
 }
 
-func updateJailStartupConfig(name string, values jailWizardValues, logs *[]string) (func(), error) {
+func updateJailStartupConfig(ctx context.Context, name string, values jailWizardValues, logs *[]string) (func(), error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("jail name is required for startup order")
@@ -94,7 +95,7 @@ func updateJailStartupConfig(name string, values jailWizardValues, logs *[]strin
 	}
 
 	newValue := formatJailListValue(newList)
-	if _, err := runLoggedCommand(logs, "sysrc", "jail_list="+newValue); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "sysrc", "jail_list="+newValue); err != nil {
 		restorePathMutationBackups(backups, logs)
 		return nil, fmt.Errorf("failed to update jail_list: %w", err)
 	}

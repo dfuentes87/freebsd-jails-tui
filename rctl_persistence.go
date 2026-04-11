@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -137,7 +138,7 @@ func managedRctlRulesForJail(values jailWizardValues, jailName string) []string 
 	return rules
 }
 
-func syncPersistentJailRctlRules(values jailWizardValues, jailName string, logs *[]string) (func(), error) {
+func syncPersistentJailRctlRules(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) (func(), error) {
 	return rewriteManagedJailRctlBlock(jailName, managedRctlRulesForJail(values, jailName), logs)
 }
 

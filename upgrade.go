@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"fmt"
@@ -149,7 +150,7 @@ func executeClassicUpgrade(jail Jail, logs *[]string) error {
 	if path == "" {
 		return fmt.Errorf("jail path is required for classic upgrade")
 	}
-	return patchFreeBSDRoot(path, logs)
+	return patchFreeBSDRoot(context.Background(), path, logs)
 }
 
 func executeThinTemplateUpgrade(jail Jail, logs *[]string) error {
@@ -161,18 +162,18 @@ func executeThinTemplateUpgrade(jail Jail, logs *[]string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := runLoggedCommand(logs, "zfs", "set", "readonly=off", dataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), logs, "zfs", "set", "readonly=off", dataset); err != nil {
 		return fmt.Errorf("failed to make template dataset %q writable: %w", dataset, err)
 	}
-	patchErr := patchFreeBSDRoot(mountpoint, logs)
-	if _, setErr := runLoggedCommand(logs, "zfs", "set", "readonly=on", dataset); setErr != nil {
+	patchErr := patchFreeBSDRoot(context.Background(), mountpoint, logs)
+	if _, setErr := runLoggedCommand(context.Background(), logs, "zfs", "set", "readonly=on", dataset); setErr != nil {
 		*logs = append(*logs, "warning: failed to restore readonly on template dataset: "+setErr.Error())
 	}
 	if patchErr != nil {
 		return patchErr
 	}
 	snap := dataset + "@post-upgrade-" + time.Now().Format("20060102T150405")
-	if _, err := runLoggedCommand(logs, "zfs", "snapshot", snap); err != nil {
+	if _, err := runLoggedCommand(context.Background(), logs, "zfs", "snapshot", snap); err != nil {
 		*logs = append(*logs, "warning: post-upgrade snapshot failed: "+err.Error())
 	}
 	return nil
@@ -185,14 +186,14 @@ func executePkgReinstall(jail Jail, logs *[]string) error {
 	}
 	started := false
 	if !jail.Running {
-		if _, err := runLoggedCommand(logs, "service", "jail", "start", name); err != nil {
+		if _, err := runLoggedCommand(context.Background(), logs, "service", "jail", "start", name); err != nil {
 			return fmt.Errorf("failed to start jail %q: %w", name, err)
 		}
 		started = true
 	}
-	_, pkgErr := runLoggedCommand(logs, "pkg", "-j", name, "upgrade", "-f", "-y")
+	_, pkgErr := runLoggedCommand(context.Background(), logs, "pkg", "-j", name, "upgrade", "-f", "-y")
 	if started {
-		if _, err := runLoggedCommand(logs, "service", "jail", "stop", name); err != nil {
+		if _, err := runLoggedCommand(context.Background(), logs, "service", "jail", "stop", name); err != nil {
 			*logs = append(*logs, "warning: failed to stop jail after pkg reinstall: "+err.Error())
 		}
 	}

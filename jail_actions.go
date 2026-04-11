@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"fmt"
@@ -94,10 +95,10 @@ func ExecuteLinuxBootstrapAction(detail JailDetail) linuxBootstrapResult {
 
 	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
 	values.LinuxBootstrap = "auto"
-	if err := preflightLinuxBootstrap(values, result.Name, &logs); err != nil {
+	if err := preflightLinuxBootstrap(context.Background(), values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
-	if err := bootstrapLinuxUserland(values, result.Name, &logs); err != nil {
+	if err := bootstrapLinuxUserland(context.Background(), values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -230,6 +231,7 @@ type model struct {
 	zfsPanel           zfsPanelState
 	wizard             jailCreationWizard
 	wizardApplying     bool
+	wizardCancel       context.CancelFunc
 	templateCreate     templateDatasetCreateState
 	destroy            destroyState
 	initCheck          initialCheckState
@@ -269,9 +271,9 @@ func detailCmd(jail Jail) tea.Cmd {
 	}
 }
 
-func createJailCmd(values jailWizardValues) tea.Cmd {
+func createJailCmd(ctx context.Context, values jailWizardValues) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteJailCreation(values)
+		result := ExecuteJailCreation(ctx, values)
 		return wizardApplyMsg{result: result}
 	}
 }
@@ -299,7 +301,7 @@ func linuxBootstrapCmd(detail JailDetail) tea.Cmd {
 
 func templateDatasetCreateCmd(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteTemplateDatasetCreateWithParent(sourceInput, parentOverride, patchPreference)
+		result := ExecuteTemplateDatasetCreateWithParent(context.Background(), sourceInput, parentOverride, patchPreference)
 		return templateDatasetApplyMsg{result: result}
 	}
 }
@@ -348,7 +350,7 @@ func jailSnapshotCloneCmd(detail JailDetail, snapshot, newName, destination stri
 
 func templateParentCreateCmd(dataset, mountpoint string) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteTemplateParentDatasetCreate(dataset, mountpoint)
+		result := ExecuteTemplateParentDatasetCreate(context.Background(), dataset, mountpoint)
 		return templateParentApplyMsg{result: result}
 	}
 }
@@ -1288,6 +1290,15 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "c", "C":
+		if m.wizardApplying {
+			if m.wizardCancel != nil {
+				m.wizardCancel()
+				m.wizard.message = "Canceling creation... (waiting for safe rollback)"
+			}
+			return m, nil
+		}
+		// otherwise allow typing 'c' in text fields? Wait, if it's KeyRunes it was already handled above.
 	case "esc":
 		if m.wizardApplying {
 			return m, nil
@@ -1414,7 +1425,9 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
-			return m, createJailCmd(m.wizard.values)
+			ctx, cancel := context.WithCancel(context.Background())
+			m.wizardCancel = cancel
+			return m, createJailCmd(ctx, m.wizard.values)
 		}
 		if m.wizardApplying {
 			return m, nil
@@ -2778,11 +2791,6 @@ func (m model) wizardLines(width int) []string {
 		lines = append(lines, sectionStyle.Render("jail.conf preview"))
 		for _, line := range m.wizard.jailConfPreviewLines() {
 			appendWrappedLiteralLine(&lines, line, width)
-		}
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Creation plan"))
-		for _, line := range m.wizard.commandPlanLines() {
-			lines = append(lines, truncate(line, width))
 		}
 		if len(m.wizard.executionLogs) > 0 {
 			lines = append(lines, "")

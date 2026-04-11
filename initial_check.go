@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"bufio"
@@ -559,7 +560,7 @@ func enableRCDefaultsCmd(enableJail, enableParallel bool) tea.Cmd {
 			if err := ensureBackups(); err != nil {
 				return initialActionMsg{logs: logs, err: err, message: "Failed preparing rc.conf backup."}
 			}
-			if _, err := runLoggedCommand(&logs, "sysrc", "jail_enable=YES"); err != nil {
+			if _, err := runLoggedCommand(context.Background(), &logs, "sysrc", "jail_enable=YES"); err != nil {
 				restoreBackups()
 				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_enable."}
 			}
@@ -574,7 +575,7 @@ func enableRCDefaultsCmd(enableJail, enableParallel bool) tea.Cmd {
 				restoreBackups()
 				return initialActionMsg{logs: logs, err: err, message: "Failed preparing rc.conf backup."}
 			}
-			if _, err := runLoggedCommand(&logs, "sysrc", "jail_parallel_start=YES"); err != nil {
+			if _, err := runLoggedCommand(context.Background(), &logs, "sysrc", "jail_parallel_start=YES"); err != nil {
 				restoreBackups()
 				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_parallel_start."}
 			}
@@ -674,7 +675,7 @@ func createDatasetLayoutCmd(baseDataset, mountpoint, media, templates, container
 		}
 
 		var logs []string
-		if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+mountpoint, baseDataset); err != nil {
+		if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "create", "-o", "mountpoint="+mountpoint, baseDataset); err != nil {
 			return initialActionMsg{
 				logs:    logs,
 				err:     err,
@@ -686,7 +687,7 @@ func createDatasetLayoutCmd(baseDataset, mountpoint, media, templates, container
 			if dataset == "" {
 				continue
 			}
-			if _, err := runLoggedCommand(&logs, "zfs", "create", dataset); err != nil {
+			if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "create", dataset); err != nil {
 				return initialActionMsg{
 					logs:    logs,
 					err:     err,

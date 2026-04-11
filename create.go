@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,26 @@ import (
 var releaseValuePattern = regexp.MustCompile(`^[0-9]+\.[0-9]+-RELEASE`)
 
 var errTemplateDatasetParentMissing = errors.New("template parent dataset missing")
+
+var debugLogEnabled bool
+
+func init() {
+	if os.Getenv("FREEBSD_JAILS_TUI_DEBUG") != "" {
+		debugLogEnabled = true
+	}
+}
+
+func debugLog(component, message string) {
+	if !debugLogEnabled {
+		return
+	}
+	f, err := os.OpenFile("/var/log/freebsd-jails-tui-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		defer f.Close()
+		ts := time.Now().Format(time.RFC3339)
+		f.WriteString(fmt.Sprintf("[%s] %s: %s\n", ts, component, message))
+	}
+}
 
 const (
 	defaultUserlandDir     = "/usr/local/jails/media"
@@ -68,7 +89,7 @@ type TemplateParentDatasetResult struct {
 	Err        error
 }
 
-func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
+func ExecuteJailCreation(ctx context.Context, values jailWizardValues) JailCreationResult {
 	if strings.TrimSpace(values.JailType) == "" {
 		values.JailType = "thick"
 	}
@@ -81,7 +102,9 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	}
 	logs := make([]string, 0, 32)
 	logf := func(format string, args ...any) {
-		logs = append(logs, fmt.Sprintf(format, args...))
+		msg := fmt.Sprintf(format, args...)
+		logs = append(logs, msg)
+		debugLog("JailCreation", msg)
 	}
 	cleanups := make([]func(), 0, 8)
 	addCleanup := func(fn func()) {
@@ -91,6 +114,7 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	}
 	warnings := make([]string, 0, 4)
 	fail := func(err error) JailCreationResult {
+		debugLog("JailCreation", fmt.Sprintf("Failed: %v. Rolling back...", err))
 		for idx := len(cleanups) - 1; idx >= 0; idx-- {
 			cleanups[idx]()
 		}
@@ -151,20 +175,20 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	}
 	logf("Starting jail creation for %s", result.Name)
 
-	hostNetworkCleanup, err := ensureHostNetworkReady(values, &logs)
+	hostNetworkCleanup, err := ensureHostNetworkReady(ctx, values, &logs)
 	if err != nil {
 		return fail(err)
 	}
 	addCleanup(hostNetworkCleanup)
 
-	jailPath, pathCleanup, err := prepareJailPath(values, destination, &logs)
+	jailPath, pathCleanup, err := prepareJailPath(ctx, values, destination, &logs)
 	if err != nil {
 		return fail(err)
 	}
 	addCleanup(pathCleanup)
 	result.JailPath = jailPath
 
-	rootCleanup, err := provisionJailRoot(values, jailPath, &logs)
+	rootCleanup, err := provisionJailRoot(ctx, values, jailPath, &logs)
 	if err != nil {
 		return fail(err)
 	}
@@ -174,12 +198,12 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 		return fail(patchDecision.Err)
 	}
 	if patchDecision.Effective {
-		if err := patchFreeBSDRoot(jailPath, &logs); err != nil {
+		if err := patchFreeBSDRoot(ctx, jailPath, &logs); err != nil {
 			return fail(err)
 		}
 	}
 	if normalizedJailType(values.JailType) == "linux" {
-		linuxCleanup, err := ensureLinuxHostReady(&logs)
+		linuxCleanup, err := ensureLinuxHostReady(ctx, &logs)
 		if err != nil {
 			return fail(err)
 		}
@@ -187,7 +211,7 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	}
 
 	mountSpecs := parseMountPointSpecs(values.MountPoints)
-	fstabPath, err := configureMountPoints(result.Name, jailPath, mountSpecs, &logs)
+	fstabPath, err := configureMountPoints(ctx, result.Name, jailPath, mountSpecs, &logs)
 	if err != nil {
 		return fail(err)
 	}
@@ -207,37 +231,37 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 			logs = append(logs, "rollback warning: "+err.Error())
 		}
 	})
-	startupCleanup, err := updateJailStartupConfig(result.Name, values, &logs)
+	startupCleanup, err := updateJailStartupConfig(ctx, result.Name, values, &logs)
 	if err != nil {
 		return fail(err)
 	}
 	addCleanup(startupCleanup)
-	persistentRctlCleanup, err := syncPersistentJailRctlRules(values, result.Name, &logs)
+	persistentRctlCleanup, err := syncPersistentJailRctlRules(ctx, values, result.Name, &logs)
 	if err != nil {
 		return fail(err)
 	}
 	addCleanup(persistentRctlCleanup)
 
-	if _, err := runLoggedCommand(&logs, "service", "jail", "start", result.Name); err != nil {
+	if _, err := runLoggedCommand(ctx, &logs, "service", "jail", "start", result.Name); err != nil {
 		return fail(err)
 	}
 	addCleanup(func() {
-		if _, err := runLoggedCommand(&logs, "service", "jail", "stop", result.Name); err != nil {
+		if _, err := runLoggedCommand(ctx, &logs, "service", "jail", "stop", result.Name); err != nil {
 			logs = append(logs, fmt.Sprintf("rollback warning: failed to stop jail %q: %v", result.Name, err))
 		}
 	})
 	if normalizedJailType(values.JailType) == "linux" {
-		bootstrapWarnings, err := maybeBootstrapLinuxUserland(values, result.Name, &logs)
+		bootstrapWarnings, err := maybeBootstrapLinuxUserland(ctx, values, result.Name, &logs)
 		if err != nil {
 			return fail(err)
 		}
 		warnings = append(warnings, bootstrapWarnings...)
 	}
-	if err := applyRctlLimits(values, result.Name, &logs); err != nil {
+	if err := applyRctlLimits(ctx, values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
 	addCleanup(func() {
-		removeJailRctlRules(result.Name, &logs)
+		removeJailRctlRules(ctx, result.Name, &logs)
 	})
 
 	logf("Jail %s created successfully.", result.Name)
@@ -246,14 +270,14 @@ func ExecuteJailCreation(values jailWizardValues) JailCreationResult {
 	return result
 }
 
-func prepareJailPath(values jailWizardValues, destination string, logs *[]string) (string, func(), error) {
+func prepareJailPath(ctx context.Context, values jailWizardValues, destination string, logs *[]string) (string, func(), error) {
 	if normalizedJailType(values.JailType) == "thin" {
-		return ensureThinDestinationPath(destination, logs)
+		return ensureThinDestinationPath(ctx, destination, logs)
 	}
-	return ensureDestinationJailPath(destination, logs)
+	return ensureDestinationJailPath(ctx, destination, logs)
 }
 
-func ensureDestinationJailPath(destination string, logs *[]string) (string, func(), error) {
+func ensureDestinationJailPath(ctx context.Context, destination string, logs *[]string) (string, func(), error) {
 	destination = strings.TrimSpace(destination)
 	if strings.HasPrefix(destination, "/") {
 		jailPath, err := validateAbsolutePath(destination, "destination")
@@ -298,13 +322,13 @@ func ensureDestinationJailPath(destination string, logs *[]string) (string, func
 	}
 	createdDataset := false
 	if !zfsDatasetExists(destination) {
-		if _, createErr := runLoggedCommand(logs, "zfs", "create", "-p", destination); createErr != nil {
+		if _, createErr := runLoggedCommand(ctx, logs, "zfs", "create", "-p", destination); createErr != nil {
 			return "", nil, fmt.Errorf("failed to ensure dataset %q: %w", destination, createErr)
 		}
 		createdDataset = true
 	}
 
-	mountpointOut, err := runLoggedCommand(logs, "zfs", "list", "-H", "-o", "mountpoint", destination)
+	mountpointOut, err := runLoggedCommand(ctx, logs, "zfs", "list", "-H", "-o", "mountpoint", destination)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to discover mountpoint for %q: %w", destination, err)
 	}
@@ -319,7 +343,7 @@ func ensureDestinationJailPath(destination string, logs *[]string) (string, func
 	}
 	if createdDataset {
 		return mountpoint, func() {
-			if _, err := runLoggedCommand(logs, "zfs", "destroy", "-r", destination); err != nil {
+			if _, err := runLoggedCommand(ctx, logs, "zfs", "destroy", "-r", destination); err != nil {
 				*logs = append(*logs, "  rollback warning: failed to destroy dataset "+destination+": "+err.Error())
 			}
 		}, nil
@@ -327,24 +351,24 @@ func ensureDestinationJailPath(destination string, logs *[]string) (string, func
 	return mountpoint, nil, nil
 }
 
-func provisionJailRoot(values jailWizardValues, jailPath string, logs *[]string) (func(), error) {
+func provisionJailRoot(ctx context.Context, values jailWizardValues, jailPath string, logs *[]string) (func(), error) {
 	switch normalizedJailType(values.JailType) {
 	case "thin":
-		return provisionThinJailRoot(values, jailPath, logs)
+		return provisionThinJailRoot(ctx, values, jailPath, logs)
 	case "linux":
-		if err := provisionStandardJailRoot(jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
 			return nil, err
 		}
-		return nil, ensureLinuxCompatPaths(jailPath, values, logs)
+		return nil, ensureLinuxCompatPaths(ctx, jailPath, values, logs)
 	default:
-		if err := provisionStandardJailRoot(jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs); err != nil {
 			return nil, err
 		}
-		return nil, seedGuestBaseFiles(jailPath, logs)
+		return nil, seedGuestBaseFiles(ctx, jailPath, logs)
 	}
 }
 
-func provisionStandardJailRoot(jailPath, templateRelease string, logs *[]string) error {
+func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease string, logs *[]string) error {
 	entries, err := os.ReadDir(jailPath)
 	if err != nil {
 		return fmt.Errorf("failed to read jail path %q: %w", jailPath, err)
@@ -357,7 +381,7 @@ func provisionStandardJailRoot(jailPath, templateRelease string, logs *[]string)
 		return fmt.Errorf("template/release is required")
 	}
 
-	sourcePath, cleanup, err := resolveTemplateSource(strings.TrimSpace(templateRelease), logs)
+	sourcePath, cleanup, err := resolveTemplateSource(ctx, strings.TrimSpace(templateRelease), logs)
 	if err != nil {
 		return err
 	}
@@ -367,13 +391,13 @@ func provisionStandardJailRoot(jailPath, templateRelease string, logs *[]string)
 
 	if info, err := os.Stat(sourcePath); err == nil {
 		if info.IsDir() {
-			_, cpErr := runLoggedCommand(logs, "cp", "-a", sourcePath+"/.", jailPath+"/")
+			_, cpErr := runLoggedCommand(ctx, logs, "cp", "-a", sourcePath+"/.", jailPath+"/")
 			if cpErr != nil {
 				return fmt.Errorf("failed to copy template directory %q: %w", sourcePath, cpErr)
 			}
 			return nil
 		}
-		_, tarErr := runLoggedCommand(logs, "tar", "-xf", sourcePath, "-C", jailPath)
+		_, tarErr := runLoggedCommand(ctx, logs, "tar", "-xf", sourcePath, "-C", jailPath)
 		if tarErr != nil {
 			return fmt.Errorf("failed to extract template archive %q: %w", sourcePath, tarErr)
 		}
@@ -382,7 +406,7 @@ func provisionStandardJailRoot(jailPath, templateRelease string, logs *[]string)
 	return fmt.Errorf("resolved template/release %q is not accessible", sourcePath)
 }
 
-func ensureThinDestinationPath(destination string, logs *[]string) (string, func(), error) {
+func ensureThinDestinationPath(ctx context.Context, destination string, logs *[]string) (string, func(), error) {
 	jailPath := filepath.Clean(strings.TrimSpace(destination))
 	if jailPath == "" || !strings.HasPrefix(jailPath, "/") {
 		return "", nil, fmt.Errorf("thin jails require an absolute destination path")
@@ -400,8 +424,8 @@ func ensureThinDestinationPath(destination string, logs *[]string) (string, func
 	return jailPath, nil, nil
 }
 
-func provisionThinJailRoot(values jailWizardValues, jailPath string, logs *[]string) (func(), error) {
-	sourcePath, cleanup, err := resolveTemplateSource(strings.TrimSpace(values.TemplateRelease), logs)
+func provisionThinJailRoot(ctx context.Context, values jailWizardValues, jailPath string, logs *[]string) (func(), error) {
+	sourcePath, cleanup, err := resolveTemplateSource(ctx, strings.TrimSpace(values.TemplateRelease), logs)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +452,7 @@ func provisionThinJailRoot(values jailWizardValues, jailPath string, logs *[]str
 
 	snapshot := sourceDataset.Name + "@freebsd-jails-tui-base"
 	if !zfsSnapshotExists(snapshot) {
-		if _, snapshotErr := runLoggedCommand(logs, "zfs", "snapshot", snapshot); snapshotErr != nil {
+		if _, snapshotErr := runLoggedCommand(ctx, logs, "zfs", "snapshot", snapshot); snapshotErr != nil {
 			return nil, fmt.Errorf("failed to create thin jail template snapshot %q: %w", snapshot, snapshotErr)
 		}
 	}
@@ -437,21 +461,21 @@ func provisionThinJailRoot(values jailWizardValues, jailPath string, logs *[]str
 	if zfsDatasetExists(cloneDataset) {
 		return nil, fmt.Errorf("thin jail dataset %q already exists", cloneDataset)
 	}
-	if _, err := runLoggedCommand(logs, "zfs", "clone", snapshot, cloneDataset); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "zfs", "clone", snapshot, cloneDataset); err != nil {
 		return nil, fmt.Errorf("failed to clone thin jail dataset %q from %q: %w", cloneDataset, snapshot, err)
 	}
 	expectedMount := filepath.Join(filepath.Clean(parentDataset.Mountpoint), filepath.Base(jailPath))
 	if filepath.Clean(expectedMount) != filepath.Clean(jailPath) {
-		if _, err := runLoggedCommand(logs, "zfs", "set", "mountpoint="+jailPath, cloneDataset); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "zfs", "set", "mountpoint="+jailPath, cloneDataset); err != nil {
 			return nil, fmt.Errorf("failed to set mountpoint for thin jail dataset %q: %w", cloneDataset, err)
 		}
 	}
 	cleanupClone := func() {
-		if _, err := runLoggedCommand(logs, "zfs", "destroy", "-r", cloneDataset); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "zfs", "destroy", "-r", cloneDataset); err != nil {
 			*logs = append(*logs, "  rollback warning: failed to destroy thin jail dataset "+cloneDataset+": "+err.Error())
 		}
 	}
-	return cleanupClone, seedGuestBaseFiles(jailPath, logs)
+	return cleanupClone, seedGuestBaseFiles(ctx, jailPath, logs)
 }
 
 func exactZFSDatasetForPath(path string) (*ZFSDatasetInfo, error) {
@@ -480,7 +504,7 @@ func parentZFSDatasetForPath(path string) (*ZFSDatasetInfo, error) {
 	return info, nil
 }
 
-func seedGuestBaseFiles(jailPath string, logs *[]string) error {
+func seedGuestBaseFiles(ctx context.Context, jailPath string, logs *[]string) error {
 	copyList := []struct {
 		src string
 		dst string
@@ -496,14 +520,14 @@ func seedGuestBaseFiles(jailPath string, logs *[]string) error {
 			return fmt.Errorf("failed to prepare guest file path %q: %w", item.dst, err)
 		}
 		*logs = append(*logs, fmt.Sprintf("$ cp %s %s", item.src, item.dst))
-		if _, err := runLoggedCommand(logs, "cp", "-f", item.src, item.dst); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "cp", "-f", item.src, item.dst); err != nil {
 			return fmt.Errorf("failed to copy %q into jail: %w", item.src, err)
 		}
 	}
 	return nil
 }
 
-func ensureLinuxHostReady(logs *[]string) (func(), error) {
+func ensureLinuxHostReady(ctx context.Context, logs *[]string) (func(), error) {
 	if _, err := os.Stat("/etc/rc.d/linux"); err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("linux ABI host service script /etc/rc.d/linux is not present")
@@ -549,7 +573,7 @@ func ensureLinuxHostReady(logs *[]string) (func(), error) {
 		if err := ensureBackups(); err != nil {
 			return nil, err
 		}
-		if _, err := runLoggedCommand(logs, "sysrc", "linux_enable=YES"); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "sysrc", "linux_enable=YES"); err != nil {
 			restoreBackups()
 			return nil, fmt.Errorf("failed to enable linux ABI on host: %w", err)
 		}
@@ -557,7 +581,7 @@ func ensureLinuxHostReady(logs *[]string) (func(), error) {
 	}
 	startedService := false
 	if !previouslyRunning {
-		if _, err := runLoggedCommand(logs, "service", "linux", "start"); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "service", "linux", "start"); err != nil {
 			if changedEnable {
 				restoreBackups()
 			}
@@ -571,7 +595,7 @@ func ensureLinuxHostReady(logs *[]string) (func(), error) {
 	}
 	return func() {
 		if startedService {
-			if _, err := runLoggedCommand(logs, "service", "linux", "stop"); err != nil {
+			if _, err := runLoggedCommand(ctx, logs, "service", "linux", "stop"); err != nil {
 				*logs = append(*logs, "  rollback warning: failed to stop linux ABI service: "+err.Error())
 			}
 		}
@@ -581,7 +605,7 @@ func ensureLinuxHostReady(logs *[]string) (func(), error) {
 	}, nil
 }
 
-func ensureLinuxCompatPaths(jailPath string, values jailWizardValues, logs *[]string) error {
+func ensureLinuxCompatPaths(ctx context.Context, jailPath string, values jailWizardValues, logs *[]string) error {
 	compatRoot := linuxCompatRoot(jailPath, values)
 	paths := []string{
 		filepath.Join(compatRoot, "dev", "shm"),
@@ -597,10 +621,10 @@ func ensureLinuxCompatPaths(jailPath string, values jailWizardValues, logs *[]st
 			return fmt.Errorf("failed to prepare Linux compatibility path %q: %w", path, err)
 		}
 	}
-	return seedGuestBaseFiles(jailPath, logs)
+	return seedGuestBaseFiles(ctx, jailPath, logs)
 }
 
-func bootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]string) error {
+func bootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) error {
 	distro := effectiveLinuxDistro(values)
 	release := effectiveLinuxRelease(values)
 	target := filepath.ToSlash(filepath.Join("/compat", distro))
@@ -614,40 +638,40 @@ func bootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]st
 		*logs = append(*logs, "Linux userland already present under "+target+"; skipping debootstrap.")
 		return nil
 	}
-	if _, err := runLoggedCommand(logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "bootstrap", "-f"); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "bootstrap", "-f"); err != nil {
 		return fmt.Errorf("failed to bootstrap pkg inside linux jail: %w", err)
 	}
-	if _, err := runLoggedCommand(logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "install", "-y", "debootstrap"); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "install", "-y", "debootstrap"); err != nil {
 		return fmt.Errorf("failed to install debootstrap inside linux jail: %w", err)
 	}
-	if _, err := runLoggedCommand(logs, "jexec", jailName, "debootstrap", "--arch", hostArch(), release, target, mirror); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "debootstrap", "--arch", hostArch(), release, target, mirror); err != nil {
 		return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
 	}
 	return nil
 }
 
-func maybeBootstrapLinuxUserland(values jailWizardValues, jailName string, logs *[]string) ([]string, error) {
+func maybeBootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) ([]string, error) {
 	if effectiveLinuxBootstrapMode(values) == "skip" {
 		return []string{"Linux bootstrap skipped by wizard setting. Use detail view action 'b' after networking is ready."}, nil
 	}
-	if err := preflightLinuxBootstrap(values, jailName, logs); err != nil {
+	if err := preflightLinuxBootstrap(ctx, values, jailName, logs); err != nil {
 		return []string{err.Error() + " Use detail view action 'b' to retry after fixing networking."}, nil
 	}
-	if err := bootstrapLinuxUserland(values, jailName, logs); err != nil {
+	if err := bootstrapLinuxUserland(ctx, values, jailName, logs); err != nil {
 		return []string{err.Error() + " Use detail view action 'b' to retry after fixing networking or package access."}, nil
 	}
 	return nil, nil
 }
 
-func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]string) error {
+func preflightLinuxBootstrap(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) error {
 	mirrorInfo, err := resolveLinuxMirror(values)
 	if err != nil {
 		return err
 	}
-	hasIPv4Route := checkLinuxRouteFamily(jailName, "inet", logs)
-	hasIPv6Route := checkLinuxRouteFamily(jailName, "inet6", logs)
+	hasIPv4Route := checkLinuxRouteFamily(ctx, jailName, "inet", logs)
+	hasIPv6Route := checkLinuxRouteFamily(ctx, jailName, "inet6", logs)
 	if !hasIPv4Route && !hasIPv6Route {
-		if err := checkLinuxGenericFetchReachability(mirrorInfo.PreflightURL, jailName, logs); err == nil {
+		if err := checkLinuxGenericFetchReachability(ctx, mirrorInfo.PreflightURL, jailName, logs); err == nil {
 			*logs = append(*logs, "Linux bootstrap preflight: shared-stack fetch succeeded without an explicit default route probe.")
 			return nil
 		}
@@ -657,7 +681,7 @@ func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]s
 	if host == "" {
 		return fmt.Errorf("linux bootstrap preflight failed: could not determine mirror host")
 	}
-	hasIPv4DNS, hasIPv6DNS, err := checkLinuxDNSFamilies(jailName, host, logs)
+	hasIPv4DNS, hasIPv6DNS, err := checkLinuxDNSFamilies(ctx, jailName, host, logs)
 	if err != nil {
 		return err
 	}
@@ -670,13 +694,13 @@ func preflightLinuxBootstrap(values jailWizardValues, jailName string, logs *[]s
 	if hasIPv6Route && !hasIPv6DNS && !hasIPv4Route {
 		return fmt.Errorf("linux bootstrap preflight failed: DNS returned no IPv6 answers for %s", host)
 	}
-	if err := checkLinuxFetchReachability(mirrorInfo.PreflightURL, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
+	if err := checkLinuxFetchReachability(ctx, mirrorInfo.PreflightURL, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
 		return err
 	}
 	return nil
 }
 
-func checkLinuxRouteFamily(jailName, family string, logs *[]string) bool {
+func checkLinuxRouteFamily(ctx context.Context, jailName, family string, logs *[]string) bool {
 	args := []string{"jexec", jailName, "route", "-n", "get"}
 	switch family {
 	case "inet6":
@@ -685,21 +709,21 @@ func checkLinuxRouteFamily(jailName, family string, logs *[]string) bool {
 		args = append(args, "-inet")
 	}
 	args = append(args, "default")
-	_, err := runLoggedCommand(logs, args[0], args[1:]...)
+	_, err := runLoggedCommand(ctx, logs, args[0], args[1:]...)
 	return err == nil
 }
 
-func checkLinuxFetchReachability(preflightURL, jailName string, hasIPv4Route, hasIPv6Route bool, logs *[]string) error {
+func checkLinuxFetchReachability(ctx context.Context, preflightURL, jailName string, hasIPv4Route, hasIPv6Route bool, logs *[]string) error {
 	var failures []string
 	if hasIPv4Route {
-		if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-4", "-qo", "/dev/null", preflightURL); err == nil {
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "fetch", "-4", "-qo", "/dev/null", preflightURL); err == nil {
 			return nil
 		} else {
 			failures = append(failures, "IPv4 fetch failed")
 		}
 	}
 	if hasIPv6Route {
-		if _, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-6", "-qo", "/dev/null", preflightURL); err == nil {
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "fetch", "-6", "-qo", "/dev/null", preflightURL); err == nil {
 			return nil
 		} else {
 			failures = append(failures, "IPv6 fetch failed")
@@ -711,19 +735,19 @@ func checkLinuxFetchReachability(preflightURL, jailName string, hasIPv4Route, ha
 	return fmt.Errorf("linux bootstrap preflight failed: could not fetch %s (%s)", preflightURL, strings.Join(failures, ", "))
 }
 
-func checkLinuxGenericFetchReachability(preflightURL, jailName string, logs *[]string) error {
+func checkLinuxGenericFetchReachability(ctx context.Context, preflightURL, jailName string, logs *[]string) error {
 	if strings.TrimSpace(preflightURL) == "" {
 		return fmt.Errorf("linux bootstrap preflight failed: no preflight URL available")
 	}
-	_, err := runLoggedCommand(logs, "jexec", jailName, "fetch", "-qo", "/dev/null", preflightURL)
+	_, err := runLoggedCommand(ctx, logs, "jexec", jailName, "fetch", "-qo", "/dev/null", preflightURL)
 	if err != nil {
 		return fmt.Errorf("linux bootstrap preflight failed: generic fetch to %s failed: %w", preflightURL, err)
 	}
 	return nil
 }
 
-func checkLinuxDNSFamilies(jailName, host string, logs *[]string) (bool, bool, error) {
-	out, err := runLoggedCommand(logs, "jexec", jailName, "getent", "hosts", host)
+func checkLinuxDNSFamilies(ctx context.Context, jailName, host string, logs *[]string) (bool, bool, error) {
+	out, err := runLoggedCommand(ctx, logs, "jexec", jailName, "getent", "hosts", host)
 	if err != nil {
 		return false, false, fmt.Errorf("linux bootstrap preflight failed: DNS lookup failed for %s", host)
 	}
@@ -760,11 +784,11 @@ func hostArch() string {
 	return arch
 }
 
-func ExecuteTemplateDatasetCreate(sourceInput string) TemplateDatasetResult {
-	return ExecuteTemplateDatasetCreateWithParent(sourceInput, nil, "auto")
+func ExecuteTemplateDatasetCreate(ctx context.Context, sourceInput string) TemplateDatasetResult {
+	return ExecuteTemplateDatasetCreateWithParent(ctx, sourceInput, nil, "auto")
 }
 
-func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetResult {
+func ExecuteTemplateDatasetCreateWithParent(ctx context.Context, sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetResult {
 	result := TemplateDatasetResult{}
 	logs := make([]string, 0, 24)
 	fail := func(err error) TemplateDatasetResult {
@@ -787,7 +811,7 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		return fail(fmt.Errorf("could not derive a template dataset name from %q", sourceInput))
 	}
 
-	sourcePath, cleanup, err := resolveTemplateSource(sourceInput, &logs)
+	sourcePath, cleanup, err := resolveTemplateSource(ctx, sourceInput, &logs)
 	if err != nil {
 		return fail(err)
 	}
@@ -820,7 +844,7 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		return fail(fmt.Errorf("template dataset %q already exists", result.Dataset))
 	}
 
-	if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+result.Mountpoint, result.Dataset); err != nil {
+	if _, err := runLoggedCommand(ctx, &logs, "zfs", "create", "-o", "mountpoint="+result.Mountpoint, result.Dataset); err != nil {
 		return fail(fmt.Errorf("failed to create template dataset %q: %w", result.Dataset, err))
 	}
 
@@ -829,7 +853,7 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		if success {
 			return
 		}
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", result.Dataset)
+		_, _ = runLoggedCommand(ctx, &logs, "zfs", "destroy", "-r", result.Dataset)
 	}()
 
 	info, err := os.Stat(sourcePath)
@@ -837,20 +861,20 @@ func ExecuteTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 		return fail(fmt.Errorf("template source %q is not accessible: %w", sourcePath, err))
 	}
 	if info.IsDir() {
-		if _, err := runLoggedCommand(&logs, "cp", "-a", sourcePath+"/.", result.Mountpoint+"/"); err != nil {
+		if _, err := runLoggedCommand(ctx, &logs, "cp", "-a", sourcePath+"/.", result.Mountpoint+"/"); err != nil {
 			return fail(fmt.Errorf("failed to copy template source into %q: %w", result.Dataset, err))
 		}
 	} else {
-		if _, err := runLoggedCommand(&logs, "tar", "-xf", sourcePath, "-C", result.Mountpoint); err != nil {
+		if _, err := runLoggedCommand(ctx, &logs, "tar", "-xf", sourcePath, "-C", result.Mountpoint); err != nil {
 			return fail(fmt.Errorf("failed to extract template archive into %q: %w", result.Dataset, err))
 		}
 	}
 	if patchDecision.Effective {
-		if err := patchFreeBSDRoot(result.Mountpoint, &logs); err != nil {
+		if err := patchFreeBSDRoot(ctx, result.Mountpoint, &logs); err != nil {
 			return fail(err)
 		}
 	}
-	if err := finalizeTemplateDatasetReadonly(result.Dataset, &logs); err != nil {
+	if err := finalizeTemplateDatasetReadonly(ctx, result.Dataset, &logs); err != nil {
 		return fail(err)
 	}
 
@@ -928,7 +952,7 @@ func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *
 	return preview
 }
 
-func ExecuteTemplateParentDatasetCreate(dataset, mountpoint string) TemplateParentDatasetResult {
+func ExecuteTemplateParentDatasetCreate(ctx context.Context, dataset, mountpoint string) TemplateParentDatasetResult {
 	result := TemplateParentDatasetResult{
 		Dataset:    strings.TrimSpace(dataset),
 		Mountpoint: strings.TrimSpace(mountpoint),
@@ -961,7 +985,7 @@ func ExecuteTemplateParentDatasetCreate(dataset, mountpoint string) TemplatePare
 		return result
 	}
 
-	if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+result.Mountpoint, result.Dataset); err != nil {
+	if _, err := runLoggedCommand(ctx, &logs, "zfs", "create", "-o", "mountpoint="+result.Mountpoint, result.Dataset); err != nil {
 		return fail(fmt.Errorf("failed to create template parent dataset %q: %w", result.Dataset, err))
 	}
 	result.Logs = logs
@@ -1204,7 +1228,7 @@ func ensureJailConfigDoesNotExist(configPath string) error {
 	return nil
 }
 
-func resolveTemplateSource(input string, logs *[]string) (string, func(), error) {
+func resolveTemplateSource(ctx context.Context, input string, logs *[]string) (string, func(), error) {
 	if input == "" {
 		return "", nil, fmt.Errorf("template/release is required")
 	}
@@ -1225,7 +1249,7 @@ func resolveTemplateSource(input string, logs *[]string) (string, func(), error)
 
 	// Full URL: download and extract.
 	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
-		return downloadArchiveToTemp(input, logs)
+		return downloadArchiveToTemp(ctx, input, logs)
 	}
 
 	// Release tag: local archive, then media dir, then download.freebsd.org.
@@ -1238,7 +1262,7 @@ func resolveTemplateSource(input string, logs *[]string) (string, func(), error)
 			return source, nil, nil
 		}
 
-		return downloadReleaseArchiveToTemp(input, logs)
+		return downloadReleaseArchiveToTemp(ctx, input, logs)
 	}
 
 	return "", nil, fmt.Errorf(
@@ -1260,14 +1284,14 @@ func defaultReleaseBaseURLs(release string) ([]string, error) {
 	return urls, nil
 }
 
-func downloadReleaseArchiveToTemp(release string, logs *[]string) (string, func(), error) {
+func downloadReleaseArchiveToTemp(ctx context.Context, release string, logs *[]string) (string, func(), error) {
 	urls, err := defaultReleaseBaseURLs(release)
 	if err != nil {
 		return "", nil, err
 	}
 	var lastErr error
 	for _, url := range urls {
-		path, cleanup, err := downloadArchiveToTemp(url, logs)
+		path, cleanup, err := downloadArchiveToTemp(ctx, url, logs)
 		if err == nil {
 			return path, cleanup, nil
 		}
@@ -1279,14 +1303,18 @@ func downloadReleaseArchiveToTemp(release string, logs *[]string) (string, func(
 	return "", nil, fmt.Errorf("unable to download release %s: %w", release, lastErr)
 }
 
-func downloadArchiveToTemp(url string, logs *[]string) (string, func(), error) {
+func downloadArchiveToTemp(ctx context.Context, url string, logs *[]string) (string, func(), error) {
 	url = strings.TrimSpace(url)
 	if url == "" {
 		return "", nil, fmt.Errorf("download URL is empty")
 	}
 	*logs = append(*logs, "$ fetch "+url)
 	client := &http.Client{Timeout: archiveDownloadTimeout}
-	resp, err := client.Get(url) // #nosec G107 user-provided URL is intentional
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil) // #nosec G107 user-provided URL is intentional
+	if err != nil {
+		return "", nil, fmt.Errorf("failed creating request for %s: %w", url, err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed downloading %s: %w", url, err)
 	}
@@ -1382,7 +1410,7 @@ func findReleaseArchiveInUserland(userlandDir, release string) (string, bool) {
 	return "", false
 }
 
-func configureMountPoints(name, jailPath string, specs []mountPointSpec, logs *[]string) (string, error) {
+func configureMountPoints(ctx context.Context, name, jailPath string, specs []mountPointSpec, logs *[]string) (string, error) {
 	if len(specs) == 0 {
 		return "", nil
 	}
@@ -1469,41 +1497,64 @@ func writeJailConfigFile(configPath string, lines []string, logs *[]string) erro
 	return nil
 }
 
-func applyRctlLimits(values jailWizardValues, jailName string, logs *[]string) error {
+func applyRctlLimits(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) error {
 	if !hasAnyRctlLimits(values) {
 		return nil
 	}
 	if strings.TrimSpace(values.CPUPercent) != "" {
-		if _, err := runLoggedCommand(logs, "rctl", "-a", fmt.Sprintf("jail:%s:pcpu:deny=%s", jailName, strings.TrimSpace(values.CPUPercent))); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "rctl", "-a", fmt.Sprintf("jail:%s:pcpu:deny=%s", jailName, strings.TrimSpace(values.CPUPercent))); err != nil {
 			return fmt.Errorf("failed to apply CPU rctl limit: %w", err)
 		}
 	}
 	if strings.TrimSpace(values.MemoryLimit) != "" {
-		if _, err := runLoggedCommand(logs, "rctl", "-a", fmt.Sprintf("jail:%s:memoryuse:deny=%s", jailName, strings.ToUpper(strings.TrimSpace(values.MemoryLimit)))); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "rctl", "-a", fmt.Sprintf("jail:%s:memoryuse:deny=%s", jailName, strings.ToUpper(strings.TrimSpace(values.MemoryLimit)))); err != nil {
 			return fmt.Errorf("failed to apply memory rctl limit: %w", err)
 		}
 	}
 	if strings.TrimSpace(values.ProcessLimit) != "" {
-		if _, err := runLoggedCommand(logs, "rctl", "-a", fmt.Sprintf("jail:%s:maxproc:deny=%s", jailName, strings.TrimSpace(values.ProcessLimit))); err != nil {
+		if _, err := runLoggedCommand(ctx, logs, "rctl", "-a", fmt.Sprintf("jail:%s:maxproc:deny=%s", jailName, strings.TrimSpace(values.ProcessLimit))); err != nil {
 			return fmt.Errorf("failed to apply process rctl limit: %w", err)
 		}
 	}
 	return nil
 }
 
-func runLoggedCommand(logs *[]string, name string, args ...string) (string, error) {
+func runLoggedCommand(ctx context.Context, logs *[]string, name string, args ...string) (string, error) {
 	command := name
 	if len(args) > 0 {
 		command += " " + strings.Join(args, " ")
 	}
 	*logs = append(*logs, "$ "+command)
+	debugLog("Command", command)
 
-	cmd := exec.Command(name, args...)
-	output, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(output))
+	cmd := exec.CommandContext(ctx, name, args...)
+
+	// Create pipes manually so we can close them if needed, avoiding hang on daemonization
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return "", fmt.Errorf("pipe failed: %w", err)
+	}
+	defer outR.Close()
+	cmd.Stdout = outW
+	cmd.Stderr = outW
+
+	if err := cmd.Start(); err != nil {
+		outW.Close()
+		return "", fmt.Errorf("%s: %w", command, err)
+	}
+
+	outW.Close() // Close write end in parent
+
+	// Read output asynchronously to prevent blocking
+	outputBytes, _ := io.ReadAll(outR)
+	text := strings.TrimSpace(string(outputBytes))
+
+	err = cmd.Wait()
+
 	if text != "" {
 		for _, line := range strings.Split(text, "\n") {
 			*logs = append(*logs, "  "+line)
+			debugLog("Command", "  "+line)
 		}
 	}
 	if err != nil {
@@ -1512,12 +1563,12 @@ func runLoggedCommand(logs *[]string, name string, args ...string) (string, erro
 	return text, nil
 }
 
-func finalizeTemplateDatasetReadonly(dataset string, logs *[]string) error {
+func finalizeTemplateDatasetReadonly(ctx context.Context, dataset string, logs *[]string) error {
 	dataset = strings.TrimSpace(dataset)
 	if dataset == "" {
 		return fmt.Errorf("template dataset is required")
 	}
-	if _, err := runLoggedCommand(logs, "zfs", "set", "readonly=on", dataset); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "zfs", "set", "readonly=on", dataset); err != nil {
 		return fmt.Errorf("failed to finalize template dataset %q as readonly: %w", dataset, err)
 	}
 	return nil

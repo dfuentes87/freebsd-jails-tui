@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"fmt"
@@ -74,12 +75,12 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 	}
 
 	if plan.Running {
-		if _, err := runLoggedCommand(&logs, "service", "jail", "stop", result.Name); err != nil {
+		if _, err := runLoggedCommand(context.Background(), &logs, "service", "jail", "stop", result.Name); err != nil {
 			return fail(fmt.Errorf("failed to stop jail %q: %w", result.Name, err))
 		}
 	}
 
-	removeJailRctlRules(result.Name, &logs)
+	removeJailRctlRules(context.Background(), result.Name, &logs)
 	persistentRctlCleanup, err = removePersistentJailRctlRules(result.Name, &logs)
 	if err != nil {
 		if isManagedRctlBlockMalformedError(err) {
@@ -91,7 +92,7 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 	}
 
 	if plan.ZFSDataset != "" {
-		if _, err := runLoggedCommand(&logs, "zfs", "destroy", "-r", plan.ZFSDataset); err != nil {
+		if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", plan.ZFSDataset); err != nil {
 			return fail(fmt.Errorf("failed to destroy dataset %q: %w", plan.ZFSDataset, err))
 		}
 	} else if plan.JailPath != "" {
@@ -306,14 +307,14 @@ func clearDestroyPathFlags(path string, logs *[]string) error {
 		}
 		return fmt.Errorf("failed to inspect jail path %q before clearing file flags: %w", path, err)
 	}
-	if _, err := runLoggedCommand(logs, "chflags", "-R", "0", path); err != nil {
+	if _, err := runLoggedCommand(context.Background(), logs, "chflags", "-R", "0", path); err != nil {
 		return fmt.Errorf("failed to clear file flags under %q: %w", path, err)
 	}
 	return nil
 }
 
-func removeJailRctlRules(name string, logs *[]string) {
-	if _, err := runLoggedCommand(logs, "rctl", "-r", "jail:"+name); err != nil {
+func removeJailRctlRules(ctx context.Context, name string, logs *[]string) {
+	if _, err := runLoggedCommand(context.Background(), logs, "rctl", "-r", "jail:"+name); err != nil {
 		*logs = append(*logs, "warning: unable to remove rctl rules: "+err.Error())
 	}
 }
