@@ -1228,51 +1228,6 @@ func ensureJailConfigDoesNotExist(configPath string) error {
 	return nil
 }
 
-func findTemplateDatasetByName(input string) (string, bool) {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return "", false
-	}
-	parent, err := discoverTemplateDatasetParent()
-	if err != nil || parent == nil {
-		return "", false
-	}
-
-	lowerInput := strings.ToLower(input)
-
-	out, err := exec.Command("zfs", "list", "-H", "-o", "name,mountpoint", "-t", "filesystem").Output()
-	if err != nil {
-		return "", false
-	}
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) < 2 {
-			fields = strings.Fields(line)
-		}
-		if len(fields) < 2 {
-			continue
-		}
-		name := strings.TrimSpace(fields[0])
-		mountpoint := strings.TrimSpace(fields[1])
-
-		if !strings.HasPrefix(name, parent.Name+"/") {
-			continue
-		}
-
-		base := strings.ToLower(filepath.Base(name))
-		if base == lowerInput {
-			return mountpoint, true
-		}
-	}
-
-	return "", false
-}
-
 func resolveTemplateSource(ctx context.Context, input string, logs *[]string) (string, func(), error) {
 	if input == "" {
 		return "", nil, fmt.Errorf("template/release is required")
@@ -1289,11 +1244,6 @@ func resolveTemplateSource(ctx context.Context, input string, logs *[]string) (s
 
 	// Shortcut: entry name from userland media directory.
 	if source, ok := findNamedUserlandSource(defaultUserlandDir, input); ok {
-		return source, nil, nil
-	}
-
-	// Shortcut: matching template dataset
-	if source, ok := findTemplateDatasetByName(input); ok {
 		return source, nil, nil
 	}
 
