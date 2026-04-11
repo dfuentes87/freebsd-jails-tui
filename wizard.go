@@ -125,7 +125,6 @@ type jailWizardValues struct {
 	MemoryLimit     string
 	ProcessLimit    string
 	MountPoints     string
-	OverwriteRoot   bool
 }
 
 type mountPointSpec struct {
@@ -156,7 +155,6 @@ type jailCreationWizard struct {
 	datasetCreateRunning bool
 	validationField      string
 	validationError      string
-	confirmOverwrite     bool
 	message              string
 	executionLogs        []string
 	executionError       string
@@ -206,7 +204,6 @@ func (w jailCreationWizard) isConfirmationStep() bool {
 }
 
 func (w *jailCreationWizard) nextField() {
-	w.confirmOverwrite = false
 	fields := w.visibleFields()
 	if len(fields) == 0 {
 		return
@@ -218,7 +215,6 @@ func (w *jailCreationWizard) nextField() {
 }
 
 func (w *jailCreationWizard) prevField() {
-	w.confirmOverwrite = false
 	fields := w.visibleFields()
 	if len(fields) == 0 {
 		return
@@ -230,7 +226,6 @@ func (w *jailCreationWizard) prevField() {
 }
 
 func (w *jailCreationWizard) nextStep() error {
-	w.confirmOverwrite = false
 	fieldID, err := w.validateCurrentStepDetailed()
 	if err != nil {
 		w.applyValidationError(fieldID, err)
@@ -250,7 +245,6 @@ func (w *jailCreationWizard) nextStep() error {
 }
 
 func (w *jailCreationWizard) prevStep() {
-	w.confirmOverwrite = false
 	if w.step > 0 {
 		w.step--
 		w.field = 0
@@ -723,6 +717,9 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 				return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 			}
 			return "dataset", err
+		}
+		if checkJailRootExistsAndNotEmpty(w.values) {
+			return "dataset", fmt.Errorf("destination directory already exists and is not empty; please manually investigate or remove it")
 		}
 	}
 	if w.currentStepHasField("template_release") && strings.TrimSpace(w.values.TemplateRelease) == "" {

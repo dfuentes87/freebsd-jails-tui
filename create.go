@@ -356,25 +356,25 @@ func provisionJailRoot(ctx context.Context, values jailWizardValues, jailPath st
 	case "thin":
 		return provisionThinJailRoot(ctx, values, jailPath, logs, progressChan)
 	case "linux":
-		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan, values.OverwriteRoot); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan); err != nil {
 			return nil, err
 		}
 		return nil, ensureLinuxCompatPaths(ctx, jailPath, values, logs)
 	default:
-		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan, values.OverwriteRoot); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan); err != nil {
 			return nil, err
 		}
 		return nil, seedGuestBaseFiles(ctx, jailPath, logs)
 	}
 }
 
-func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease string, logs *[]string, progressChan chan<- downloadProgressMsg, overwrite bool) error {
+func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease string, logs *[]string, progressChan chan<- downloadProgressMsg) error {
 	entries, err := os.ReadDir(jailPath)
 	if err != nil {
 		return fmt.Errorf("failed to read jail path %q: %w", jailPath, err)
 	}
-	if len(entries) > 0 && !overwrite {
-		return fmt.Errorf("jail path %q is not empty; refusing to overwrite existing root", jailPath)
+	if len(entries) > 0 {
+		return fmt.Errorf("jail path %q is not empty; please manually investigate or remove it", jailPath)
 	}
 
 	if templateRelease == "" {
