@@ -124,7 +124,8 @@ func patchFreeBSDRoot(ctx context.Context, rootPath string, logs *[]string) erro
 	if _, err := exec.LookPath("freebsd-update"); err != nil {
 		return fmt.Errorf("freebsd-update is not available on this host")
 	}
-	if _, err := runLoggedCommand(ctx, logs, "freebsd-update", "-b", rootPath, "fetch", "install"); err != nil {
+	// Use env PAGER=cat and --not-running-from-cron to bypass interactive terminal checks
+	if _, err := runLoggedCommand(ctx, logs, "env", "PAGER=cat", "freebsd-update", "--not-running-from-cron", "-b", rootPath, "fetch", "install"); err != nil {
 		return fmt.Errorf("failed to patch FreeBSD base under %q: %w", rootPath, err)
 	}
 	return nil

@@ -70,7 +70,7 @@ func upgradeWorkflowDescriptionLines(w upgradeWorkflow, jail Jail) []string {
 		return []string{
 			"Applies to: classic (thick) jails with a dedicated root filesystem.",
 			"Steps:",
-			"  1. Run: freebsd-update -b <jailPath> fetch install",
+			"  1. Run: env PAGER=cat freebsd-update --not-running-from-cron -b <jailPath> fetch install",
 			"     This patches the jail base to the latest security level.",
 			"  2. The jail does not need to be running.",
 			"  3. Start the jail and run pkg upgrade manually if packages need updating.",
@@ -83,7 +83,7 @@ func upgradeWorkflowDescriptionLines(w upgradeWorkflow, jail Jail) []string {
 			"Steps:",
 			"  1. Detect the template dataset from the jail's ZFS clone origin.",
 			"  2. Make the template dataset temporarily writable.",
-			"  3. Run: freebsd-update -b <templateMountpoint> fetch install",
+			"  3. Run: env PAGER=cat freebsd-update --not-running-from-cron -b <templateMountpoint> fetch install",
 			"  4. Create a post-upgrade snapshot of the template dataset.",
 			"  5. Restore the template dataset to readonly.",
 			"",
@@ -91,6 +91,7 @@ func upgradeWorkflowDescriptionLines(w upgradeWorkflow, jail Jail) []string {
 			"      Re-clone them from the new snapshot to pick up base changes.",
 			"",
 			"Jail path: " + valueOrDash(jail.Path),
+
 		}
 	case upgradeWorkflowPkgReinstall:
 		return []string{

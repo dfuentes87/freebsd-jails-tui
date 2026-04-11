@@ -79,7 +79,7 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
 			{ID: "memory_limit", Label: "Memory", Placeholder: "2G"},
 			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: ""},
-			{ID: "mount_points", Label: "Mount points (optional)", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
+			{ID: "mount_points", Label: "Mount points", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
 		},
 	},
 	{
@@ -1219,7 +1219,7 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		patchDecision := resolveFreeBSDPatchDecision(w.values.TemplateRelease, w.values.PatchBase)
 		if patchDecision.Effective {
 			addStep("Patch extracted FreeBSD base to latest level:")
-			addDetail(fmt.Sprintf("   freebsd-update -b %s fetch install", destination))
+			addDetail(fmt.Sprintf("   env PAGER=cat freebsd-update --not-running-from-cron -b %s fetch install", destination))
 		}
 	}
 
@@ -1414,7 +1414,7 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	jailType := normalizedJailType(values.JailType)
 	lines := []string{
 		fmt.Sprintf("%s {", name),
-		"  exec.consolelog = \"/var/log/jail_console_${name}.log\";",
+		fmt.Sprintf("  exec.consolelog = \"/var/log/jail_console_%s.log\";", name),
 		"  allow.raw_sockets;",
 		"  exec.clean;",
 		"  mount.devfs;",
