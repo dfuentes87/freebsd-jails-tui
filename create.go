@@ -356,24 +356,24 @@ func provisionJailRoot(ctx context.Context, values jailWizardValues, jailPath st
 	case "thin":
 		return provisionThinJailRoot(ctx, values, jailPath, logs, progressChan)
 	case "linux":
-		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan, values.OverwriteRoot); err != nil {
 			return nil, err
 		}
 		return nil, ensureLinuxCompatPaths(ctx, jailPath, values, logs)
 	default:
-		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan); err != nil {
+		if err := provisionStandardJailRoot(ctx, jailPath, strings.TrimSpace(values.TemplateRelease), logs, progressChan, values.OverwriteRoot); err != nil {
 			return nil, err
 		}
 		return nil, seedGuestBaseFiles(ctx, jailPath, logs)
 	}
 }
 
-func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease string, logs *[]string, progressChan chan<- downloadProgressMsg) error {
+func provisionStandardJailRoot(ctx context.Context, jailPath, templateRelease string, logs *[]string, progressChan chan<- downloadProgressMsg, overwrite bool) error {
 	entries, err := os.ReadDir(jailPath)
 	if err != nil {
 		return fmt.Errorf("failed to read jail path %q: %w", jailPath, err)
 	}
-	if len(entries) > 0 {
+	if len(entries) > 0 && !overwrite {
 		return fmt.Errorf("jail path %q is not empty; refusing to overwrite existing root", jailPath)
 	}
 
@@ -1249,7 +1249,13 @@ func resolveTemplateSource(ctx context.Context, input string, logs *[]string, pr
 
 	// Full URL: download and extract.
 	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
-		return downloadArchiveToTemp(ctx, input, logs, progressChan)
+		parsed, _ := neturl.Parse(input)
+		filename := filepath.Base(parsed.Path)
+		if filename == "" || filename == "/" || filename == "." {
+			filename = "downloaded.txz"
+		}
+		targetPath := filepath.Join(defaultUserlandDir, "custom", filename)
+		return downloadArchiveToPath(ctx, input, targetPath, logs, progressChan)
 	}
 
 	// Release tag: local archive, then media dir, then download.freebsd.org.
@@ -1289,9 +1295,12 @@ func downloadReleaseArchiveToTemp(ctx context.Context, release string, logs *[]s
 	if err != nil {
 		return "", nil, err
 	}
+
+	targetPath := filepath.Join(defaultUserlandDir, release, "base.txz")
+
 	var lastErr error
 	for _, url := range urls {
-		path, cleanup, err := downloadArchiveToTemp(ctx, url, logs, progressChan)
+		path, cleanup, err := downloadArchiveToPath(ctx, url, targetPath, logs, progressChan)
 		if err == nil {
 			return path, cleanup, nil
 		}
@@ -1324,7 +1333,7 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func downloadArchiveToTemp(ctx context.Context, url string, logs *[]string, progressChan chan<- downloadProgressMsg) (string, func(), error) {
+func downloadArchiveToPath(ctx context.Context, url string, destPath string, logs *[]string, progressChan chan<- downloadProgressMsg) (string, func(), error) {
 	url = strings.TrimSpace(url)
 	if url == "" {
 		return "", nil, fmt.Errorf("download URL is empty")
@@ -1343,7 +1352,15 @@ func downloadArchiveToTemp(ctx context.Context, url string, logs *[]string, prog
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return "", nil, fmt.Errorf("download failed from %s: http %d", url, resp.StatusCode)
 	}
-	tmp, err := os.CreateTemp("", "freebsd-jail-userland-*.txz")
+
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", nil, fmt.Errorf("failed creating media directory %q: %w", destDir, err)
+	}
+
+	// Use a temporary file for the download to avoid corrupted partial files
+	tmpPath := destPath + ".part"
+	tmp, err := os.Create(tmpPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed creating temp archive: %w", err)
 	}
@@ -1356,18 +1373,23 @@ func downloadArchiveToTemp(ctx context.Context, url string, logs *[]string, prog
 
 	if _, err := io.Copy(tmp, reader); err != nil {
 		tmp.Close()
-		os.Remove(tmp.Name())
+		os.Remove(tmpPath)
 		return "", nil, fmt.Errorf("failed writing temp archive: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
+		os.Remove(tmpPath)
 		return "", nil, fmt.Errorf("failed closing temp archive: %w", err)
 	}
-	*logs = append(*logs, "  downloaded to "+tmp.Name())
-	cleanup := func() {
-		_ = os.Remove(tmp.Name())
+
+	// Rename partial file to final destination
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return "", nil, fmt.Errorf("failed renaming downloaded archive: %w", err)
 	}
-	return tmp.Name(), cleanup, nil
+
+	*logs = append(*logs, "  downloaded to "+destPath)
+	// Return a nil cleanup function so the downloaded archive is kept even if jail creation fails
+	return destPath, nil, nil
 }
 
 func discoverUserlandSources(userlandDir string) ([]string, error) {

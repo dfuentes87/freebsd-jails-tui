@@ -1452,6 +1452,14 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.ensureWizardFieldVisible()
 				return m, nil
 			}
+
+			if !m.wizard.confirmOverwrite && checkJailRootExistsAndNotEmpty(m.wizard.values) {
+				m.wizard.confirmOverwrite = true
+				m.wizard.message = "Warning: Destination directory already exists and is not empty. Press enter again to overwrite."
+				return m, nil
+			}
+			m.wizard.values.OverwriteRoot = m.wizard.confirmOverwrite
+
 			m.wizard.clearExecutionResult()
 			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
