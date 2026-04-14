@@ -1636,6 +1636,18 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Press enter to destroy this template dataset."
 		}
 		return m, nil
+	case "s", "S":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeBrowse {
+			return m, nil
+		}
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			m.templateCreate.message = "No template dataset selected."
+			return m, nil
+		}
+		m.mode = screenZFSPanel
+		m.zfsPanel = newZFSPanelState(item.Name, screenTemplateDatasetCreate, JailDetail{})
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case "n", "N":
 		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeBrowse {
 			return m, nil
@@ -2361,9 +2373,9 @@ func (m model) renderTemplateDatasetCreateView() string {
 	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
-	hint := "j/k: select | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	hint := "j/k: select | c: create | n: clone | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
-		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.mode == templateManagerModeCreate {
 		hint = "type source | p: toggle patch | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
