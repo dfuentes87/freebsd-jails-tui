@@ -19,6 +19,7 @@ type Jail struct {
 	JID        int
 	Path       string
 	Hostname   string
+	QuotaUsage string
 	Running    bool
 	CPUPercent float64
 	MemoryMB   int
@@ -113,6 +114,10 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 	if metricErr != nil {
 		errs = append(errs, metricErr)
 	}
+	zfsRows, zfsErr := listZFSFilesystems()
+	if zfsErr != nil {
+		errs = append(errs, zfsErr)
+	}
 
 	names := make([]string, 0, len(nameSet))
 	for name := range nameSet {
@@ -127,6 +132,17 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 			j.JID = run.JID
 			j.Path = run.Path
 			j.Hostname = run.Hostname
+		}
+		if conf, err := discoverJailConf(name); err == nil {
+			if j.Path == "" {
+				j.Path = strings.TrimSpace(conf.Values["path"])
+			}
+			if j.Hostname == "" {
+				j.Hostname = strings.TrimSpace(conf.Values["host.hostname"])
+			}
+		}
+		if info := discoverZFSDatasetFromRows(zfsRows, j.Path); info != nil {
+			j.QuotaUsage = formatQuotaUsage(info)
 		}
 		if metric, ok := metrics[j.JID]; ok {
 			j.CPUPercent = metric.CPUPercent
@@ -496,37 +512,25 @@ func discoverJailMetrics() (map[int]jailMetric, error) {
 }
 
 func discoverZFSDataset(jailPath string) (*ZFSDatasetInfo, error) {
+	rows, err := listZFSFilesystems()
+	if err != nil {
+		return nil, err
+	}
+	return discoverZFSDatasetFromRows(rows, jailPath), nil
+}
+
+func discoverZFSDatasetFromRows(rows []zfsFilesystemRow, jailPath string) *ZFSDatasetInfo {
 	jailPath = strings.TrimSpace(jailPath)
 	if jailPath == "" {
-		return nil, nil
+		return nil
 	}
 	jailPath = filepath.Clean(jailPath)
-
-	out, err := exec.Command(
-		"zfs",
-		"list",
-		"-H",
-		"-o",
-		"name,mountpoint,used,avail,refer,compression,quota,reservation",
-		"-t",
-		"filesystem",
-	).Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run zfs list: %w", err)
-	}
-
 	var (
 		best      *ZFSDatasetInfo
 		bestScore = -1
 	)
-
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		cols := strings.Split(scanner.Text(), "\t")
-		if len(cols) != 8 {
-			continue
-		}
-		mountpoint := strings.TrimSpace(cols[1])
+	for _, row := range rows {
+		mountpoint := strings.TrimSpace(row.Mountpoint)
 		if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
 			continue
 		}
@@ -548,19 +552,33 @@ func discoverZFSDataset(jailPath string) (*ZFSDatasetInfo, error) {
 		}
 		bestScore = score
 		best = &ZFSDatasetInfo{
-			Name:        cols[0],
+			Name:        row.Name,
 			Mountpoint:  mountpoint,
-			Used:        cols[2],
-			Avail:       cols[3],
-			Refer:       cols[4],
-			Compression: cols[5],
-			Quota:       cols[6],
-			Reservation: cols[7],
+			Used:        row.Used,
+			Avail:       row.Avail,
+			Refer:       row.Refer,
+			Compression: row.Compression,
+			Quota:       row.Quota,
+			Reservation: row.Reservation,
 			MatchType:   matchType,
 		}
 	}
+	return best
+}
 
-	return best, nil
+func formatQuotaUsage(info *ZFSDatasetInfo) string {
+	if info == nil {
+		return ""
+	}
+	quota := strings.TrimSpace(info.Quota)
+	if quota == "" || quota == "-" || strings.EqualFold(quota, "none") || strings.EqualFold(quota, "inherit") {
+		return ""
+	}
+	used := strings.TrimSpace(info.Used)
+	if used == "" || used == "-" {
+		return quota
+	}
+	return used + " / " + quota
 }
 
 func discoverRctlRules(name string, jid int) ([]string, error) {

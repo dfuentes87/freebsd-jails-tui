@@ -2757,9 +2757,9 @@ func (m model) renderTemplateDatasetCreateView() string {
 	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
-	hint := "j/k: select | c: create | n: snapshots | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	hint := "j/k: select | c: create | n: manage snapshots | r: rename | x: destroy | s: ZFS panel | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
-		hint = "j/k: select | enter: apply mountpoint | c: create | n: snapshots | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+		hint = "j/k: select | enter: apply mountpoint | c: create | n: manage snapshots | r: rename | x: destroy | s: ZFS panel | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.mode == templateManagerModeCreate {
 		hint = "type source | p: toggle patch | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
@@ -4693,21 +4693,11 @@ func (m model) renderRows(maxRows, width int) string {
 		if idx == m.cursor {
 			cursorChar = ">"
 		}
-		jid := "-"
-		if jail.JID > 0 {
-			jid = strconv.Itoa(jail.JID)
+		secondary := ""
+		if host := strings.TrimSpace(jail.Hostname); host != "" && host != jail.Name {
+			secondary = " host:" + host
 		}
-
-		line := fmt.Sprintf(
-			"%s%s %s %-18s JID:%-5s CPU:%6.2f%% MEM:%5dMB",
-			cursorChar,
-			sel,
-			statusBadge(jail.Running),
-			truncate(jail.Name, 18),
-			jid,
-			jail.CPUPercent,
-			jail.MemoryMB,
-		)
+		line := fmt.Sprintf("%s%s %s %s%s", cursorChar, sel, statusBadge(jail.Running), jail.Name, secondary)
 		line = truncate(line, max(1, width-3))
 		if idx == m.cursor {
 			line = selectedRowStyle.Width(max(1, width-2)).Render(line)
@@ -4739,6 +4729,11 @@ func (m model) renderDetailPanel(width, height int) string {
 			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
 			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},
 		)...)
+		if strings.TrimSpace(j.QuotaUsage) != "" {
+			lines = append(lines, renderKeyValueLines(max(12, width-2),
+				[2]string{"Quota", j.QuotaUsage},
+			)...)
+		}
 	}
 
 	return lipgloss.NewStyle().

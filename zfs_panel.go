@@ -681,13 +681,7 @@ func (m model) zfsPanelLines(width, height int) []string {
 			if idx == m.zfsPanel.cursor {
 				prefix = ">"
 			}
-			row := fmt.Sprintf(
-				"%s %-24s created:%-18s used:%s",
-				prefix,
-				truncate(snapshotShortName(snapshot.Name), 24),
-				truncate(snapshot.Creation, 18),
-				snapshot.Used,
-			)
+			row := fmt.Sprintf("%s %s", prefix, snapshotShortName(snapshot.Name))
 			row = truncate(row, width)
 			if idx == m.zfsPanel.cursor {
 				row = selectedRowStyle.Width(max(1, width)).Render(row)
@@ -783,21 +777,12 @@ func (m model) zfsPanelLines(width, height int) []string {
 		lines = append(lines, truncate("Allowed values: compression={inherit,on,off,lz4,zle,gzip,gzip-1..9}; quota/reservation={inherit,none,<size>}", width))
 	}
 
-	if len(m.zfsPanel.logs) > 0 {
-		appendSection(&lines, width, "Last operation")
-		maxLogs := min(8, len(m.zfsPanel.logs))
-		for _, line := range m.zfsPanel.logs[len(m.zfsPanel.logs)-maxLogs:] {
-			lines = append(lines, truncate(line, width))
-		}
-	}
-
 	return lines
 }
 
 func (m model) zfsRollbackImplicationLines(width int, snapshot ZFSSnapshot) []string {
 	newer := m.zfsNewerSnapshots(snapshot.Name)
 	lines := []string{
-		truncate("Rollback command: zfs rollback -r "+snapshot.Name, width),
 		truncate("Dataset contents will revert to the selected snapshot state.", width),
 	}
 	if len(newer) == 0 {
