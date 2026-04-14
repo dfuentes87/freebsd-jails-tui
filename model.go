@@ -46,12 +46,23 @@ var (
 			Foreground(lipgloss.Color("244")).
 			Background(lipgloss.Color("235")).
 			Padding(0, 1)
+	helpTabStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("248")).
+			Background(lipgloss.Color("236")).
+			Padding(0, 1)
+	helpTabActiveStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("24")).
+				Padding(0, 1)
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("33"))
 	detailSectionStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("33"))
+	helpNoteStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244"))
 	wizardActionStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("230")).
@@ -170,6 +181,35 @@ const (
 	screenUpgradeWizard
 )
 
+type helpTab int
+
+const (
+	helpTabOverview helpTab = iota
+	helpTabDashboard
+	helpTabCreate
+	helpTabZFS
+	helpTabUpgrade
+	helpTabSetup
+	helpTabCount
+)
+
+type helpShortcut struct {
+	Keys   string
+	Action string
+}
+
+type helpSection struct {
+	Title     string
+	Summary   string
+	Shortcuts []helpShortcut
+	Notes     []string
+}
+
+type helpTabContent struct {
+	Label    string
+	Sections []helpSection
+}
+
 type destroyState struct {
 	returnMode screenMode
 	target     Jail
@@ -252,7 +292,9 @@ type model struct {
 	destroy            destroyState
 	initCheck          initialCheckState
 	helpReturnMode     screenMode
+	helpTab            helpTab
 	helpScroll         int
+	helpTabScrolls     []int
 	notice             string
 	selectedJails      map[string]struct{}
 	upgrade            upgradeState
@@ -269,6 +311,7 @@ func newModel() model {
 	}
 	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 	m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard, false)
+	m.helpTabScrolls = make([]int, int(helpTabCount))
 	m.selectedJails = make(map[string]struct{})
 	return m
 }
@@ -850,9 +893,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateHelpKeys(msg)
 		}
 		if (key == "?" || key == "h") && !m.isTextEntryMode() {
-			m.helpReturnMode = m.mode
-			m.helpScroll = 0
-			m.mode = screenHelp
+			m.openHelp(m.mode)
 			return m, nil
 		}
 		if m.mode == screenUpgradeWizard {
@@ -1168,9 +1209,7 @@ func (m model) updateDestroyKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "?" {
-		m.helpReturnMode = m.mode
-		m.helpScroll = 0
-		m.mode = screenHelp
+		m.openHelp(m.mode)
 		return m, nil
 	}
 	if m.wizard.thinDatasetMode {
@@ -1521,9 +1560,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "?" {
-		m.helpReturnMode = m.mode
-		m.helpScroll = 0
-		m.mode = screenHelp
+		m.openHelp(m.mode)
 		return m, nil
 	}
 
@@ -1910,21 +1947,25 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateHelpKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "left", "backspace", "enter", "h", "?":
+	case "esc", "backspace", "enter", "?":
 		m.mode = m.helpReturnMode
 		return m, nil
+	case "left", "h", "shift+tab":
+		m.moveHelpTab(-1)
+	case "right", "l", "tab":
+		m.moveHelpTab(1)
 	case "j", "down":
-		m.helpScroll++
+		m.helpScrollDelta(1)
 	case "k", "up":
-		m.helpScroll--
+		m.helpScrollDelta(-1)
 	case "g", "home":
-		m.helpScroll = 0
+		m.setHelpScroll(0)
 	case "G", "end":
-		m.helpScroll = 1 << 30
+		m.setHelpScroll(1 << 30)
 	case "pgdown":
-		m.helpScroll += m.helpBodyHeight()
+		m.helpScrollDelta(m.helpContentHeight())
 	case "pgup":
-		m.helpScroll -= m.helpBodyHeight()
+		m.helpScrollDelta(-m.helpContentHeight())
 	}
 	m.boundHelpScroll()
 	return m, nil
@@ -2078,15 +2119,76 @@ func (m model) View() string {
 	return m.renderDashboard()
 }
 
+func (m *model) ensureHelpState() {
+	if len(m.helpTabScrolls) != int(helpTabCount) {
+		m.helpTabScrolls = make([]int, int(helpTabCount))
+	}
+	if m.helpTab < 0 || m.helpTab >= helpTabCount {
+		m.helpTab = helpTabOverview
+	}
+}
+
+func helpDefaultTabForMode(mode screenMode) helpTab {
+	switch mode {
+	case screenDashboard, screenJailDetail, screenDestroyConfirm:
+		return helpTabDashboard
+	case screenCreateWizard, screenTemplateDatasetCreate:
+		return helpTabCreate
+	case screenZFSPanel:
+		return helpTabZFS
+	case screenUpgradeWizard:
+		return helpTabUpgrade
+	case screenInitialCheck:
+		return helpTabSetup
+	default:
+		return helpTabOverview
+	}
+}
+
+func (m *model) openHelp(returnMode screenMode) {
+	m.ensureHelpState()
+	m.helpReturnMode = returnMode
+	m.helpTab = helpDefaultTabForMode(returnMode)
+	m.helpTabScrolls[int(m.helpTab)] = 0
+	m.helpScroll = 0
+	m.mode = screenHelp
+	m.boundHelpScroll()
+}
+
+func (m *model) moveHelpTab(delta int) {
+	m.ensureHelpState()
+	next := int(m.helpTab) + delta
+	if next < 0 {
+		next = int(helpTabCount) - 1
+	}
+	if next >= int(helpTabCount) {
+		next = 0
+	}
+	m.helpTab = helpTab(next)
+	m.helpScroll = m.helpTabScrolls[next]
+	m.boundHelpScroll()
+}
+
+func (m *model) helpScrollDelta(delta int) {
+	m.ensureHelpState()
+	m.helpScroll = m.helpTabScrolls[int(m.helpTab)] + delta
+}
+
+func (m *model) setHelpScroll(value int) {
+	m.ensureHelpState()
+	m.helpScroll = value
+}
+
 func (m model) renderHelpView() string {
 	title := titleStyle.Render("Help / Shortcuts")
-	meta := summaryStyle.Render("Press esc to return")
+	meta := summaryStyle.Render("Tab: " + m.currentHelpTabContent().Label + "  esc: close")
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
-	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
+	footer := m.renderFooterWithMessage("left/right or h/l: switch tabs | j/k or pgup/pgdown: scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 
 	bodyHeight := m.helpBodyHeight()
 	lines := m.helpLines(max(12, m.width-2))
-	maxOffset := max(0, len(lines)-bodyHeight)
+	contentHeight := m.helpContentHeight()
+	maxOffset := max(0, len(lines)-contentHeight)
 	offset := m.helpScroll
 	if offset < 0 {
 		offset = 0
@@ -2094,105 +2196,301 @@ func (m model) renderHelpView() string {
 	if offset > maxOffset {
 		offset = maxOffset
 	}
-	end := min(len(lines), offset+bodyHeight)
+	end := min(len(lines), offset+contentHeight)
+
+	bodyLines := []string{m.renderHelpTabBar(max(12, m.width-2)), ""}
+	bodyLines = append(bodyLines, lines[offset:end]...)
 
 	body := lipgloss.NewStyle().
 		Width(m.width).
 		Height(bodyHeight).
 		Padding(0, 1).
-		Render(strings.Join(lines[offset:end], "\n"))
+		Render(strings.Join(bodyLines, "\n"))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) helpLines(width int) []string {
-	lines := []string{
-		sectionStyle.Render("Global"),
-		truncate("?: open help page (h works outside text input)", width),
-		truncate("ctrl+c: quit the application", width),
-		truncate("q: quit outside text input", width),
-		"",
-		sectionStyle.Render("Initial Config Check"),
-		truncate("runs at startup before dashboard", width),
-		truncate("y/n or d/c/n prompts apply or skip setup actions", width),
-		truncate("enter continues to dashboard when complete", width),
-		"",
-		sectionStyle.Render("Dashboard"),
-		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
-		truncate("enter or d: open jail detail view", width),
-		truncate("c: open jail creation wizard", width),
-		truncate("i: re-run initial config check", width),
-		truncate("t: open template manager", width),
-		truncate("s: start or stop selected jail (or all selected)", width),
-		truncate("R: restart selected jail (or all selected)", width),
-		truncate("u: open guided upgrade wizard for selected jail", width),
-		truncate("space: toggle jail selection for bulk actions", width),
-		truncate("ctrl+a: select all jails or clear selection", width),
-		truncate("esc: clear selection (when jails are selected)", width),
-		truncate("z: open ZFS panel for selected jail", width),
-		truncate("x: destroy selected jail (confirmation required)", width),
-		truncate("r: refresh dashboard data", width),
-		"",
-		sectionStyle.Render("Jail Detail"),
-		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
-		truncate("a: toggle advanced runtime/default parameters", width),
-		truncate("startup policy shows jail_list order and configured depend values", width),
-		truncate("network summary shows configured/runtime network state plus host validation", width),
-		truncate("r: refresh selected jail details", width),
-		truncate("R: restart this jail", width),
-		truncate("u: open guided upgrade wizard for this jail", width),
-		truncate("b: retry linux bootstrap for a running linux jail", width),
-		truncate("z: open ZFS integration panel", width),
-		truncate("x: destroy this jail (confirmation required)", width),
-		truncate("esc: return to dashboard", width),
-		"",
-		sectionStyle.Render("Destroy Confirm"),
-		truncate("enter/y: stop and destroy selected jail", width),
-		truncate("esc/n: cancel and return", width),
-		"",
-		sectionStyle.Render("ZFS Panel"),
-		truncate("j/k: select snapshot", width),
-		truncate("c: create snapshot", width),
-		truncate("r: rollback selected snapshot (confirmation required)", width),
-		truncate("n: clone selected snapshot as a new jail", width),
-		truncate("e: edit compression, quota, or reservation on an exact jail dataset", width),
-		truncate("selected snapshot details show creation time, used size, and rollback implications", width),
-		truncate("x: refresh snapshot list", width),
-		truncate("esc: cancel prompt or return to detail", width),
-		"",
-		sectionStyle.Render("Creation Wizard"),
-		truncate("common jail settings are on one page; linux adds a bootstrap step before confirmation", width),
-		truncate("tab/shift+tab/up/down: move field", width),
-		truncate("pgup/pgdown: scroll long wizard pages", width),
-		truncate("enter/right: next step", width),
-		truncate("left: previous step", width),
-		truncate("s/l on the confirmation step: save/load templates", width),
-		truncate("ctrl+u: open userland selector", width),
-		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
-		truncate("startup order updates rc.conf jail_list; dependencies write depend in jail.conf", width),
-		truncate("linux step supports default or custom bootstrap mirrors; retry uses the saved mirror choice", width),
-		truncate("vnet preflight checks bridge/uplink host state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create", width),
-		truncate("?: open help page", width),
-		truncate("confirmation enter: execute create actions", width),
-		"",
-		sectionStyle.Render("Upgrade Wizard"),
-		truncate("opened with u from the dashboard or jail detail view", width),
-		truncate("j/k: select upgrade workflow | enter: confirm selection or execute", width),
-		truncate("classic: patches the jail base with freebsd-update; jail does not need to be running", width),
-		truncate("thin template: detects ZFS clone origin, patches the template dataset, creates a post-upgrade snapshot", width),
-		truncate("pkg reinstall: runs pkg upgrade -f inside the jail; starts the jail first if stopped", width),
-		truncate("esc: go back to workflow selection, or return to previous screen", width),
-		"",
-		sectionStyle.Render("Template Manager"),
-		truncate("j/k: select | c: create | n: manage snapshots | r: rename | x: destroy", width),
-		truncate("enter applies the selected mountpoint when opened from the thin-jail wizard", width),
-		truncate("create mode accepts a source path, release tag, userland entry, or custom URL", width),
-		truncate("snapshot mode lets you clone a snapshot into a new template dataset or press ctrl+x to destroy one", width),
-		truncate("when parent templates dataset is missing: enter creates proposed parent, ctrl+e edits parent values", width),
-		truncate("ctrl+r: refresh the template list, or refresh create preview while creating", width),
-		truncate("esc: return to dashboard", width),
+	tab := m.currentHelpTabContent()
+	lines := make([]string, 0, 96)
+	for idx, section := range tab.Sections {
+		lines = append(lines, sectionStyle.Render(section.Title))
+		if strings.TrimSpace(section.Summary) != "" {
+			appendHelpWrappedLines(&lines, width, section.Summary, helpNoteStyle, "")
+		}
+		if len(section.Shortcuts) > 0 {
+			lines = append(lines, detailSectionStyle.Render("Keys"))
+			pairs := make([][2]string, 0, len(section.Shortcuts))
+			for _, shortcut := range section.Shortcuts {
+				pairs = append(pairs, [2]string{shortcut.Keys, shortcut.Action})
+			}
+			lines = append(lines, renderKeyValueLinesWithLabelWidth(width, helpShortcutLabelWidth(width), pairs...)...)
+		}
+		if len(section.Notes) > 0 {
+			lines = append(lines, detailSectionStyle.Render("Notes"))
+			for _, note := range section.Notes {
+				appendHelpWrappedLines(&lines, max(12, width-2), note, helpNoteStyle, "  ")
+			}
+		}
+		if idx+1 < len(tab.Sections) {
+			lines = append(lines, "")
+		}
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "No help available.")
 	}
 	return lines
+}
+
+func (m model) currentHelpTabContent() helpTabContent {
+	tabs := helpTabs()
+	if len(tabs) == 0 {
+		return helpTabContent{Label: "Help"}
+	}
+	idx := int(m.helpTab)
+	if idx < 0 || idx >= len(tabs) {
+		return tabs[0]
+	}
+	return tabs[idx]
+}
+
+func (m model) renderHelpTabBar(width int) string {
+	tabs := helpTabs()
+	items := make([]string, 0, len(tabs))
+	for idx, tab := range tabs {
+		style := helpTabStyle
+		if helpTab(idx) == m.helpTab {
+			style = helpTabActiveStyle
+		}
+		items = append(items, style.Render(tab.Label))
+	}
+	line := lipgloss.JoinHorizontal(lipgloss.Top, items...)
+	if lipgloss.Width(line) >= width {
+		return line
+	}
+	return line + strings.Repeat(" ", width-lipgloss.Width(line))
+}
+
+func helpTabs() []helpTabContent {
+	return []helpTabContent{
+		{
+			Label: "Overview",
+			Sections: []helpSection{
+				{
+					Title:   "Global",
+					Summary: "Keys available across the app outside active text entry fields.",
+					Shortcuts: []helpShortcut{
+						{Keys: "?, h", Action: "open help"},
+						{Keys: "ctrl+c", Action: "quit the application"},
+						{Keys: "q", Action: "quit outside text input"},
+					},
+					Notes: []string{
+						"Help opens on the tab that matches the current screen.",
+					},
+				},
+				{
+					Title:   "Navigation Patterns",
+					Summary: "Most screens reuse the same small set of movement and confirmation keys.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k, arrows", Action: "move through lists or scrollable content"},
+						{Keys: "pgup/pgdown", Action: "page through longer views"},
+						{Keys: "g/G", Action: "jump to top or bottom where supported"},
+						{Keys: "enter", Action: "open, confirm, or execute the selected action"},
+						{Keys: "esc", Action: "cancel the current prompt or return to the previous screen"},
+					},
+					Notes: []string{
+						"Destructive actions usually switch to a preview or confirmation step before anything is changed.",
+						"Use left/right or h/l inside Help to switch tabs, then j/k or pgup/pgdown to scroll within the active tab.",
+					},
+				},
+			},
+		},
+		{
+			Label: "Dashboard",
+			Sections: []helpSection{
+				{
+					Title:   "Dashboard",
+					Summary: "Browse discovered jails, select multiple targets, and launch deeper workflows.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k, arrows, pgup/pgdown, g/G", Action: "navigate the jail list"},
+						{Keys: "enter, d", Action: "open the selected jail detail view"},
+						{Keys: "c", Action: "open the jail creation wizard"},
+						{Keys: "i", Action: "re-run the initial config check"},
+						{Keys: "t", Action: "open the template manager"},
+						{Keys: "s", Action: "start or stop the selected jail, or all selected jails"},
+						{Keys: "R", Action: "restart the selected jail, or all selected jails"},
+						{Keys: "u", Action: "open the guided upgrade wizard for the selected jail"},
+						{Keys: "space", Action: "toggle bulk selection for the highlighted jail"},
+						{Keys: "ctrl+a", Action: "select all jails or clear the current selection"},
+						{Keys: "esc", Action: "clear jail selection when any jails are selected"},
+						{Keys: "z", Action: "open the ZFS panel for the selected jail"},
+						{Keys: "x", Action: "open destroy confirmation for the selected jail"},
+						{Keys: "r", Action: "refresh dashboard data"},
+					},
+					Notes: []string{
+						"Bulk service actions apply to the current jail selection when one or more jails are marked.",
+					},
+				},
+				{
+					Title:   "Jail Detail",
+					Summary: "Inspect the selected jail, refresh runtime state, and branch into service, upgrade, or ZFS actions.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k, pgup/pgdown, g/G", Action: "scroll the detail pane"},
+						{Keys: "a", Action: "toggle advanced runtime and default parameter sections"},
+						{Keys: "r", Action: "refresh selected jail details"},
+						{Keys: "R", Action: "restart this jail"},
+						{Keys: "u", Action: "open the guided upgrade wizard for this jail"},
+						{Keys: "b", Action: "retry linux bootstrap for a running linux jail"},
+						{Keys: "z", Action: "open the ZFS integration panel"},
+						{Keys: "x", Action: "open destroy confirmation for this jail"},
+						{Keys: "esc", Action: "return to the dashboard"},
+					},
+					Notes: []string{
+						"Startup policy shows jail_list order and configured depend values.",
+						"Network summary combines configured values, runtime state, and host-side validation results.",
+					},
+				},
+				{
+					Title:   "Destroy Confirm",
+					Summary: "Final confirmation before stopping and destroying the selected jail.",
+					Shortcuts: []helpShortcut{
+						{Keys: "enter, y", Action: "stop and destroy the selected jail"},
+						{Keys: "esc, n", Action: "cancel and return"},
+					},
+				},
+			},
+		},
+		{
+			Label: "Create",
+			Sections: []helpSection{
+				{
+					Title:   "Creation Wizard",
+					Summary: "Collect jail settings, validate prerequisites, and execute the create workflow.",
+					Shortcuts: []helpShortcut{
+						{Keys: "tab, shift+tab, up/down", Action: "move between fields"},
+						{Keys: "pgup/pgdown", Action: "scroll longer wizard pages"},
+						{Keys: "enter, right", Action: "advance to the next step or execute on confirmation"},
+						{Keys: "left", Action: "return to the previous step"},
+						{Keys: "s, l", Action: "save or load templates on the confirmation step"},
+						{Keys: "ctrl+u", Action: "open the userland selector"},
+						{Keys: "ctrl+t", Action: "open the template manager for thin-jail template selection"},
+						{Keys: "?", Action: "open help from the wizard"},
+					},
+					Notes: []string{
+						"Startup order updates rc.conf jail_list; dependency settings write depend in jail.conf.",
+						"Linux setup supports default or custom bootstrap mirrors, and retry reuses the saved mirror choice.",
+						"VNET preflight checks bridge and uplink state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create.",
+					},
+				},
+				{
+					Title:   "Template Manager",
+					Summary: "Manage reusable thin-jail template datasets and choose a mountpoint when the wizard opens this screen in selection mode.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k", Action: "select a template dataset"},
+						{Keys: "enter", Action: "apply the selected mountpoint when opened from the thin-jail wizard"},
+						{Keys: "c", Action: "create a template dataset from a source path, release tag, userland entry, or custom URL"},
+						{Keys: "n", Action: "open snapshot management for the selected template dataset"},
+						{Keys: "r", Action: "rename the selected template dataset"},
+						{Keys: "x", Action: "destroy the selected template dataset"},
+						{Keys: "s", Action: "open the selected template dataset in the ZFS panel"},
+						{Keys: "ctrl+r", Action: "refresh the dataset list, or refresh the create preview while creating"},
+					},
+					Notes: []string{
+						"When the templates parent dataset is missing, enter creates the proposed parent and ctrl+e lets you edit the parent dataset and mountpoint first.",
+					},
+				},
+				{
+					Title:   "Template Snapshots",
+					Summary: "Within template snapshot management, work with snapshots from the selected template dataset.",
+					Shortcuts: []helpShortcut{
+						{Keys: "up/down", Action: "select a snapshot"},
+						{Keys: "enter", Action: "clone the selected snapshot into a new template dataset"},
+						{Keys: "ctrl+x", Action: "switch to snapshot destroy mode for the selected snapshot"},
+						{Keys: "ctrl+r", Action: "refresh the snapshot list"},
+						{Keys: "esc", Action: "return to the template dataset view"},
+					},
+					Notes: []string{
+						"Snapshot destroy is blocked when the snapshot still has clone dependents or when current jails use datasets cloned from that snapshot.",
+					},
+				},
+			},
+		},
+		{
+			Label: "ZFS",
+			Sections: []helpSection{
+				{
+					Title:   "ZFS Panel",
+					Summary: "Inspect snapshots and selected dataset properties for an exact jail dataset or template dataset.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k", Action: "select a snapshot"},
+						{Keys: "c", Action: "create a snapshot"},
+						{Keys: "r", Action: "rollback to the selected snapshot with confirmation"},
+						{Keys: "n", Action: "clone the selected jail snapshot as a new jail"},
+						{Keys: "e", Action: "edit compression, quota, or reservation on an exact jail dataset"},
+						{Keys: "x", Action: "refresh the snapshot list"},
+						{Keys: "esc", Action: "cancel the current prompt or return to the previous screen"},
+					},
+					Notes: []string{
+						"The selected snapshot details show creation time, used size, and rollback implications.",
+						"Rollback preview highlights newer snapshots that would be removed and warns when dependencies may block the rollback.",
+					},
+				},
+			},
+		},
+		{
+			Label: "Upgrade",
+			Sections: []helpSection{
+				{
+					Title:   "Upgrade Wizard",
+					Summary: "Choose a supported upgrade workflow for the selected jail and review the execution plan before running it.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k", Action: "select an upgrade workflow"},
+						{Keys: "enter", Action: "confirm the workflow or execute the upgrade"},
+						{Keys: "esc", Action: "return to workflow selection or leave the wizard"},
+					},
+					Notes: []string{
+						"Classic upgrades patch the jail base with freebsd-update and do not require the jail to be running.",
+						"Thin-template upgrades detect the clone origin, patch the template dataset, create a post-upgrade snapshot, then restore readonly mode.",
+						"Pkg reinstall upgrades run pkg upgrade -f inside the jail and start the jail first when needed.",
+					},
+				},
+			},
+		},
+		{
+			Label: "Setup",
+			Sections: []helpSection{
+				{
+					Title:   "Initial Config Check",
+					Summary: "Runs at startup before the dashboard and can be reopened later from the dashboard.",
+					Shortcuts: []helpShortcut{
+						{Keys: "y/n or d/c/n", Action: "apply or skip the proposed setup action, depending on the prompt"},
+						{Keys: "enter", Action: "continue to the dashboard when the check is complete"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func appendHelpWrappedLines(lines *[]string, width int, text string, style lipgloss.Style, prefix string) {
+	width = max(12, width)
+	for _, part := range wrapText(strings.TrimSpace(text), width) {
+		if prefix != "" {
+			part = prefix + part
+		}
+		*lines = append(*lines, style.Render(part))
+	}
+}
+
+func helpShortcutLabelWidth(width int) int {
+	switch {
+	case width >= 100:
+		return 28
+	case width >= 80:
+		return 24
+	default:
+		return 20
+	}
 }
 
 func (m model) renderDestroyView() string {
@@ -2235,24 +2533,30 @@ func (m model) renderDestroyView() string {
 
 func (m model) helpBodyHeight() int {
 	title := titleStyle.Render("Help / Shortcuts")
-	meta := summaryStyle.Render("Press esc to return")
+	meta := summaryStyle.Render("Tab: " + m.currentHelpTabContent().Label + "  esc: close")
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
-	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
+	footer := m.renderFooterWithMessage("left/right or h/l: switch tabs | j/k or pgup/pgdown: scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 	return m.pageBodyHeight(header, footer, 0)
+}
+
+func (m model) helpContentHeight() int {
+	return max(1, m.helpBodyHeight()-2)
 }
 
 func (m *model) boundHelpScroll() {
 	if m.mode != screenHelp {
 		return
 	}
+	m.ensureHelpState()
 	lines := m.helpLines(max(12, m.width-2))
-	maxOffset := max(0, len(lines)-m.helpBodyHeight())
+	maxOffset := max(0, len(lines)-m.helpContentHeight())
 	if m.helpScroll < 0 {
 		m.helpScroll = 0
 	}
 	if m.helpScroll > maxOffset {
 		m.helpScroll = maxOffset
 	}
+	m.helpTabScrolls[int(m.helpTab)] = m.helpScroll
 }
 
 func (m model) renderDashboard() string {
