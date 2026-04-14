@@ -95,7 +95,7 @@ func parseTUIMetadata(lines []string) map[string]string {
 			if !ok {
 				continue
 			}
-			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+			values[strings.TrimSpace(key)] = decodeTUIMetadataValue(value)
 		}
 	}
 	return values

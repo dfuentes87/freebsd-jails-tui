@@ -12,12 +12,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
 	jailNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	memoryLimitPattern = regexp.MustCompile(`^[0-9]+[KMGTP]?$`)
 )
+
+const maxJailNoteLen = 120
 
 type wizardField struct {
 	ID          string
@@ -63,6 +66,7 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux"},
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
+			{ID: "note", Label: "Note", Placeholder: "nginx reverse proxy", Help: "Optional short dashboard note"},
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Full jail root path"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL"},
 			{ID: "patch_base", Label: "Patch FreeBSD base", Placeholder: "auto", Help: "auto, yes, or no"},
@@ -113,6 +117,7 @@ type jailWizardValues struct {
 	IP6             string
 	DefaultRouter   string
 	Hostname        string
+	Note            string
 	PatchBase       string
 	StartupOrder    string
 	Dependencies    string
@@ -597,6 +602,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.DefaultRouter
 	case "hostname":
 		return &w.values.Hostname
+	case "note":
+		return &w.values.Note
 	case "patch_base":
 		return &w.values.PatchBase
 	case "startup_order":
@@ -654,6 +661,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.DefaultRouter
 	case "hostname":
 		return w.values.Hostname
+	case "note":
+		return w.values.Note
 	case "patch_base":
 		return w.values.PatchBase
 	case "startup_order":
@@ -707,6 +716,13 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 	}
 	if w.currentStepHasField("name") && !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
 		return "name", fmt.Errorf("invalid jail name")
+	}
+	if w.currentStepHasField("note") {
+		note, err := normalizeJailNote(w.values.Note)
+		if err != nil {
+			return "note", err
+		}
+		w.values.Note = note
 	}
 	if w.currentStepHasField("dataset") && strings.TrimSpace(w.values.Dataset) == "" {
 		return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
@@ -1129,6 +1145,7 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
 		fmt.Sprintf("Hostname: %s", valueOrDash(w.values.Hostname)),
+		fmt.Sprintf("Note: %s", valueOrDash(w.values.Note)),
 		fmt.Sprintf("Startup order: %s", startupOrderSummary(w.values.StartupOrder)),
 		fmt.Sprintf("Dependencies: %s", dependencySummary(w.values.Dependencies)),
 		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
@@ -1477,6 +1494,9 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 			fmt.Sprintf("  # freebsd-jails-tui: rctl_mode=persistent cpu_percent=%s memory_limit=%s process_limit=%s;", metadataDashValue(values.CPUPercent), metadataDashValue(values.MemoryLimit), metadataDashValue(values.ProcessLimit)),
 		)
 	}
+	if note, err := normalizeJailNote(values.Note); err == nil && note != "" {
+		lines = append(lines, fmt.Sprintf("  # freebsd-jails-tui: note=%s;", encodeTUIMetadataValue(note)))
+	}
 
 	if strings.TrimSpace(values.DefaultRouter) != "" {
 		if jailType != "vnet" {
@@ -1797,6 +1817,34 @@ func metadataDashValue(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func normalizeJailNote(value string) (string, error) {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if utf8.RuneCountInString(value) > maxJailNoteLen {
+		return "", fmt.Errorf("note must be %d characters or fewer", maxJailNoteLen)
+	}
+	return value, nil
+}
+
+func jailNoteLength(value string) int {
+	return utf8.RuneCountInString(value)
+}
+
+func encodeTUIMetadataValue(value string) string {
+	return neturl.PathEscape(strings.TrimSpace(value))
+}
+
+func decodeTUIMetadataValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	decoded, err := neturl.PathUnescape(value)
+	if err != nil {
+		return value
+	}
+	return decoded
 }
 
 func freeBSDPatchSummary(sourceInput, preference string) string {

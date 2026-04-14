@@ -57,6 +57,13 @@ type JailCreationResult struct {
 	Err        error
 }
 
+type JailNoteUpdateResult struct {
+	Name string
+	Note string
+	Logs []string
+	Err  error
+}
+
 type TemplateDatasetResult struct {
 	Dataset    string
 	Mountpoint string
@@ -1545,6 +1552,162 @@ func writeJailConfigFile(configPath string, lines []string, logs *[]string) erro
 		return fmt.Errorf("failed to write %q: %w", configPath, err)
 	}
 	return nil
+}
+
+func ExecuteJailNoteUpdate(detail JailDetail, note string) JailNoteUpdateResult {
+	result := JailNoteUpdateResult{
+		Name: strings.TrimSpace(detail.Name),
+	}
+	logs := make([]string, 0, 8)
+	fail := func(err error) JailNoteUpdateResult {
+		result.Logs = logs
+		result.Err = err
+		return result
+	}
+
+	if result.Name == "" {
+		return fail(fmt.Errorf("jail name is required"))
+	}
+	note, err := normalizeJailNote(note)
+	if err != nil {
+		return fail(err)
+	}
+	configPath := strings.TrimSpace(detail.JailConfSource)
+	if configPath == "" {
+		return fail(fmt.Errorf("no jail config source is available for note editing"))
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return fail(fmt.Errorf("failed to inspect %q: %w", configPath, err))
+	}
+	if _, err := backupFileForMutation(configPath, "jail-note-"+result.Name, &logs); err != nil {
+		return fail(err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return fail(fmt.Errorf("failed to read %q: %w", configPath, err))
+	}
+	updated, err := updateJailConfigNote(string(content), result.Name, note)
+	if err != nil {
+		return fail(err)
+	}
+	logs = append(logs, fmt.Sprintf("$ write %s", configPath))
+	if err := writeFileAtomicReplace(configPath, []byte(updated), info.Mode().Perm()); err != nil {
+		return fail(fmt.Errorf("failed to update %q: %w", configPath, err))
+	}
+	result.Note = note
+	result.Logs = logs
+	return result
+}
+
+func updateJailConfigNote(content, jailName, note string) (string, error) {
+	lines := strings.Split(content, "\n")
+	openPattern := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(strings.TrimSpace(jailName)) + `\s*\{`)
+	start := -1
+	depth := 0
+
+	for idx, line := range lines {
+		if !openPattern.MatchString(line) {
+			continue
+		}
+		start = idx
+		depth = strings.Count(line, "{") - strings.Count(line, "}")
+		if depth <= 0 {
+			depth = 1
+		}
+		break
+	}
+	if start < 0 {
+		return "", fmt.Errorf("jail %q was not found in %q", jailName, jailConfigPathForName(jailName))
+	}
+
+	end := len(lines)
+	for idx := start + 1; idx < len(lines); idx++ {
+		nextDepth := depth + strings.Count(lines[idx], "{") - strings.Count(lines[idx], "}")
+		if nextDepth <= 0 {
+			end = idx
+			break
+		}
+		depth = nextDepth
+	}
+	if end <= start {
+		return "", fmt.Errorf("failed to locate the end of jail %q in its config", jailName)
+	}
+
+	updatedBlock := upsertJailNoteMetadata(lines[start+1:end], note)
+	updatedLines := make([]string, 0, len(lines)-((end-start)-1)+len(updatedBlock))
+	updatedLines = append(updatedLines, lines[:start+1]...)
+	updatedLines = append(updatedLines, updatedBlock...)
+	updatedLines = append(updatedLines, lines[end:]...)
+	return strings.Join(updatedLines, "\n"), nil
+}
+
+func upsertJailNoteMetadata(blockLines []string, note string) []string {
+	cleaned := make([]string, 0, len(blockLines)+1)
+	insertIdx := -1
+	for _, line := range blockLines {
+		updated, changed := stripTUIMetadataKey(line, "note")
+		if changed {
+			line = updated
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if insertIdx < 0 {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "# freebsd-jails-tui:") {
+				insertIdx = len(cleaned)
+			}
+		}
+		cleaned = append(cleaned, line)
+	}
+	if strings.TrimSpace(note) == "" {
+		return cleaned
+	}
+	if insertIdx < 0 {
+		insertIdx = 0
+		for idx, line := range cleaned {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "host.hostname =") || strings.HasPrefix(trimmed, "path =") {
+				insertIdx = idx + 1
+			}
+		}
+	}
+	noteLine := fmt.Sprintf("  # freebsd-jails-tui: note=%s;", encodeTUIMetadataValue(note))
+	cleaned = append(cleaned, "")
+	copy(cleaned[insertIdx+1:], cleaned[insertIdx:])
+	cleaned[insertIdx] = noteLine
+	return cleaned
+}
+
+func stripTUIMetadataKey(line, key string) (string, bool) {
+	idx := strings.Index(line, "freebsd-jails-tui:")
+	if idx < 0 {
+		return line, false
+	}
+	prefix := line[:idx+len("freebsd-jails-tui:")]
+	payload := strings.TrimSpace(strings.TrimSuffix(line[idx+len("freebsd-jails-tui:"):], ";"))
+	fields := strings.Fields(payload)
+	if len(fields) == 0 {
+		return line, false
+	}
+	kept := make([]string, 0, len(fields))
+	removed := false
+	for _, field := range fields {
+		fieldKey, _, ok := strings.Cut(field, "=")
+		if ok && strings.TrimSpace(fieldKey) == key {
+			removed = true
+			continue
+		}
+		kept = append(kept, field)
+	}
+	if !removed {
+		return line, false
+	}
+	if len(kept) == 0 {
+		return "", true
+	}
+	return prefix + " " + strings.Join(kept, " ") + ";", true
 }
 
 func applyRctlLimits(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) error {

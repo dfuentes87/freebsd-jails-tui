@@ -19,6 +19,7 @@ type Jail struct {
 	JID        int
 	Path       string
 	Hostname   string
+	Note       string
 	Type       string
 	QuotaUsage string
 	Running    bool
@@ -40,6 +41,7 @@ type JailDetail struct {
 	JID                   int
 	Path                  string
 	Hostname              string
+	Note                  string
 	JLSFields             map[string]string
 	RuntimeValues         map[string]string
 	AdvancedRuntimeFields map[string]string
@@ -142,6 +144,7 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 			if j.Hostname == "" {
 				j.Hostname = strings.TrimSpace(conf.Values["host.hostname"])
 			}
+			j.Note = parseTUIMetadata(conf.RawLines)["note"]
 			j.Type = inferDashboardJailType(conf, zfsRows, j.Path)
 		}
 		if info := discoverZFSDatasetFromRows(zfsRows, j.Path); info != nil {
@@ -221,6 +224,7 @@ func CollectJailDetail(name string, jid int, pathHint string, now time.Time) (Ja
 		detail.JailConfRaw = conf.RawLines
 		detail.JailConfValues = conf.Values
 		detail.JailConfFlags = conf.Flags
+		detail.Note = parseTUIMetadata(conf.RawLines)["note"]
 		if detail.Path == "" {
 			detail.Path = conf.Values["path"]
 		}

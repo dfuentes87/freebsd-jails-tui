@@ -104,6 +104,10 @@ type linuxBootstrapApplyMsg struct {
 	result linuxBootstrapResult
 }
 
+type jailNoteApplyMsg struct {
+	result JailNoteUpdateResult
+}
+
 type templateDatasetApplyMsg struct {
 	result TemplateDatasetResult
 }
@@ -278,6 +282,9 @@ type model struct {
 	detailLoading      bool
 	detailScroll       int
 	detailShowAdvanced bool
+	detailNoteMode     bool
+	detailNoteSaving   bool
+	detailNoteInput    string
 	detailNotice       string
 	wizardScroll       int
 	zfsPanel           zfsPanelState
@@ -327,6 +334,13 @@ func detailCmd(jail Jail) tea.Cmd {
 	return func() tea.Msg {
 		detail, err := CollectJailDetail(jail.Name, jail.JID, jail.Path, time.Now())
 		return jailDetailMsg{detail: detail, err: err}
+	}
+}
+
+func jailNoteUpdateCmd(detail JailDetail, note string) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteJailNoteUpdate(detail, note)
+		return jailNoteApplyMsg{result: result}
 	}
 }
 
@@ -533,6 +547,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case jailDetailMsg:
 		m.detail = msg.detail
+		if !m.detailNoteMode {
+			m.detailNoteInput = msg.detail.Note
+		}
 		m.detailErr = msg.err
 		m.detailLoading = false
 		m.boundDetailScroll()
@@ -702,6 +719,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.detailLoading = true
 		return m, detailCmd(jail)
+	case jailNoteApplyMsg:
+		m.detailNoteSaving = false
+		if msg.result.Err != nil {
+			m.detailErr = msg.result.Err
+			m.detailNotice = ""
+			m.detailNoteMode = true
+			return m, nil
+		}
+		m.detailErr = nil
+		m.detailNoteMode = false
+		m.detail.Note = msg.result.Note
+		if msg.result.Note == "" {
+			m.detailNotice = "Jail note cleared."
+		} else {
+			m.detailNotice = "Jail note updated."
+		}
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, pollCmd()
+		}
+		return m, tea.Batch(pollCmd(), detailCmd(jail))
 	case templateDatasetApplyMsg:
 		if m.mode == screenTemplateDatasetCreate {
 			m.templateCreate.applying = false
@@ -953,6 +991,8 @@ func (m model) isTextEntryMode() bool {
 		return m.templateCreate.mode == templateManagerModeCreate || m.templateCreate.mode == templateManagerModeRename || m.templateCreate.mode == templateManagerModeClone
 	case screenZFSPanel:
 		return m.zfsPanel.inputMode || m.zfsPanel.cloneMode
+	case screenJailDetail:
+		return m.detailNoteMode && !m.detailNoteSaving
 	default:
 		return false
 	}
@@ -1079,6 +1119,9 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailLoading = true
 		m.detailScroll = 0
 		m.detailShowAdvanced = false
+		m.detailNoteMode = false
+		m.detailNoteSaving = false
+		m.detailNoteInput = ""
 		m.detailErr = nil
 		m.detailNotice = ""
 		m.detail = JailDetail{
@@ -1086,6 +1129,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			JID:                   jail.JID,
 			Path:                  jail.Path,
 			Hostname:              jail.Hostname,
+			Note:                  jail.Note,
 			JLSFields:             map[string]string{},
 			RuntimeValues:         map[string]string{},
 			AdvancedRuntimeFields: map[string]string{},
@@ -1100,23 +1144,96 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.detailNoteMode && !m.detailNoteSaving && msg.Type == tea.KeyRunes {
+		m.appendDetailNoteInput(string(msg.Runes))
+		return m, nil
+	}
+	if m.detailNoteSaving {
+		return m, nil
+	}
+
 	switch msg.String() {
-	case "esc", "backspace", "left":
+	case "esc", "left":
+		if m.detailNoteMode {
+			m.detailNoteMode = false
+			m.detailNoteInput = ""
+			m.detailNotice = "Jail note edit canceled."
+			m.detailErr = nil
+			return m, nil
+		}
 		m.mode = screenDashboard
 		return m, nil
+	case "n", "N":
+		if m.detailNoteSaving {
+			return m, nil
+		}
+		if m.detailNoteMode {
+			return m, nil
+		}
+		m.detailNoteMode = true
+		m.detailNoteInput = m.detail.Note
+		m.detailNotice = ""
+		m.detailErr = nil
+		return m, nil
+	case "enter":
+		if !m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
+		note, err := normalizeJailNote(m.detailNoteInput)
+		if err != nil {
+			m.detailErr = err
+			m.detailNotice = ""
+			return m, nil
+		}
+		m.detailNoteInput = note
+		m.detailNoteSaving = true
+		m.detailErr = nil
+		m.detailNotice = "Saving jail note..."
+		return m, jailNoteUpdateCmd(m.detail, note)
+	case "delete":
+		if m.detailNoteMode && !m.detailNoteSaving {
+			m.backspaceDetailNoteInput()
+			return m, nil
+		}
 	case "j", "down":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll++
 	case "k", "up":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll--
 	case "g", "home":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll = 0
 	case "G", "end":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll = 1 << 30
 	case "pgdown":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll += m.detailBodyHeight()
 	case "pgup":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll -= m.detailBodyHeight()
+	case "backspace":
+		if m.detailNoteMode && !m.detailNoteSaving {
+			m.backspaceDetailNoteInput()
+			return m, nil
+		}
 	case "r":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		jail, ok := m.detailJail()
 		if !ok {
 			return m, nil
@@ -1126,11 +1243,17 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = ""
 		return m, detailCmd(jail)
 	case "a", "A":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		m.detailShowAdvanced = !m.detailShowAdvanced
 		m.detailNotice = ""
 		m.detailErr = nil
 		return m, nil
 	case "b", "B":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		if !detailLooksLikeLinuxJail(m.detail) {
 			m.detailErr = fmt.Errorf("linux bootstrap retry is only available for linux jails")
 			return m, nil
@@ -1144,6 +1267,9 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = "Retrying Linux bootstrap..."
 		return m, linuxBootstrapCmd(m.detail)
 	case "z":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		if m.detail.ZFS == nil || strings.TrimSpace(m.detail.ZFS.Name) == "" {
 			m.detailErr = fmt.Errorf("no ZFS dataset detected for this jail")
 			return m, nil
@@ -1152,6 +1278,9 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail, m.detail)
 		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case "R":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		jail, ok := m.detailJail()
 		if !ok {
 			return m, nil
@@ -1160,6 +1289,9 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = "Restarting jail..."
 		return m, jailServiceCmd(jail, "restart")
 	case "u", "U":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		jail, ok := m.detailJail()
 		if !ok {
 			return m, nil
@@ -1168,6 +1300,9 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenUpgradeWizard
 		return m, nil
 	case "x", "X":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		jail, ok := m.detailJail()
 		if !ok {
 			return m, nil
@@ -2333,6 +2468,7 @@ func helpTabs() []helpTabContent {
 					Shortcuts: []helpShortcut{
 						{Keys: "j/k, pgup/pgdown, g/G", Action: "scroll the detail pane"},
 						{Keys: "a", Action: "toggle advanced runtime and default parameter sections"},
+						{Keys: "n", Action: "edit the short dashboard note stored for this jail"},
 						{Keys: "r", Action: "refresh selected jail details"},
 						{Keys: "R", Action: "restart this jail"},
 						{Keys: "u", Action: "open the guided upgrade wizard for this jail"},
@@ -2343,6 +2479,7 @@ func helpTabs() []helpTabContent {
 					},
 					Notes: []string{
 						"Startup policy shows jail_list order and configured depend values.",
+						"Notes are stored in managed jail.conf metadata and shown on the dashboard quick-details panel.",
 						"Network summary combines configured values, runtime state, and host-side validation results.",
 					},
 				},
@@ -2559,11 +2696,16 @@ func (m model) renderDashboard() string {
 	header := m.renderHeader()
 	footer := m.renderFooter()
 	bodyHeight := m.pageBodyHeight(header, footer, 0)
-	leftWidth := max(50, (m.width*2)/3)
-	if leftWidth > m.width-24 {
-		leftWidth = m.width - 24
+	const (
+		dashboardMinLeftWidth  = 32
+		dashboardMinRightWidth = 24
+	)
+	leftWidth := max(dashboardMinLeftWidth, m.width/3)
+	maxLeftWidth := m.width - dashboardMinRightWidth - 1
+	if leftWidth > maxLeftWidth {
+		leftWidth = maxLeftWidth
 	}
-	if leftWidth < 32 {
+	if leftWidth < dashboardMinLeftWidth {
 		leftWidth = m.width
 	}
 	rightWidth := m.width - leftWidth - 1
@@ -2600,10 +2742,14 @@ func (m model) renderJailDetailView() string {
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
-	if detailLooksLikeLinuxJail(m.detail) {
-		hint += " | b: retry linux bootstrap"
+	if m.detailNoteMode {
+		hint = "type to edit note | enter: save | backspace: delete | esc: cancel | ctrl+c: quit"
+	} else {
+		if detailLooksLikeLinuxJail(m.detail) {
+			hint += " | b: retry linux bootstrap"
+		}
+		hint += " | n: edit note | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
 	}
-	hint += " | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
 	message := ""
 	if m.detailErr != nil {
 		message = "warning: " + m.detailErr.Error()
@@ -3517,6 +3663,18 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"pkg-cache.local",
 			},
 		}
+	case "note":
+		return wizardFieldGuide{
+			Purpose: "Optional short description shown in dashboard quick details and the jail detail overview.",
+			Format:  fmt.Sprintf("Up to %d characters; keep it short and role-focused.", maxJailNoteLen),
+			Examples: []string{
+				"nginx reverse proxy",
+				"wordpress",
+			},
+			Notes: []string{
+				"Leave blank when the jail name already says enough.",
+			},
+		}
 	case "dataset":
 		return wizardFieldGuide{
 			Purpose: "Absolute jail root path. The final path must end with the jail name.",
@@ -3933,12 +4091,23 @@ func (m model) detailLines(width int) []string {
 	appendRenderedSectionWithStyle(&lines, detailSectionStyle, "Overview", renderKeyValueLines(width,
 		[2]string{"Name", m.detail.Name},
 		[2]string{"State", state},
+		[2]string{"Type", valueOrDash(jail.Type)},
 		[2]string{"JID", jidText},
 		[2]string{"CPU", cpuText},
 		[2]string{"Memory", memText},
 		[2]string{"Path", m.detail.Path},
 		[2]string{"Hostname", m.detail.Hostname},
+		[2]string{"Note", valueOrDash(m.detail.Note)},
 	))
+
+	if m.detailNoteMode || m.detailNoteSaving {
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Note editor")
+		lines = append(lines, renderKeyValueLines(width,
+			[2]string{"Note", valueOrDash(m.detailNoteInput)},
+			[2]string{"Length", fmt.Sprintf("%d/%d", jailNoteLength(m.detailNoteInput), maxJailNoteLen)},
+		)...)
+		lines = append(lines, truncate("Press enter to save, esc to cancel, and leave the field blank to clear the note.", width))
+	}
 
 	appendSectionWithStyle(&lines, width, detailSectionStyle, "Configured state")
 	lines = append(lines, renderKeyValueLines(width, [2]string{"Source", m.detail.JailConfSource})...)
@@ -4726,6 +4895,11 @@ func (m model) renderDetailPanel(width, height int) string {
 			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
 			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},
 		)...)
+		if strings.TrimSpace(j.Note) != "" {
+			lines = append(lines, renderKeyValueLines(max(12, width-2),
+				[2]string{"Note", j.Note},
+			)...)
+		}
 		if strings.TrimSpace(j.QuotaUsage) != "" {
 			lines = append(lines, renderKeyValueLines(max(12, width-2),
 				[2]string{"Quota", j.QuotaUsage},
@@ -4738,6 +4912,33 @@ func (m model) renderDetailPanel(width, height int) string {
 		Height(height).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) appendDetailNoteInput(text string) {
+	if text == "" {
+		return
+	}
+	for _, r := range text {
+		if r == '\n' || r == '\r' {
+			continue
+		}
+		if jailNoteLength(m.detailNoteInput) >= maxJailNoteLen {
+			break
+		}
+		m.detailNoteInput += string(r)
+	}
+	m.detailErr = nil
+	m.detailNotice = ""
+}
+
+func (m *model) backspaceDetailNoteInput() {
+	runes := []rune(m.detailNoteInput)
+	if len(runes) == 0 {
+		return
+	}
+	m.detailNoteInput = string(runes[:len(runes)-1])
+	m.detailErr = nil
+	m.detailNotice = ""
 }
 
 func (m *model) boundCursor() {
