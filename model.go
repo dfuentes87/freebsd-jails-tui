@@ -1127,11 +1127,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, detailCmd(jail)
 	case "a", "A":
 		m.detailShowAdvanced = !m.detailShowAdvanced
-		if m.detailShowAdvanced {
-			m.detailNotice = "Showing advanced runtime parameters."
-		} else {
-			m.detailNotice = "Advanced runtime parameters hidden."
-		}
+		m.detailNotice = ""
 		m.detailErr = nil
 		return m, nil
 	case "b", "B":
@@ -3718,7 +3714,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"/data:/srv/data, /logs:/var/log/app",
 			},
 			Notes: []string{
-				"Mount targets must stay inside the jail root after normalization.",
+				"Each target path is cleaned before validation. After resolving . and .. segments, it still has to point somewhere under the jail root; paths that escape to locations like / or /etc are rejected.",
 			},
 		}
 	case "linux_distro":
@@ -3984,16 +3980,20 @@ func (m model) detailLines(width int) []string {
 		[2]string{"CPU", cpuText},
 		[2]string{"Memory", memText},
 	))
-	runtimeNotes := make([]string, 0, 2)
+	runtimeNotes := []string{
+		"Runtime values come from the running jail and may differ from jail.conf defaults or the configured state shown above.",
+	}
 	if len(m.detail.RuntimeValues) == 0 {
-		runtimeNotes = append(runtimeNotes, "No running runtime record for this jail.")
+		runtimeNotes = append(runtimeNotes, "No running runtime record is available for this jail.")
 	} else {
 		for _, key := range orderedRuntimeKeys(m.detail.RuntimeValues) {
 			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.RuntimeValues[key]})...)
 		}
 	}
-	if !m.detailShowAdvanced {
-		runtimeNotes = append(runtimeNotes, "Raw runtime/default parameters hidden; press a to show.")
+	if m.detailShowAdvanced {
+		runtimeNotes = append(runtimeNotes, "Advanced runtime/default parameters are shown below; press a to hide them.")
+	} else {
+		runtimeNotes = append(runtimeNotes, "Advanced runtime/default parameters are hidden; press a to show them.")
 	}
 
 	if m.detail.NetworkSummary != nil {
@@ -4004,10 +4004,10 @@ func (m model) detailLines(width int) []string {
 		}
 		networkPairs := make([][2]string, 0, len(m.detail.NetworkSummary.Configured)+len(m.detail.NetworkSummary.Runtime))
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Configured) {
-			networkPairs = append(networkPairs, [2]string{"Configured " + key, m.detail.NetworkSummary.Configured[key]})
+			networkPairs = append(networkPairs, [2]string{key, m.detail.NetworkSummary.Configured[key]})
 		}
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Runtime) {
-			networkPairs = append(networkPairs, [2]string{"Runtime " + key, m.detail.NetworkSummary.Runtime[key]})
+			networkPairs = append(networkPairs, [2]string{key, m.detail.NetworkSummary.Runtime[key]})
 		}
 		if len(networkPairs) > 0 {
 			lines = append(lines, renderKeyValueLinesWithLabelWidth(width, networkLabelWidth, networkPairs...)...)
@@ -4114,7 +4114,6 @@ func orderedRuntimeKeys(values map[string]string) []string {
 	order := []string{
 		"JID",
 		"Live path",
-		"Live hostname",
 		"Network mode",
 		"Interface",
 		"IPv4",
@@ -4693,11 +4692,7 @@ func (m model) renderRows(maxRows, width int) string {
 		if idx == m.cursor {
 			cursorChar = ">"
 		}
-		secondary := ""
-		if host := strings.TrimSpace(jail.Hostname); host != "" && host != jail.Name {
-			secondary = " host:" + host
-		}
-		line := fmt.Sprintf("%s%s %s %s%s", cursorChar, sel, statusBadge(jail.Running), jail.Name, secondary)
+		line := fmt.Sprintf("%s%s %s %s", cursorChar, sel, statusBadge(jail.Running), jail.Name)
 		line = truncate(line, max(1, width-3))
 		if idx == m.cursor {
 			line = selectedRowStyle.Width(max(1, width-2)).Render(line)
@@ -4725,6 +4720,8 @@ func (m model) renderDetailPanel(width, height int) string {
 		lines = append(lines, renderKeyValueLines(max(12, width-2),
 			[2]string{"Name", j.Name},
 			[2]string{"State", state},
+			[2]string{"Type", valueOrDash(j.Type)},
+			[2]string{"Hostname", valueOrDash(j.Hostname)},
 			[2]string{"JID", jidText},
 			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
 			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},

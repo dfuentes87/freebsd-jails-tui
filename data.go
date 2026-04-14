@@ -19,6 +19,7 @@ type Jail struct {
 	JID        int
 	Path       string
 	Hostname   string
+	Type       string
 	QuotaUsage string
 	Running    bool
 	CPUPercent float64
@@ -66,6 +67,7 @@ type ZFSDatasetInfo struct {
 	Compression string
 	Quota       string
 	Reservation string
+	Origin      string
 	MatchType   string
 }
 
@@ -140,9 +142,16 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 			if j.Hostname == "" {
 				j.Hostname = strings.TrimSpace(conf.Values["host.hostname"])
 			}
+			j.Type = inferDashboardJailType(conf, zfsRows, j.Path)
 		}
 		if info := discoverZFSDatasetFromRows(zfsRows, j.Path); info != nil {
 			j.QuotaUsage = formatQuotaUsage(info)
+			if strings.TrimSpace(j.Type) == "" && strings.TrimSpace(info.Origin) != "" && info.Origin != "-" {
+				j.Type = "thin"
+			}
+		}
+		if strings.TrimSpace(j.Type) == "" {
+			j.Type = "thick"
 		}
 		if metric, ok := metrics[j.JID]; ok {
 			j.CPUPercent = metric.CPUPercent
@@ -560,6 +569,7 @@ func discoverZFSDatasetFromRows(rows []zfsFilesystemRow, jailPath string) *ZFSDa
 			Compression: row.Compression,
 			Quota:       row.Quota,
 			Reservation: row.Reservation,
+			Origin:      row.Origin,
 			MatchType:   matchType,
 		}
 	}
@@ -579,6 +589,27 @@ func formatQuotaUsage(info *ZFSDatasetInfo) string {
 		return quota
 	}
 	return used + " / " + quota
+}
+
+func inferDashboardJailType(conf jailConfData, rows []zfsFilesystemRow, jailPath string) string {
+	for _, flag := range conf.Flags {
+		switch strings.TrimSpace(flag) {
+		case "allow.mount.linprocfs", "allow.mount.linsysfs":
+			return "linux"
+		case "vnet":
+			return "vnet"
+		}
+	}
+	for _, raw := range conf.RawLines {
+		switch {
+		case strings.Contains(raw, "/compat/"), strings.Contains(raw, "linux_distro="):
+			return "linux"
+		}
+	}
+	if info := discoverZFSDatasetFromRows(rows, jailPath); info != nil && info.MatchType == "exact" && strings.TrimSpace(info.Origin) != "" && info.Origin != "-" {
+		return "thin"
+	}
+	return "thick"
 }
 
 func discoverRctlRules(name string, jid int) ([]string, error) {

@@ -37,7 +37,6 @@ func collectJailNetworkSummary(detail JailDetail) *JailNetworkSummary {
 	summary.Configured["IPv4"] = valueOrDash(values.IP4)
 	summary.Configured["IPv6"] = valueOrDash(values.IP6)
 	summary.Configured["Default router"] = valueOrDash(values.DefaultRouter)
-	summary.Configured["Hostname"] = valueOrDash(firstNonEmpty(strings.TrimSpace(values.Hostname), strings.TrimSpace(detail.JailConfValues["host.hostname"]), strings.TrimSpace(detail.Hostname)))
 
 	state := "stopped"
 	if detail.JID > 0 {
@@ -49,7 +48,6 @@ func collectJailNetworkSummary(detail JailDetail) *JailNetworkSummary {
 	summary.Runtime["Interface"] = valueOrDash(detail.RuntimeValues["Interface"])
 	summary.Runtime["IPv4"] = valueOrDash(detail.RuntimeValues["IPv4"])
 	summary.Runtime["IPv6"] = valueOrDash(detail.RuntimeValues["IPv6"])
-	summary.Runtime["Live hostname"] = valueOrDash(firstNonEmpty(detail.RuntimeValues["Live hostname"], detail.Hostname))
 
 	prereqs := collectNetworkWizardPrereqs(values)
 	summary.Validation = append(summary.Validation, networkWizardPrereqLines(prereqs)...)
@@ -161,11 +159,9 @@ func orderedNetworkSummaryKeys(values map[string]string) []string {
 		"IPv4",
 		"IPv6",
 		"Default router",
-		"Hostname",
 		"State",
 		"JID",
 		"Network mode",
-		"Live hostname",
 	}
 	keys := make([]string, 0, len(values))
 	seen := map[string]struct{}{}
