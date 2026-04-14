@@ -120,6 +120,10 @@ type templateSnapshotCloneApplyMsg struct {
 	result TemplateDatasetSnapshotCloneResult
 }
 
+type templateSnapshotDestroyApplyMsg struct {
+	result TemplateDatasetSnapshotDestroyResult
+}
+
 type jailSnapshotCloneApplyMsg struct {
 	result JailSnapshotCloneResult
 }
@@ -184,36 +188,38 @@ const (
 	templateManagerModeRename
 	templateManagerModeDestroy
 	templateManagerModeClone
+	templateManagerModeSnapshotDestroy
 )
 
 type templateDatasetCreateState struct {
-	returnMode       screenMode
-	selectMode       bool
-	mode             templateManagerMode
-	items            []TemplateDatasetInfo
-	cursor           int
-	parent           *templateDatasetParent
-	loading          bool
-	sourceInput      string
-	preview          TemplateDatasetPreview
-	renameInput      string
-	renamePreview    TemplateDatasetRenamePreview
-	destroyPreview   TemplateDatasetDestroyPreview
-	cloneSnapshots   []ZFSSnapshot
-	cloneCursor      int
-	cloneName        string
-	clonePreview     TemplateDatasetSnapshotClonePreview
-	cloneLoading     bool
-	applying         bool
-	parentApplying   bool
-	logs             []string
-	message          string
-	parentDataset    string
-	parentMountpoint string
-	parentEdit       bool
-	parentField      int
-	parentCustom     bool
-	patchBase        string
+	returnMode             screenMode
+	selectMode             bool
+	mode                   templateManagerMode
+	items                  []TemplateDatasetInfo
+	cursor                 int
+	parent                 *templateDatasetParent
+	loading                bool
+	sourceInput            string
+	preview                TemplateDatasetPreview
+	renameInput            string
+	renamePreview          TemplateDatasetRenamePreview
+	destroyPreview         TemplateDatasetDestroyPreview
+	cloneSnapshots         []ZFSSnapshot
+	cloneCursor            int
+	cloneName              string
+	clonePreview           TemplateDatasetSnapshotClonePreview
+	snapshotDestroyPreview TemplateDatasetSnapshotDestroyPreview
+	cloneLoading           bool
+	applying               bool
+	parentApplying         bool
+	logs                   []string
+	message                string
+	parentDataset          string
+	parentMountpoint       string
+	parentEdit             bool
+	parentField            int
+	parentCustom           bool
+	patchBase              string
 }
 
 type model struct {
@@ -359,6 +365,13 @@ func templateSnapshotCloneCmd(dataset, snapshot, newName string, parentOverride 
 	return func() tea.Msg {
 		result := ExecuteTemplateSnapshotClone(dataset, snapshot, newName, parentOverride)
 		return templateSnapshotCloneApplyMsg{result: result}
+	}
+}
+
+func templateSnapshotDestroyCmd(dataset, snapshot string, parentOverride *templateDatasetParent) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteTemplateSnapshotDestroy(dataset, snapshot, parentOverride)
+		return templateSnapshotDestroyApplyMsg{result: result}
 	}
 }
 
@@ -745,7 +758,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateCreate.cloneLoading = false
 		m.templateCreate.cloneSnapshots = append([]ZFSSnapshot(nil), msg.snapshots...)
 		m.templateCreate.boundCloneCursor()
-		m.templateCreate.refreshClonePreview()
+		if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+			m.templateCreate.refreshSnapshotDestroyPreview()
+		} else {
+			m.templateCreate.refreshClonePreview()
+		}
 		if msg.err != nil {
 			m.templateCreate.message = msg.err.Error()
 			return m, nil
@@ -769,6 +786,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateCreate.cloneName = ""
 		m.templateCreate.message = fmt.Sprintf("Template dataset cloned: %s", msg.result.Dataset)
 		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case templateSnapshotDestroyApplyMsg:
+		if m.mode != screenTemplateDatasetCreate {
+			return m, nil
+		}
+		m.templateCreate.applying = false
+		m.templateCreate.logs = append([]string(nil), msg.result.Logs...)
+		if msg.result.Err != nil {
+			m.templateCreate.message = msg.result.Err.Error()
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeClone
+		m.templateCreate.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
+		m.templateCreate.cloneLoading = true
+		m.templateCreate.message = fmt.Sprintf("Template snapshot destroyed: %s", msg.result.Snapshot)
+		return m, templateSnapshotListCmd(msg.result.Dataset)
 	case jailSnapshotCloneApplyMsg:
 		if m.mode != screenZFSPanel {
 			return m, nil
@@ -1523,6 +1555,12 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Template parent edit canceled."
 			return m, nil
 		}
+		if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+			m.templateCreate.mode = templateManagerModeClone
+			m.templateCreate.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
+			m.templateCreate.message = "Template snapshot destroy canceled."
+			return m, nil
+		}
 		if m.templateCreate.mode != templateManagerModeBrowse {
 			m.templateCreate.mode = templateManagerModeBrowse
 			m.templateCreate.message = "Template manager action canceled."
@@ -1542,10 +1580,14 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.boundCursor()
 			return m, nil
 		}
-		if m.templateCreate.mode == templateManagerModeClone {
+		if m.templateCreate.mode == templateManagerModeClone || m.templateCreate.mode == templateManagerModeSnapshotDestroy {
 			m.templateCreate.cloneCursor++
 			m.templateCreate.boundCloneCursor()
-			m.templateCreate.refreshClonePreview()
+			if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+				m.templateCreate.refreshSnapshotDestroyPreview()
+			} else {
+				m.templateCreate.refreshClonePreview()
+			}
 			return m, nil
 		}
 		if m.templateCreate.parentEdit {
@@ -1561,10 +1603,14 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.boundCursor()
 			return m, nil
 		}
-		if m.templateCreate.mode == templateManagerModeClone {
+		if m.templateCreate.mode == templateManagerModeClone || m.templateCreate.mode == templateManagerModeSnapshotDestroy {
 			m.templateCreate.cloneCursor--
 			m.templateCreate.boundCloneCursor()
-			m.templateCreate.refreshClonePreview()
+			if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+				m.templateCreate.refreshSnapshotDestroyPreview()
+			} else {
+				m.templateCreate.refreshClonePreview()
+			}
 			return m, nil
 		}
 		if m.templateCreate.parentEdit {
@@ -1663,9 +1709,33 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.templateCreate.cloneCursor = 0
 		m.templateCreate.cloneName = filepath.Base(item.Name) + "-clone"
 		m.templateCreate.clonePreview = TemplateDatasetSnapshotClonePreview{}
+		m.templateCreate.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
 		m.templateCreate.logs = nil
 		m.templateCreate.message = "Loading template snapshots..."
 		return m, templateSnapshotListCmd(item.Name)
+	case "ctrl+x":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeClone {
+			return m, nil
+		}
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			m.templateCreate.message = "No template dataset selected."
+			return m, nil
+		}
+		snapshot, ok := m.templateCreate.selectedCloneSnapshot()
+		if !ok {
+			m.templateCreate.message = "No snapshot selected."
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeSnapshotDestroy
+		m.templateCreate.logs = nil
+		m.templateCreate.snapshotDestroyPreview = InspectTemplateSnapshotDestroy(item.Name, snapshot.Name, m.templateCreate.parentOverride())
+		if m.templateCreate.snapshotDestroyPreview.Err != nil {
+			m.templateCreate.message = m.templateCreate.snapshotDestroyPreview.Err.Error()
+		} else {
+			m.templateCreate.message = "Press enter to destroy this template snapshot."
+		}
+		return m, nil
 	case "ctrl+e":
 		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeCreate {
 			return m, nil
@@ -1784,6 +1854,16 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.applying = true
 			return m, templateSnapshotCloneCmd(m.templateCreate.clonePreview.Current.Name, m.templateCreate.clonePreview.Snapshot, m.templateCreate.cloneName, m.templateCreate.parentOverride())
 		}
+		if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+			if m.templateCreate.snapshotDestroyPreview.Err != nil {
+				m.templateCreate.message = m.templateCreate.snapshotDestroyPreview.Err.Error()
+				return m, nil
+			}
+			m.templateCreate.message = "Destroying template snapshot..."
+			m.templateCreate.logs = nil
+			m.templateCreate.applying = true
+			return m, templateSnapshotDestroyCmd(m.templateCreate.snapshotDestroyPreview.Current.Name, m.templateCreate.snapshotDestroyPreview.Snapshot, m.templateCreate.parentOverride())
+		}
 	case "ctrl+r":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
@@ -1793,7 +1873,7 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Template dataset preview refreshed."
 			return m, nil
 		}
-		if m.templateCreate.mode == templateManagerModeClone {
+		if m.templateCreate.mode == templateManagerModeClone || m.templateCreate.mode == templateManagerModeSnapshotDestroy {
 			item, ok := m.templateCreate.selectedItem()
 			if !ok {
 				m.templateCreate.message = "No template dataset selected."
@@ -2104,10 +2184,10 @@ func (m model) helpLines(width int) []string {
 		truncate("esc: go back to workflow selection, or return to previous screen", width),
 		"",
 		sectionStyle.Render("Template Manager"),
-		truncate("j/k: select | c: create | n: clone snapshot | r: rename | x: destroy", width),
+		truncate("j/k: select | c: create | n: manage snapshots | r: rename | x: destroy", width),
 		truncate("enter applies the selected mountpoint when opened from the thin-jail wizard", width),
 		truncate("create mode accepts a source path, release tag, userland entry, or custom URL", width),
-		truncate("clone mode lets you pick a snapshot and clone it into a new template dataset", width),
+		truncate("snapshot mode lets you clone a snapshot into a new template dataset or press ctrl+x to destroy one", width),
 		truncate("when parent templates dataset is missing: enter creates proposed parent, ctrl+e edits parent values", width),
 		truncate("ctrl+r: refresh the template list, or refresh create preview while creating", width),
 		truncate("esc: return to dashboard", width),
@@ -2373,9 +2453,9 @@ func (m model) renderTemplateDatasetCreateView() string {
 	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
-	hint := "j/k: select | c: create | n: clone | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	hint := "j/k: select | c: create | n: snapshots | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
-		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+		hint = "j/k: select | enter: apply mountpoint | c: create | n: snapshots | r: rename | x: destroy | s: snapshots | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.mode == templateManagerModeCreate {
 		hint = "type source | p: toggle patch | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
@@ -2393,7 +2473,10 @@ func (m model) renderTemplateDatasetCreateView() string {
 		hint = "enter: destroy dataset | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.mode == templateManagerModeClone {
-		hint = "type clone name | j/k: snapshot | enter: clone | backspace: edit | ctrl+r: refresh snapshots | esc: back | ctrl+c: quit"
+		hint = "type clone name | up/down: snapshot | enter: clone | ctrl+x: destroy snapshot | backspace: edit | ctrl+r: refresh snapshots | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+		hint = "up/down: snapshot | enter: destroy selected snapshot | ctrl+r: refresh snapshots | esc: back | ctrl+c: quit"
 	}
 	if m.templateCreate.loading {
 		hint = "Refreshing template datasets... please wait | ctrl+c: quit"
@@ -2412,6 +2495,8 @@ func (m model) renderTemplateDatasetCreateView() string {
 			hint = "Destroying template dataset... please wait | ctrl+c: quit"
 		case templateManagerModeClone:
 			hint = "Cloning template snapshot... please wait | ctrl+c: quit"
+		case templateManagerModeSnapshotDestroy:
+			hint = "Destroying template snapshot... please wait | ctrl+c: quit"
 		default:
 			hint = "Creating template dataset... please wait | ctrl+c: quit"
 		}
@@ -2665,6 +2750,49 @@ func (m model) templateManagerDetailLines(width int) []string {
 		}
 		if preview.NewDataset != "" {
 			lines = append(lines, renderKeyValueLines(width, [2]string{"Readonly after clone", yesNoText(preview.ReadonlyAfter)})...)
+		}
+		if preview.Err != nil {
+			appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
+		}
+	case templateManagerModeSnapshotDestroy:
+		appendSection(&lines, width, "Destroy template snapshot")
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			lines = append(lines, "No template dataset selected.")
+			break
+		}
+		lines = append(lines, truncate("Dataset: "+item.Name, width))
+		appendSection(&lines, width, "Snapshots")
+		if m.templateCreate.cloneLoading {
+			lines = append(lines, "Loading snapshots...")
+			break
+		}
+		if len(m.templateCreate.cloneSnapshots) == 0 {
+			lines = append(lines, "No snapshots found for this template dataset.")
+			break
+		}
+		for idx, snapshot := range m.templateCreate.cloneSnapshots {
+			row := fmt.Sprintf("  %s  %s  %s", truncate(snapshotShortName(snapshot.Name), 18), truncate(snapshot.Creation, 18), snapshot.Used)
+			if idx == m.templateCreate.cloneCursor {
+				row = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+fmt.Sprintf("%s  %s  %s", snapshotShortName(snapshot.Name), snapshot.Creation, snapshot.Used), width))
+			} else {
+				row = truncate(row, width)
+			}
+			lines = append(lines, row)
+		}
+		appendSection(&lines, width, "Preview")
+		preview := m.templateCreate.snapshotDestroyPreview
+		if preview.Snapshot != "" {
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Snapshot", preview.Snapshot},
+				[2]string{"Destroy command", "zfs destroy " + preview.Snapshot},
+			)...)
+		}
+		if len(preview.ReferencedJails) > 0 {
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Current jails", strings.Join(preview.ReferencedJails, ", ")})...)
+		}
+		if len(preview.ReferencedClones) > 0 {
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Clone dependents", strings.Join(preview.ReferencedClones, ", ")})...)
 		}
 		if preview.Err != nil {
 			appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
@@ -3971,6 +4099,24 @@ func (s *templateDatasetCreateState) refreshClonePreview() {
 	s.clonePreview = InspectTemplateSnapshotClone(item.Name, snapshot.Name, s.cloneName, s.parentOverride())
 }
 
+func (s *templateDatasetCreateState) refreshSnapshotDestroyPreview() {
+	item, ok := s.selectedItem()
+	if !ok {
+		s.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
+		return
+	}
+	s.boundCloneCursor()
+	snapshot, ok := s.selectedCloneSnapshot()
+	if !ok {
+		s.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{
+			Current: item,
+			Err:     fmt.Errorf("select a snapshot to destroy"),
+		}
+		return
+	}
+	s.snapshotDestroyPreview = InspectTemplateSnapshotDestroy(item.Name, snapshot.Name, s.parentOverride())
+}
+
 func (s *templateDatasetCreateState) appendSource(text string) {
 	if text == "" {
 		return
@@ -4135,6 +4281,10 @@ func (s *templateDatasetCreateState) syncSelection() {
 		if item, ok := s.selectedItem(); ok {
 			s.destroyPreview = InspectTemplateDatasetDestroy(item.Name, s.parentOverride())
 		}
+		return
+	}
+	if s.mode == templateManagerModeSnapshotDestroy {
+		s.refreshSnapshotDestroyPreview()
 	}
 }
 
