@@ -1602,33 +1602,9 @@ func ExecuteJailNoteUpdate(detail JailDetail, note string) JailNoteUpdateResult 
 
 func updateJailConfigNote(content, jailName, note string) (string, error) {
 	lines := strings.Split(content, "\n")
-	openPattern := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(strings.TrimSpace(jailName)) + `\s*\{`)
-	start := -1
-	depth := 0
-
-	for idx, line := range lines {
-		if !openPattern.MatchString(line) {
-			continue
-		}
-		start = idx
-		depth = strings.Count(line, "{") - strings.Count(line, "}")
-		if depth <= 0 {
-			depth = 1
-		}
-		break
-	}
-	if start < 0 {
+	start, end, found := findJailBlockBounds(lines, jailName)
+	if !found {
 		return "", fmt.Errorf("jail %q was not found in %q", jailName, jailConfigPathForName(jailName))
-	}
-
-	end := len(lines)
-	for idx := start + 1; idx < len(lines); idx++ {
-		nextDepth := depth + strings.Count(lines[idx], "{") - strings.Count(lines[idx], "}")
-		if nextDepth <= 0 {
-			end = idx
-			break
-		}
-		depth = nextDepth
 	}
 	if end <= start {
 		return "", fmt.Errorf("failed to locate the end of jail %q in its config", jailName)

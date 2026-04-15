@@ -430,6 +430,9 @@ func clonedJailConfigLines(detail JailDetail, newName, destination, newFstabPath
 	if len(detail.JailConfRaw) == 0 {
 		return nil, fmt.Errorf("source jail config could not be read")
 	}
+	oldName := strings.TrimSpace(detail.Name)
+	oldEpair := vnetEpairName(oldName)
+	newEpair := vnetEpairName(newName)
 	lines := []string{fmt.Sprintf("%s {", newName)}
 	hasFstabLine := false
 	for _, raw := range detail.JailConfRaw {
@@ -438,7 +441,7 @@ func clonedJailConfigLines(detail JailDetail, newName, destination, newFstabPath
 			continue
 		}
 		trimmed = strings.TrimSuffix(trimmed, ";")
-		if key, _, ok := strings.Cut(trimmed, "="); ok {
+		if key, value, ok := strings.Cut(trimmed, "="); ok {
 			key = strings.TrimSpace(key)
 			switch key {
 			case "path":
@@ -453,7 +456,34 @@ func clonedJailConfigLines(detail JailDetail, newName, destination, newFstabPath
 					lines = append(lines, fmt.Sprintf("  mount.fstab = %q;", newFstabPath))
 				}
 				continue
+			case "exec.consolelog":
+				current := strings.Trim(strings.TrimSpace(strings.TrimSuffix(value, ";")), `"`)
+				if oldName != "" && strings.Contains(current, oldName) {
+					current = strings.ReplaceAll(current, oldName, newName)
+				}
+				if current == "" {
+					current = fmt.Sprintf("/var/log/jail_console_%s.log", newName)
+				}
+				lines = append(lines, fmt.Sprintf("  exec.consolelog = %q;", current))
+				continue
+			case "vnet.interface":
+				if oldEpair != "" && strings.Contains(raw, oldEpair) {
+					lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+					continue
+				}
 			}
+		}
+		if oldEpair != "" && strings.Contains(trimmed, "exec.prestart") {
+			lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+			continue
+		}
+		if oldEpair != "" && strings.Contains(trimmed, "exec.start") {
+			lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+			continue
+		}
+		if oldEpair != "" && strings.Contains(trimmed, "exec.poststop") {
+			lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+			continue
 		}
 		lines = append(lines, raw)
 	}

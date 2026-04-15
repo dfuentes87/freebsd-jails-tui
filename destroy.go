@@ -32,12 +32,21 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 	result := JailDestroyResult{Name: strings.TrimSpace(target.Name)}
 	logs := make([]string, 0, 32)
 	var persistentRctlCleanup func()
+	stopped := false
+	payloadRemoved := false
 	logf := func(format string, args ...any) {
 		logs = append(logs, fmt.Sprintf(format, args...))
 	}
 	fail := func(err error) JailDestroyResult {
 		if persistentRctlCleanup != nil {
 			persistentRctlCleanup()
+		}
+		if stopped && !payloadRemoved {
+			if _, restartErr := runLoggedCommand(context.Background(), &logs, "service", "jail", "start", result.Name); restartErr != nil {
+				logs = append(logs, "rollback warning: failed to restart jail after destroy error: "+restartErr.Error())
+			} else {
+				logs = append(logs, "rollback: restarted jail after destroy error")
+			}
 		}
 		result.Logs = logs
 		result.Err = err
@@ -61,6 +70,9 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 		if err := validateFallbackDestroyPlan(plan); err != nil {
 			return fail(err)
 		}
+		if err := validateNonZFSDestroyPlan(plan); err != nil {
+			return fail(err)
+		}
 	}
 	if err := preflightDestroyPlan(plan); err != nil {
 		return fail(err)
@@ -78,6 +90,7 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 		if _, err := runLoggedCommand(context.Background(), &logs, "service", "jail", "stop", result.Name); err != nil {
 			return fail(fmt.Errorf("failed to stop jail %q: %w", result.Name, err))
 		}
+		stopped = true
 	}
 
 	removeJailRctlRules(context.Background(), result.Name, &logs)
@@ -95,6 +108,7 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 		if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", plan.ZFSDataset); err != nil {
 			return fail(fmt.Errorf("failed to destroy dataset %q: %w", plan.ZFSDataset, err))
 		}
+		payloadRemoved = true
 	} else if plan.JailPath != "" {
 		if err := clearDestroyPathFlags(plan.JailPath, &logs); err != nil {
 			return fail(err)
@@ -103,6 +117,7 @@ func ExecuteJailDestroy(target Jail) JailDestroyResult {
 		if err := os.RemoveAll(plan.JailPath); err != nil {
 			return fail(fmt.Errorf("failed to remove jail path %q: %w", plan.JailPath, err))
 		}
+		payloadRemoved = true
 	}
 
 	configRemoved := false
@@ -261,6 +276,28 @@ func validateFallbackDestroyPlan(plan jailDestroyPlan) error {
 		return fmt.Errorf("refusing fallback path destroy for %q: path is inside shared %q tree", jailPath, segments[0])
 	}
 
+	return nil
+}
+
+func validateNonZFSDestroyPlan(plan jailDestroyPlan) error {
+	if plan.JailPath == "" || plan.ZFSDataset != "" {
+		return nil
+	}
+
+	jailPath := filepath.Clean(strings.TrimSpace(plan.JailPath))
+	name := strings.TrimSpace(plan.Name)
+	if name == "" {
+		return fmt.Errorf("refusing path destroy for %q: jail name is empty", jailPath)
+	}
+	if filepath.Base(jailPath) != name {
+		return fmt.Errorf("refusing path destroy for %q: basename does not match jail name %q", jailPath, name)
+	}
+	for _, sharedRoot := range []string{"/usr/local/jails/media", "/usr/local/jails/templates"} {
+		sharedRoot = filepath.Clean(sharedRoot)
+		if jailPath == sharedRoot || strings.HasPrefix(jailPath, sharedRoot+string(os.PathSeparator)) {
+			return fmt.Errorf("refusing path destroy for %q: path is inside shared tree %q", jailPath, sharedRoot)
+		}
+	}
 	return nil
 }
 

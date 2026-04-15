@@ -673,8 +673,17 @@ func parseKVFields(line string) map[string]string {
 
 func extractJailBlock(content, jailName string) ([]string, bool) {
 	lines := strings.Split(content, "\n")
-	openPattern := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(jailName) + `\s*\{`)
-	start := -1
+	start, end, found := findJailBlockBounds(lines, jailName)
+	if !found || end < 0 {
+		return nil, false
+	}
+	return append([]string(nil), lines[start+1:end]...), true
+}
+
+func findJailBlockBounds(lines []string, jailName string) (start, end int, found bool) {
+	openPattern := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(strings.TrimSpace(jailName)) + `\s*\{`)
+	start = -1
+	end = -1
 	depth := 0
 
 	for idx, line := range lines {
@@ -682,27 +691,59 @@ func extractJailBlock(content, jailName string) ([]string, bool) {
 			continue
 		}
 		start = idx
-		depth = strings.Count(line, "{") - strings.Count(line, "}")
+		depth = braceDeltaIgnoringQuotesAndComments(line)
 		if depth <= 0 {
 			depth = 1
 		}
+		found = true
 		break
 	}
-	if start < 0 {
-		return nil, false
+	if !found {
+		return start, end, false
 	}
 
-	var block []string
 	for idx := start + 1; idx < len(lines); idx++ {
-		line := lines[idx]
-		nextDepth := depth + strings.Count(line, "{") - strings.Count(line, "}")
-		if nextDepth <= 0 {
-			break
+		depth += braceDeltaIgnoringQuotesAndComments(lines[idx])
+		if depth <= 0 {
+			end = idx
+			return start, end, true
 		}
-		block = append(block, line)
-		depth = nextDepth
 	}
-	return block, true
+	return start, end, true
+}
+
+func braceDeltaIgnoringQuotesAndComments(line string) int {
+	delta := 0
+	inQuotes := false
+	escaped := false
+	for idx := 0; idx < len(line); idx++ {
+		ch := line[idx]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inQuotes && ch == '\\' {
+			escaped = true
+			continue
+		}
+		switch ch {
+		case '"':
+			inQuotes = !inQuotes
+		case '#':
+			if !inQuotes {
+				return delta
+			}
+		case '{':
+			if !inQuotes {
+				delta++
+			}
+		case '}':
+			if !inQuotes {
+				delta--
+			}
+		}
+	}
+	return delta
 }
 
 func parseJailBlockLines(lines []string) (map[string]string, []string) {
