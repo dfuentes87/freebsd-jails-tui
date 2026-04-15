@@ -1039,7 +1039,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.notice = "Selection cleared."
 			return m, nil
 		}
-	case "space":
+	case "space", " ":
 		jail, ok := m.selectedJail()
 		if !ok {
 			return m, nil
@@ -1153,7 +1153,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "space":
+	case "space", " ":
 		if m.detailNoteMode {
 			m.appendDetailNoteInput(" ")
 			return m, nil
@@ -1514,7 +1514,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "space":
+	case "space", " ":
 		if !m.wizardApplying && !m.wizard.isConfirmationStep() {
 			if field, ok := m.wizard.activeField(); ok && field.ID == "note" {
 				m.wizard.appendToActive(" ")
