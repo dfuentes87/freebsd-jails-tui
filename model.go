@@ -1153,6 +1153,11 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "space":
+		if m.detailNoteMode {
+			m.appendDetailNoteInput(" ")
+			return m, nil
+		}
 	case "esc", "left":
 		if m.detailNoteMode {
 			m.detailNoteMode = false
@@ -1523,6 +1528,14 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "space":
+		if !m.wizardApplying && !m.wizard.isConfirmationStep() {
+			if field, ok := m.wizard.activeField(); ok && field.ID == "note" {
+				m.wizard.appendToActive(" ")
+				m.boundWizardScroll()
+				return m, nil
+			}
+		}
 	case "c", "C":
 		if m.wizardApplying {
 			if m.wizardCancel != nil {
@@ -4097,13 +4110,15 @@ func (m model) detailLines(width int) []string {
 		[2]string{"Memory", memText},
 		[2]string{"Path", m.detail.Path},
 		[2]string{"Hostname", m.detail.Hostname},
-		[2]string{"Note", valueOrDash(m.detail.Note)},
 	))
+	lines = append(lines, renderKeyValueLinesWithValueFallback(width, "",
+		[2]string{"Note", m.detail.Note},
+	)...)
 
 	if m.detailNoteMode || m.detailNoteSaving {
 		appendSectionWithStyle(&lines, width, detailSectionStyle, "Note editor")
-		lines = append(lines, renderKeyValueLines(width,
-			[2]string{"Note", valueOrDash(m.detailNoteInput)},
+		lines = append(lines, renderKeyValueLinesWithValueFallback(width, "",
+			[2]string{"Note", m.detailNoteInput},
 			[2]string{"Length", fmt.Sprintf("%d/%d", jailNoteLength(m.detailNoteInput), maxJailNoteLen)},
 		)...)
 		lines = append(lines, truncate("Press enter to save, esc to cancel, and leave the field blank to clear the note.", width))
@@ -4895,11 +4910,9 @@ func (m model) renderDetailPanel(width, height int) string {
 			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
 			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},
 		)...)
-		if strings.TrimSpace(j.Note) != "" {
-			lines = append(lines, renderKeyValueLines(max(12, width-2),
-				[2]string{"Note", j.Note},
-			)...)
-		}
+		lines = append(lines, renderKeyValueLinesWithValueFallback(max(12, width-2), "(no notes)",
+			[2]string{"Note", j.Note},
+		)...)
 		if strings.TrimSpace(j.QuotaUsage) != "" {
 			lines = append(lines, renderKeyValueLines(max(12, width-2),
 				[2]string{"Quota", j.QuotaUsage},
@@ -5070,35 +5083,47 @@ func appendWrappedStyledText(lines *[]string, width int, style lipgloss.Style, t
 }
 
 func renderKeyValueLines(width int, pairs ...[2]string) []string {
+	return renderKeyValueLinesWithValueFallback(width, "-", pairs...)
+}
+
+func renderKeyValueLinesWithValueFallback(width int, blankFallback string, pairs ...[2]string) []string {
 	labelWidth := 25
 	if width < 72 {
 		labelWidth = 20
 	}
-	return renderKeyValueLinesWithLabelWidth(width, labelWidth, pairs...)
+	return renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth, blankFallback, pairs...)
 }
 
 func renderKeyValueLinesWithLabelWidth(width, labelWidth int, pairs ...[2]string) []string {
+	return renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth, "-", pairs...)
+}
+
+func renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth int, blankFallback string, pairs ...[2]string) []string {
 	lines := make([]string, 0, len(pairs)*2)
 	for _, pair := range pairs {
-		lines = append(lines, renderKeyValue(width, labelWidth, pair[0], pair[1])...)
+		lines = append(lines, renderKeyValueWithFallback(width, labelWidth, pair[0], pair[1], blankFallback)...)
 	}
 	return lines
 }
 
 func renderKeyValue(width, labelWidth int, label, value string) []string {
+	return renderKeyValueWithFallback(width, labelWidth, label, value, "-")
+}
+
+func renderKeyValueWithFallback(width, labelWidth int, label, value, blankFallback string) []string {
 	label = strings.TrimSpace(label)
 	if label == "" {
-		return []string{truncate(valueOrDash(value), width)}
+		return []string{truncate(valueOrPlaceholder(value, blankFallback), width)}
 	}
 	if labelWidth < 8 {
 		labelWidth = 8
 	}
 	valueWidth := max(8, width-labelWidth-2)
-	wrapped := wrapText(valueOrDash(value), valueWidth)
+	wrapped := wrapText(valueOrPlaceholder(value, blankFallback), valueWidth)
 	prefix := fmt.Sprintf("%-*s", labelWidth, label+":")
 	lines := make([]string, 0, len(wrapped))
 	if len(wrapped) == 0 {
-		return []string{detailKeyStyle.Render(prefix) + " -"}
+		return []string{detailKeyStyle.Render(prefix) + " " + blankFallback}
 	}
 	lines = append(lines, detailKeyStyle.Render(prefix)+" "+wrapped[0])
 	continuation := strings.Repeat(" ", labelWidth+1)
