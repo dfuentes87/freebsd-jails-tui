@@ -315,7 +315,7 @@ func ensureDestinationJailPath(ctx context.Context, destination string, logs *[]
 		}
 		if existedEmpty {
 			return jailPath, func() {
-				*logs = append(*logs, "  rollback note: destination existed before create; leaving "+jailPath+" in place for manual review")
+				rollbackPreexistingEmptyDir(jailPath, logs)
 			}, nil
 		}
 		return jailPath, nil, nil
@@ -343,6 +343,18 @@ func ensureDestinationJailPath(ctx context.Context, destination string, logs *[]
 	if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
 		mountpoint = "/" + strings.Trim(destination, "/")
 	}
+	info, statErr := os.Stat(mountpoint)
+	mountExisted := statErr == nil && info.IsDir()
+	mountExistedEmpty := false
+	if mountExisted {
+		entries, readErr := os.ReadDir(mountpoint)
+		if readErr != nil {
+			return "", nil, fmt.Errorf("failed to inspect jail path %q: %w", mountpoint, readErr)
+		}
+		mountExistedEmpty = len(entries) == 0
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return "", nil, fmt.Errorf("failed to inspect jail path %q: %w", mountpoint, statErr)
+	}
 
 	*logs = append(*logs, fmt.Sprintf("$ mkdir -p %s", mountpoint))
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
@@ -353,6 +365,11 @@ func ensureDestinationJailPath(ctx context.Context, destination string, logs *[]
 			if _, err := runLoggedCommand(ctx, logs, "zfs", "destroy", "-r", destination); err != nil {
 				*logs = append(*logs, "  rollback warning: failed to destroy dataset "+destination+": "+err.Error())
 			}
+		}, nil
+	}
+	if mountExistedEmpty {
+		return mountpoint, func() {
+			rollbackPreexistingEmptyDir(mountpoint, logs)
 		}, nil
 	}
 	return mountpoint, nil, nil
@@ -991,6 +1008,16 @@ func ExecuteTemplateParentDatasetCreate(ctx context.Context, dataset, mountpoint
 		result.Logs = logs
 		return result
 	}
+	if zfsDatasetExists(result.Dataset) {
+		text := strings.TrimSpace(string(out))
+		if text == "" {
+			text = err.Error()
+		}
+		return fail(fmt.Errorf("failed to inspect mountpoint for existing dataset %q: %s", result.Dataset, text))
+	}
+	if result.Mountpoint, err = validateUnusedMountpointPath(result.Mountpoint, "parent mountpoint"); err != nil {
+		return fail(err)
+	}
 
 	if _, err := runLoggedCommand(ctx, &logs, "zfs", "create", "-o", "mountpoint="+result.Mountpoint, result.Dataset); err != nil {
 		return fail(fmt.Errorf("failed to create template parent dataset %q: %w", result.Dataset, err))
@@ -1539,6 +1566,15 @@ func clearDirectoryContents(path string, logs *[]string) error {
 	return nil
 }
 
+func rollbackPreexistingEmptyDir(path string, logs *[]string) {
+	if err := clearDestroyPathFlags(path, logs); err != nil {
+		*logs = append(*logs, "  rollback warning: "+err.Error())
+	}
+	if err := clearDirectoryContents(path, logs); err != nil {
+		*logs = append(*logs, "  rollback warning: "+err.Error())
+	}
+}
+
 func writeJailConfigFile(configPath string, lines []string, logs *[]string) error {
 	if _, err := os.Stat(configPath); err == nil {
 		return fmt.Errorf("config file %q already exists", configPath)
@@ -1717,28 +1753,36 @@ func runLoggedCommand(ctx context.Context, logs *[]string, name string, args ...
 	debugLog("Command", command)
 
 	cmd := exec.CommandContext(ctx, name, args...)
-
-	// Create pipes manually so we can close them if needed, avoiding hang on daemonization
-	outR, outW, err := os.Pipe()
+	tmp, err := os.CreateTemp("", "freebsd-jails-tui-cmd-*")
 	if err != nil {
-		return "", fmt.Errorf("pipe failed: %w", err)
+		return "", fmt.Errorf("temp file failed: %w", err)
 	}
-	defer outR.Close()
-	cmd.Stdout = outW
-	cmd.Stderr = outW
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	cmd.Stdout = tmp
+	cmd.Stderr = tmp
 
 	if err := cmd.Start(); err != nil {
-		outW.Close()
+		_ = tmp.Close()
 		return "", fmt.Errorf("%s: %w", command, err)
 	}
-
-	outW.Close() // Close write end in parent
-
-	// Read output asynchronously to prevent blocking
-	outputBytes, _ := io.ReadAll(outR)
+	waitErr := cmd.Wait()
+	closeErr := tmp.Close()
+	outputBytes, readErr := os.ReadFile(tmpPath)
+	if readErr != nil {
+		return "", fmt.Errorf("failed to read command output for %s: %w", command, readErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("failed to close command output for %s: %w", command, closeErr)
+	}
 	text := strings.TrimSpace(string(outputBytes))
-
-	err = cmd.Wait()
+	cleanup = false
+	_ = os.Remove(tmpPath)
 
 	if text != "" {
 		for _, line := range strings.Split(text, "\n") {
@@ -1746,8 +1790,8 @@ func runLoggedCommand(ctx context.Context, logs *[]string, name string, args ...
 			debugLog("Command", "  "+line)
 		}
 	}
-	if err != nil {
-		return text, fmt.Errorf("%s: %w", command, err)
+	if waitErr != nil {
+		return text, fmt.Errorf("%s: %w", command, waitErr)
 	}
 	return text, nil
 }
