@@ -1493,7 +1493,7 @@ func configureMountPoints(ctx context.Context, name, jailPath string, specs []mo
 		if spec.Source == "" {
 			continue
 		}
-		source, err := validateAccessibleAbsolutePath(spec.Source, "mount source")
+		source, err := validateAccessibleAbsoluteDirectory(spec.Source, "mount source")
 		if err != nil {
 			return "", err
 		}

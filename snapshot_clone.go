@@ -79,30 +79,15 @@ func InspectTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 		preview.Err = fmt.Errorf("select a snapshot from the current template dataset")
 		return preview
 	}
-	validatedName, err := validateTemplateRenameLeafName(preview.NewName)
+	validatedName, newDataset, newMountpoint, err := validateTemplateDatasetTarget(info.ParentDataset, info.ParentMountpoint, preview.NewName)
 	if err != nil {
 		preview.Err = err
 		return preview
 	}
 	preview.NewName = validatedName
 	preview.ReadonlyAfter = true
-	preview.NewDataset = info.ParentDataset + "/" + preview.NewName
-	preview.NewMountpoint = filepath.Join(info.ParentMountpoint, preview.NewName)
-	if preview.NewDataset, err = validateZFSDatasetName(preview.NewDataset, "template dataset"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if preview.NewMountpoint, err = validateAbsolutePath(preview.NewMountpoint, "template mountpoint"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if preview.NewMountpoint, err = validateUnusedMountpointPath(preview.NewMountpoint, "template mountpoint"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if zfsDatasetExists(preview.NewDataset) {
-		preview.Err = fmt.Errorf("template dataset %q already exists", preview.NewDataset)
-	}
+	preview.NewDataset = newDataset
+	preview.NewMountpoint = newMountpoint
 	return preview
 }
 

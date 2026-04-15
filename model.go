@@ -1349,33 +1349,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.wizard.thinDatasetMode {
-		switch msg.String() {
-		case "esc", "left":
-			if m.wizard.datasetCreateRunning {
-				return m, nil
-			}
-			m.wizard.endThinDatasetSelect()
-			m.wizard.message = "Thin template dataset selection canceled."
-			m.ensureWizardFieldVisible()
-			return m, nil
-		case "j", "down", "tab":
-			m.wizard.thinDatasetCursor++
-		case "k", "up", "shift+tab":
-			m.wizard.thinDatasetCursor--
-		case "g", "home":
-			m.wizard.thinDatasetCursor = 0
-		case "G", "end":
-			m.wizard.thinDatasetCursor = len(m.wizard.thinDatasetOpts) - 1
-		case "r", "R":
-			if m.wizard.datasetCreateRunning {
-				return m, nil
-			}
-			if err := m.wizard.beginThinDatasetSelect(); err != nil {
-				m.wizard.message = err.Error()
-				return m, nil
-			}
-			return m, nil
-		case "c", "C":
+		if msg.String() == "c" || msg.String() == "C" {
 			if m.wizard.datasetCreateRunning {
 				return m, nil
 			}
@@ -1390,7 +1364,30 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = screenTemplateDatasetCreate
 			m.templateCreate.loading = true
 			return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
-		case "enter":
+		}
+		action, handled := handleWizardSelectorNavigation(msg.String(), &m.wizard.thinDatasetCursor, len(m.wizard.thinDatasetOpts))
+		if !handled {
+			return m, nil
+		}
+		switch action {
+		case wizardSelectorActionCancel:
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
+			m.wizard.endThinDatasetSelect()
+			m.wizard.message = "Thin template dataset selection canceled."
+			m.ensureWizardFieldVisible()
+			return m, nil
+		case wizardSelectorActionRefresh:
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
+			if err := m.wizard.beginThinDatasetSelect(); err != nil {
+				m.wizard.message = err.Error()
+				return m, nil
+			}
+			return m, nil
+		case wizardSelectorActionSubmit:
 			if m.wizard.datasetCreateRunning {
 				return m, nil
 			}
@@ -1405,31 +1402,26 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureWizardFieldVisible()
 			return m, nil
 		}
-		m.wizard.boundThinDatasetCursor()
 		return m, nil
 	}
 	if m.wizard.userlandMode {
-		switch msg.String() {
-		case "esc", "left":
+		action, handled := handleWizardSelectorNavigation(msg.String(), &m.wizard.userlandCursor, len(m.wizard.userlandOpts))
+		if !handled {
+			return m, nil
+		}
+		switch action {
+		case wizardSelectorActionCancel:
 			m.wizard.endUserlandSelect()
 			m.wizard.message = "Userland selection canceled."
 			m.ensureWizardFieldVisible()
 			return m, nil
-		case "j", "down", "tab":
-			m.wizard.userlandCursor++
-		case "k", "up", "shift+tab":
-			m.wizard.userlandCursor--
-		case "g", "home":
-			m.wizard.userlandCursor = 0
-		case "G", "end":
-			m.wizard.userlandCursor = len(m.wizard.userlandOpts) - 1
-		case "r", "R":
+		case wizardSelectorActionRefresh:
 			if err := m.wizard.beginUserlandSelect(); err != nil {
 				m.wizard.message = err.Error()
 				return m, nil
 			}
 			return m, nil
-		case "enter":
+		case wizardSelectorActionSubmit:
 			option, ok := m.wizard.selectedUserlandOption()
 			if !ok {
 				m.wizard.message = "No userland option selected."
@@ -1441,7 +1433,6 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureWizardFieldVisible()
 			return m, nil
 		}
-		m.wizard.boundUserlandCursor()
 		return m, nil
 	}
 
@@ -1475,26 +1466,22 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.wizard.templateMode == wizardTemplateModeLoad {
-		switch msg.String() {
-		case "esc", "left":
+		action, handled := handleWizardSelectorNavigation(msg.String(), &m.wizard.templateCursor, len(m.wizard.templates))
+		if !handled {
+			return m, nil
+		}
+		switch action {
+		case wizardSelectorActionCancel:
 			m.wizard.endTemplateMode()
 			m.wizard.message = "Template load canceled."
 			return m, nil
-		case "j", "down", "tab":
-			m.wizard.templateCursor++
-		case "k", "up", "shift+tab":
-			m.wizard.templateCursor--
-		case "g", "home":
-			m.wizard.templateCursor = 0
-		case "G", "end":
-			m.wizard.templateCursor = len(m.wizard.templates) - 1
-		case "r", "R":
+		case wizardSelectorActionRefresh:
 			if err := m.wizard.beginTemplateLoad(); err != nil {
 				m.wizard.message = err.Error()
 				return m, nil
 			}
 			return m, nil
-		case "enter":
+		case wizardSelectorActionSubmit:
 			template, ok := m.wizard.selectedTemplate()
 			if !ok {
 				m.wizard.message = "No template selected."
@@ -1517,7 +1504,6 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureWizardFieldVisible()
 			return m, nil
 		}
-		m.wizard.boundTemplateCursor()
 		return m, nil
 	}
 
@@ -1700,6 +1686,38 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+type wizardSelectorAction int
+
+const (
+	wizardSelectorActionNone wizardSelectorAction = iota
+	wizardSelectorActionCancel
+	wizardSelectorActionRefresh
+	wizardSelectorActionSubmit
+)
+
+func handleWizardSelectorNavigation(key string, cursor *int, count int) (wizardSelectorAction, bool) {
+	switch key {
+	case "esc", "left":
+		return wizardSelectorActionCancel, true
+	case "j", "down", "tab":
+		*cursor = *cursor + 1
+	case "k", "up", "shift+tab":
+		*cursor = *cursor - 1
+	case "g", "home":
+		*cursor = 0
+	case "G", "end":
+		*cursor = count - 1
+	case "r", "R":
+		return wizardSelectorActionRefresh, true
+	case "enter":
+		return wizardSelectorActionSubmit, true
+	default:
+		return wizardSelectorActionNone, false
+	}
+	*cursor = boundSelectionCursor(*cursor, count)
+	return wizardSelectorActionNone, true
 }
 
 func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2908,6 +2926,33 @@ func wizardViewportBounds(totalLines, scroll, height int) (int, int) {
 	return scroll, end
 }
 
+func renderWizardSelectionList(width int, title string, labels []string, cursor int, emptyLines []string, previewTitle string, previewLines []string) []string {
+	lines := []string{sectionStyle.Render(title)}
+	if len(labels) == 0 {
+		lines = append(lines, emptyLines...)
+		return lines
+	}
+	cursor = boundSelectionCursor(cursor, len(labels))
+	for idx, label := range labels {
+		row := "  " + label
+		if idx == cursor {
+			row = truncate("> "+label, width)
+			row = selectedRowStyle.Width(max(1, width)).Render(row)
+			lines = append(lines, row)
+			continue
+		}
+		lines = append(lines, truncate(row, width))
+	}
+	if len(previewLines) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render(previewTitle))
+		for _, line := range previewLines {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	return lines
+}
+
 func (m model) renderTemplateDatasetCreateView() string {
 	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
@@ -3348,83 +3393,56 @@ func (m model) wizardLines(width int) []string {
 	}
 
 	if m.wizard.templateMode == wizardTemplateModeLoad {
-		lines = append(lines, sectionStyle.Render("Load Template"))
-		if len(m.wizard.templates) == 0 {
-			lines = append(lines, "No templates available.")
-			return lines
+		labels := make([]string, 0, len(m.wizard.templates))
+		for _, template := range m.wizard.templates {
+			labels = append(labels, template.Name)
 		}
-		for idx, template := range m.wizard.templates {
-			row := "  " + template.Name
-			if idx == m.wizard.templateCursor {
-				row = truncate("> "+template.Name, width)
-				row = selectedRowStyle.Width(max(1, width)).Render(row)
-				lines = append(lines, row)
-				continue
-			}
-			lines = append(lines, truncate(row, width))
-		}
+		previewLines := []string(nil)
 		if template, ok := m.wizard.selectedTemplate(); ok {
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Selected Template Preview"))
-			lines = append(lines, truncate("Name: "+template.Name, width))
-			lines = append(lines, truncate("Destination: "+template.Values.Dataset, width))
-			lines = append(lines, truncate("Template/Release: "+template.Values.TemplateRelease, width))
-			lines = append(lines, truncate("IPv4: "+template.Values.IP4, width))
+			previewLines = []string{
+				"Name: " + template.Name,
+				"Destination: " + template.Values.Dataset,
+				"Template/Release: " + template.Values.TemplateRelease,
+				"IPv4: " + template.Values.IP4,
+			}
 		}
-		return lines
+		return renderWizardSelectionList(width, "Load Template", labels, m.wizard.templateCursor, []string{"No templates available."}, "Selected Template Preview", previewLines)
 	}
 
 	if m.wizard.userlandMode {
-		lines = append(lines, sectionStyle.Render("Select Userland Source"))
-		if len(m.wizard.userlandOpts) == 0 {
-			lines = append(lines, "No userland options found.")
-			return lines
+		labels := make([]string, 0, len(m.wizard.userlandOpts))
+		for _, option := range m.wizard.userlandOpts {
+			labels = append(labels, option.Label)
 		}
-		for idx, option := range m.wizard.userlandOpts {
-			row := "  " + option.Label
-			if idx == m.wizard.userlandCursor {
-				row = truncate("> "+option.Label, width)
-				row = selectedRowStyle.Width(max(1, width)).Render(row)
-				lines = append(lines, row)
-				continue
-			}
-			lines = append(lines, truncate(row, width))
-		}
+		previewLines := []string(nil)
 		if option, ok := m.wizard.selectedUserlandOption(); ok {
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Selected Value"))
-			lines = append(lines, truncate(option.Value, width))
-			lines = append(lines, truncate("Tip: type a custom https URL directly in Template/Release for custom download.", width))
+			previewLines = []string{
+				option.Value,
+				"Tip: type a custom https URL directly in Template/Release for custom download.",
+			}
 		}
-		return lines
+		return renderWizardSelectionList(width, "Select Userland Source", labels, m.wizard.userlandCursor, []string{"No userland options found."}, "Selected Value", previewLines)
 	}
 
 	if m.wizard.thinDatasetMode {
-		lines = append(lines, sectionStyle.Render("Select Thin Template Dataset"))
-		if len(m.wizard.thinDatasetOpts) == 0 {
-			lines = append(lines, "No thin template datasets found.")
-			lines = append(lines, "")
-			lines = append(lines, truncate("Press c to create a template dataset from the current Template/Release value.", width))
-			return lines
+		labels := make([]string, 0, len(m.wizard.thinDatasetOpts))
+		for _, option := range m.wizard.thinDatasetOpts {
+			labels = append(labels, option.Label)
 		}
-		for idx, option := range m.wizard.thinDatasetOpts {
-			row := "  " + option.Label
-			if idx == m.wizard.thinDatasetCursor {
-				row = truncate("> "+option.Label, width)
-				row = selectedRowStyle.Width(max(1, width)).Render(row)
-				lines = append(lines, row)
-				continue
-			}
-			lines = append(lines, truncate(row, width))
+		emptyLines := []string{
+			"No thin template datasets found.",
+			"",
+			truncate("Press c to create a template dataset from the current Template/Release value.", width),
 		}
+		previewLines := []string(nil)
 		if option, ok := m.wizard.selectedThinDatasetOption(); ok {
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Selected Value"))
-			lines = append(lines, truncate(option.Value, width))
-			lines = append(lines, truncate("Thin jails require an extracted template dataset mountpoint, not a release tag or archive.", width))
-			lines = append(lines, truncate("Press c to create a new template dataset from the current Template/Release value.", width))
+			previewLines = []string{
+				option.Value,
+				"Thin jails require an extracted template dataset mountpoint, not a release tag or archive.",
+				"Press c to create a new template dataset from the current Template/Release value.",
+			}
 		}
-		return lines
+		return renderWizardSelectionList(width, "Select Thin Template Dataset", labels, m.wizard.thinDatasetCursor, emptyLines, "Selected Value", previewLines)
 	}
 
 	if m.wizard.isConfirmationStep() {

@@ -331,6 +331,19 @@ func (w *jailCreationWizard) beginThinDatasetSelect() error {
 	return nil
 }
 
+func boundSelectionCursor(cursor, count int) int {
+	if count <= 0 {
+		return 0
+	}
+	if cursor < 0 {
+		return 0
+	}
+	if cursor >= count {
+		return count - 1
+	}
+	return cursor
+}
+
 func (w *jailCreationWizard) endThinDatasetSelect() {
 	w.thinDatasetMode = false
 	w.thinDatasetOpts = nil
@@ -339,16 +352,7 @@ func (w *jailCreationWizard) endThinDatasetSelect() {
 }
 
 func (w *jailCreationWizard) boundUserlandCursor() {
-	if len(w.userlandOpts) == 0 {
-		w.userlandCursor = 0
-		return
-	}
-	if w.userlandCursor < 0 {
-		w.userlandCursor = 0
-	}
-	if w.userlandCursor >= len(w.userlandOpts) {
-		w.userlandCursor = len(w.userlandOpts) - 1
-	}
+	w.userlandCursor = boundSelectionCursor(w.userlandCursor, len(w.userlandOpts))
 }
 
 func (w *jailCreationWizard) selectedUserlandOption() (userlandOption, bool) {
@@ -360,16 +364,7 @@ func (w *jailCreationWizard) selectedUserlandOption() (userlandOption, bool) {
 }
 
 func (w *jailCreationWizard) boundThinDatasetCursor() {
-	if len(w.thinDatasetOpts) == 0 {
-		w.thinDatasetCursor = 0
-		return
-	}
-	if w.thinDatasetCursor < 0 {
-		w.thinDatasetCursor = 0
-	}
-	if w.thinDatasetCursor >= len(w.thinDatasetOpts) {
-		w.thinDatasetCursor = len(w.thinDatasetOpts) - 1
-	}
+	w.thinDatasetCursor = boundSelectionCursor(w.thinDatasetCursor, len(w.thinDatasetOpts))
 }
 
 func (w *jailCreationWizard) selectedThinDatasetOption() (templateDatasetOption, bool) {
@@ -389,16 +384,7 @@ func (w *jailCreationWizard) selectedTemplate() (wizardTemplate, bool) {
 }
 
 func (w *jailCreationWizard) boundTemplateCursor() {
-	if len(w.templates) == 0 {
-		w.templateCursor = 0
-		return
-	}
-	if w.templateCursor < 0 {
-		w.templateCursor = 0
-	}
-	if w.templateCursor >= len(w.templates) {
-		w.templateCursor = len(w.templates) - 1
-	}
+	w.templateCursor = boundSelectionCursor(w.templateCursor, len(w.templates))
 }
 
 func (w *jailCreationWizard) appendTemplateInput(input string) {
@@ -1028,7 +1014,7 @@ func validateMountPointInput(raw string) error {
 			if source == "" {
 				return fmt.Errorf("mount source is required before ':'")
 			}
-			cleanSource, err := validateAccessibleAbsolutePath(source, "mount source")
+			cleanSource, err := validateAccessibleAbsoluteDirectory(source, "mount source")
 			if err != nil {
 				return err
 			}
