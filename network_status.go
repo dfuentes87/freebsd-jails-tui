@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -550,7 +552,7 @@ func networkWizardPrereqLines(prereqs NetworkWizardPrereqs) []string {
 	return lines
 }
 
-func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), error) {
+func ensureHostNetworkReady(ctx context.Context, values jailWizardValues, logs *[]string) (func(), error) {
 	prereqs := collectNetworkWizardPrereqs(values)
 	for _, warning := range prereqs.Warnings {
 		*logs = append(*logs, "network preflight: "+warning)
@@ -567,7 +569,7 @@ func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), er
 	}
 	var cleanups []func()
 	if prereqs.HostSetup == "persistent" {
-		persistCleanup, err := ensurePersistentVNETHostConfig(values, logs)
+		persistCleanup, err := ensurePersistentVNETHostConfig(ctx, values, logs)
 		if err != nil {
 			return nil, err
 		}
@@ -575,7 +577,7 @@ func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), er
 			cleanups = append(cleanups, persistCleanup)
 		}
 	}
-	runtimeCleanup, err := ensureVNETHostReady(prereqs, logs)
+	runtimeCleanup, err := ensureVNETHostReady(ctx, prereqs, logs)
 	if err != nil {
 		for idx := len(cleanups) - 1; idx >= 0; idx-- {
 			cleanups[idx]()
@@ -595,7 +597,7 @@ func ensureHostNetworkReady(values jailWizardValues, logs *[]string) (func(), er
 	}, nil
 }
 
-func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), error) {
+func ensureVNETHostReady(ctx context.Context, prereqs NetworkWizardPrereqs, logs *[]string) (func(), error) {
 	if strings.TrimSpace(prereqs.Bridge) == "" {
 		return nil, fmt.Errorf("bridge is required for vnet jails")
 	}
@@ -603,7 +605,7 @@ func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), 
 	createdBridge := false
 	attachedUplink := false
 	if prereqs.BridgeCreateNeeded {
-		if out, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "create"); err != nil {
+		if out, err := runLoggedCommand(ctx, logs, "ifconfig", prereqs.Bridge, "create"); err != nil {
 			if !strings.Contains(strings.ToLower(out), "file exists") {
 				return nil, fmt.Errorf("failed to create bridge %q: %w", prereqs.Bridge, err)
 			}
@@ -611,11 +613,11 @@ func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), 
 			createdBridge = true
 		}
 	}
-	if _, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "up"); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "ifconfig", prereqs.Bridge, "up"); err != nil {
 		return nil, fmt.Errorf("failed to bring bridge %q up: %w", prereqs.Bridge, err)
 	}
 	if prereqs.UplinkAttachNeeded && strings.TrimSpace(prereqs.Uplink) != "" {
-		if out, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "addm", prereqs.Uplink, "up"); err != nil {
+		if out, err := runLoggedCommand(ctx, logs, "ifconfig", prereqs.Bridge, "addm", prereqs.Uplink, "up"); err != nil {
 			if !strings.Contains(strings.ToLower(out), "file exists") {
 				return nil, fmt.Errorf("failed to attach uplink %q to bridge %q: %w", prereqs.Uplink, prereqs.Bridge, err)
 			}
@@ -626,12 +628,12 @@ func ensureVNETHostReady(prereqs NetworkWizardPrereqs, logs *[]string) (func(), 
 
 	return func() {
 		if attachedUplink && !createdBridge {
-			if _, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "deletem", prereqs.Uplink); err != nil {
+			if _, err := runLoggedCommand(context.Background(), logs, "ifconfig", prereqs.Bridge, "deletem", prereqs.Uplink); err != nil {
 				*logs = append(*logs, fmt.Sprintf("  rollback warning: failed to detach uplink %q from bridge %q: %v", prereqs.Uplink, prereqs.Bridge, err))
 			}
 		}
 		if createdBridge {
-			if _, err := runLoggedCommand(logs, "ifconfig", prereqs.Bridge, "destroy"); err != nil {
+			if _, err := runLoggedCommand(context.Background(), logs, "ifconfig", prereqs.Bridge, "destroy"); err != nil {
 				*logs = append(*logs, fmt.Sprintf("  rollback warning: failed to destroy bridge %q: %v", prereqs.Bridge, err))
 			}
 		}
@@ -678,7 +680,6 @@ func collectPersistentVNETRCConfDrift(values jailWizardValues) ([]string, []stri
 
 	bridge := strings.TrimSpace(values.Bridge)
 	uplink := strings.TrimSpace(values.Uplink)
-	router := strings.TrimSpace(values.DefaultRouter)
 
 	clonedValue, err := readRCConfValue("cloned_interfaces")
 	if err != nil {
@@ -710,17 +711,6 @@ func collectPersistentVNETRCConfDrift(values jailWizardValues) ([]string, []stri
 		}
 	}
 
-	if router != "" {
-		routerValue, err := readRCConfValue("defaultrouter")
-		if err != nil {
-			errors = append(errors, "failed to inspect rc.conf defaultrouter: "+err.Error())
-		} else if strings.TrimSpace(routerValue) == "" {
-			warnings = append(warnings, fmt.Sprintf("rc.conf defaultrouter is missing; persistent setup will write %q", router))
-		} else if strings.TrimSpace(routerValue) != router {
-			errors = append(errors, fmt.Sprintf("rc.conf defaultrouter is %q, expected %q for persistent setup", routerValue, router))
-		}
-	}
-
 	return uniqueStrings(warnings), uniqueStrings(errors)
 }
 
@@ -732,7 +722,7 @@ func persistentBridgeRCValue(values jailWizardValues) string {
 	return fmt.Sprintf("addm %s up", uplink)
 }
 
-func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (func(), error) {
+func ensurePersistentVNETHostConfig(ctx context.Context, values jailWizardValues, logs *[]string) (func(), error) {
 	warnings, errors := collectPersistentVNETRCConfDrift(values)
 	for _, warning := range warnings {
 		*logs = append(*logs, "network rc.conf: "+warning)
@@ -741,26 +731,62 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 		return nil, fmt.Errorf("%s", errors[0])
 	}
 
-	restoreActions := make([]func(), 0, 4)
+	type rcConfBackup struct {
+		path       string
+		existed    bool
+		fileBackup *fileMutationBackup
+	}
 	backupPaths := []string{"/etc/rc.conf", "/etc/rc.conf.local"}
-	for _, path := range backupPaths {
-		if _, err := backupFileForMutation(path, "vnet-host-rcconf", logs); err != nil {
-			return nil, err
+	backups := make([]rcConfBackup, 0, len(backupPaths))
+	backupsReady := false
+	mutated := false
+
+	ensureBackups := func() error {
+		if backupsReady {
+			return nil
 		}
+		for _, path := range backupPaths {
+			_, statErr := os.Stat(path)
+			existed := statErr == nil
+			if statErr != nil && !os.IsNotExist(statErr) {
+				return fmt.Errorf("failed to inspect %s before persistent VNET update: %w", path, statErr)
+			}
+			backup, err := backupFileForMutation(path, "vnet-host-rcconf", logs)
+			if err != nil {
+				return err
+			}
+			backups = append(backups, rcConfBackup{
+				path:       path,
+				existed:    existed,
+				fileBackup: backup,
+			})
+		}
+		backupsReady = true
+		return nil
 	}
 
-	restoreKey := func(key, oldValue string) func() {
-		return func() {
-			var err error
-			if strings.TrimSpace(oldValue) == "" {
-				_, err = runLoggedCommand(logs, "sysrc", "-x", key)
-			} else {
-				_, err = runLoggedCommand(logs, "sysrc", key+"="+oldValue)
+	restoreBackups := func() {
+		if !mutated {
+			return
+		}
+		for idx := len(backups) - 1; idx >= 0; idx-- {
+			backup := backups[idx]
+			if backup.fileBackup != nil {
+				if err := restoreFileMutationBackup(backup.fileBackup, logs); err != nil {
+					*logs = append(*logs, "rollback warning: "+err.Error())
+				}
+				continue
 			}
-			if err != nil {
-				*logs = append(*logs, fmt.Sprintf("  rollback warning: failed to restore %s: %v", key, err))
+			if !backup.existed {
+				if err := removeFileIfExists(backup.path, logs); err != nil {
+					*logs = append(*logs, "rollback warning: "+err.Error())
+				}
 			}
 		}
+	}
+	fail := func(err error) (func(), error) {
+		restoreBackups()
+		return nil, err
 	}
 
 	clonedOld, err := readRCConfValue("cloned_interfaces")
@@ -769,58 +795,56 @@ func ensurePersistentVNETHostConfig(values jailWizardValues, logs *[]string) (fu
 	}
 	newCloned := formatJailListValue(applyJailListPosition(parseJailListValue(clonedOld), strings.TrimSpace(values.Bridge), 0))
 	if strings.TrimSpace(newCloned) != strings.TrimSpace(clonedOld) {
-		restoreActions = append(restoreActions, restoreKey("cloned_interfaces", clonedOld))
-		if _, err := runLoggedCommand(logs, "sysrc", "cloned_interfaces="+newCloned); err != nil {
-			return nil, fmt.Errorf("failed to update cloned_interfaces: %w", err)
+		if err := ensureBackups(); err != nil {
+			return nil, err
 		}
+		if _, err := runLoggedCommand(ctx, logs, "sysrc", "cloned_interfaces="+newCloned); err != nil {
+			return fail(fmt.Errorf("failed to update cloned_interfaces: %w", err))
+		}
+		mutated = true
 	}
 
 	bridgeKey := "ifconfig_" + strings.TrimSpace(values.Bridge)
 	bridgeOld, err := readRCConfValue(bridgeKey)
 	if err != nil {
+		if mutated {
+			return fail(err)
+		}
 		return nil, err
 	}
 	desiredBridge := persistentBridgeRCValue(values)
 	if strings.TrimSpace(bridgeOld) != desiredBridge {
-		restoreActions = append(restoreActions, restoreKey(bridgeKey, bridgeOld))
-		if _, err := runLoggedCommand(logs, "sysrc", bridgeKey+"="+desiredBridge); err != nil {
-			return nil, fmt.Errorf("failed to update %s: %w", bridgeKey, err)
+		if err := ensureBackups(); err != nil {
+			return nil, err
 		}
+		if _, err := runLoggedCommand(ctx, logs, "sysrc", bridgeKey+"="+desiredBridge); err != nil {
+			return fail(fmt.Errorf("failed to update %s: %w", bridgeKey, err))
+		}
+		mutated = true
 	}
 
 	if uplink := strings.TrimSpace(values.Uplink); uplink != "" {
 		uplinkKey := "ifconfig_" + uplink
 		uplinkOld, err := readRCConfValue(uplinkKey)
 		if err != nil {
+			if mutated {
+				return fail(err)
+			}
 			return nil, err
 		}
 		if strings.TrimSpace(uplinkOld) != "up" {
-			restoreActions = append(restoreActions, restoreKey(uplinkKey, uplinkOld))
-			if _, err := runLoggedCommand(logs, "sysrc", uplinkKey+"=up"); err != nil {
-				return nil, fmt.Errorf("failed to update %s: %w", uplinkKey, err)
+			if err := ensureBackups(); err != nil {
+				return nil, err
 			}
+			if _, err := runLoggedCommand(ctx, logs, "sysrc", uplinkKey+"=up"); err != nil {
+				return fail(fmt.Errorf("failed to update %s: %w", uplinkKey, err))
+			}
+			mutated = true
 		}
 	}
 
-	if router := strings.TrimSpace(values.DefaultRouter); router != "" {
-		routerOld, err := readRCConfValue("defaultrouter")
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(routerOld) != router {
-			restoreActions = append(restoreActions, restoreKey("defaultrouter", routerOld))
-			if _, err := runLoggedCommand(logs, "sysrc", "defaultrouter="+router); err != nil {
-				return nil, fmt.Errorf("failed to update defaultrouter: %w", err)
-			}
-		}
-	}
-
-	if len(restoreActions) == 0 {
+	if !mutated {
 		return nil, nil
 	}
-	return func() {
-		for idx := len(restoreActions) - 1; idx >= 0; idx-- {
-			restoreActions[idx]()
-		}
-	}, nil
+	return restoreBackups, nil
 }

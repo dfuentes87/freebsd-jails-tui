@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"fmt"
@@ -41,7 +42,7 @@ func ExecuteJailServiceAction(target Jail, action string) jailServiceResult {
 	if result.Name == "" {
 		return fail(fmt.Errorf("jail name is required"))
 	}
-	if result.Action != "start" && result.Action != "stop" {
+	if result.Action != "start" && result.Action != "stop" && result.Action != "restart" {
 		return fail(fmt.Errorf("unsupported jail action %q", result.Action))
 	}
 
@@ -94,15 +95,26 @@ func ExecuteLinuxBootstrapAction(detail JailDetail) linuxBootstrapResult {
 
 	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
 	values.LinuxBootstrap = "auto"
-	if err := preflightLinuxBootstrap(values, result.Name, &logs); err != nil {
+	if err := preflightLinuxBootstrap(context.Background(), values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
-	if err := bootstrapLinuxUserland(values, result.Name, &logs); err != nil {
+	if err := bootstrapLinuxUserland(context.Background(), values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
 
 	result.Logs = logs
 	return result
+}
+
+// ExecuteBulkJailServiceAction runs the given action on each target sequentially.
+// action must be "start", "stop", or "restart".
+// Each target is processed independently; errors do not abort the remaining targets.
+func ExecuteBulkJailServiceAction(targets []Jail, action string) []jailServiceResult {
+	results := make([]jailServiceResult, 0, len(targets))
+	for _, t := range targets {
+		results = append(results, ExecuteJailServiceAction(t, action))
+	}
+	return results
 }
 
 func detailLooksLikeLinuxJail(detail JailDetail) bool {

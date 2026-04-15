@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -15,15 +16,20 @@ import (
 const pollInterval = 2 * time.Second
 
 var (
+	headerBarStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("235"))
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("39")).
+			Background(lipgloss.Color("235")).
 			Padding(0, 1)
 	summaryStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("248"))
+			Foreground(lipgloss.Color("248")).
+			Background(lipgloss.Color("235"))
 	panelTitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("45"))
+			Foreground(lipgloss.Color("45")).
+			Underline(true)
 	selectedRowStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("230")).
 				Background(lipgloss.Color("24"))
@@ -38,10 +44,25 @@ var (
 			Foreground(lipgloss.Color("45"))
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("244")).
+			Background(lipgloss.Color("235")).
 			Padding(0, 1)
+	helpTabStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("248")).
+			Background(lipgloss.Color("236")).
+			Padding(0, 1)
+	helpTabActiveStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("24")).
+				Padding(0, 1)
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("45"))
+			Foreground(lipgloss.Color("33"))
+	detailSectionStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("33"))
+	helpNoteStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244"))
 	wizardActionStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("230")).
@@ -74,8 +95,17 @@ type jailServiceApplyMsg struct {
 	result jailServiceResult
 }
 
+type bulkServiceApplyMsg struct {
+	results []jailServiceResult
+	action  string
+}
+
 type linuxBootstrapApplyMsg struct {
 	result linuxBootstrapResult
+}
+
+type jailNoteApplyMsg struct {
+	result JailNoteUpdateResult
 }
 
 type templateDatasetApplyMsg struct {
@@ -105,6 +135,10 @@ type templateSnapshotCloneApplyMsg struct {
 	result TemplateDatasetSnapshotCloneResult
 }
 
+type templateSnapshotDestroyApplyMsg struct {
+	result TemplateDatasetSnapshotDestroyResult
+}
+
 type jailSnapshotCloneApplyMsg struct {
 	result JailSnapshotCloneResult
 }
@@ -131,6 +165,12 @@ type zfsPropertyApplyMsg struct {
 
 type tickMsg time.Time
 
+type downloadProgressMsg struct {
+	Read  int64
+	Total int64
+	Done  bool
+}
+
 type screenMode int
 
 const (
@@ -142,7 +182,37 @@ const (
 	screenZFSPanel
 	screenDestroyConfirm
 	screenHelp
+	screenUpgradeWizard
 )
+
+type helpTab int
+
+const (
+	helpTabOverview helpTab = iota
+	helpTabDashboard
+	helpTabCreate
+	helpTabZFS
+	helpTabUpgrade
+	helpTabSetup
+	helpTabCount
+)
+
+type helpShortcut struct {
+	Keys   string
+	Action string
+}
+
+type helpSection struct {
+	Title     string
+	Summary   string
+	Shortcuts []helpShortcut
+	Notes     []string
+}
+
+type helpTabContent struct {
+	Label    string
+	Sections []helpSection
+}
 
 type destroyState struct {
 	returnMode screenMode
@@ -162,36 +232,38 @@ const (
 	templateManagerModeRename
 	templateManagerModeDestroy
 	templateManagerModeClone
+	templateManagerModeSnapshotDestroy
 )
 
 type templateDatasetCreateState struct {
-	returnMode       screenMode
-	selectMode       bool
-	mode             templateManagerMode
-	items            []TemplateDatasetInfo
-	cursor           int
-	parent           *templateDatasetParent
-	loading          bool
-	sourceInput      string
-	preview          TemplateDatasetPreview
-	renameInput      string
-	renamePreview    TemplateDatasetRenamePreview
-	destroyPreview   TemplateDatasetDestroyPreview
-	cloneSnapshots   []ZFSSnapshot
-	cloneCursor      int
-	cloneName        string
-	clonePreview     TemplateDatasetSnapshotClonePreview
-	cloneLoading     bool
-	applying         bool
-	parentApplying   bool
-	logs             []string
-	message          string
-	parentDataset    string
-	parentMountpoint string
-	parentEdit       bool
-	parentField      int
-	parentCustom     bool
-	patchBase        string
+	returnMode             screenMode
+	selectMode             bool
+	mode                   templateManagerMode
+	items                  []TemplateDatasetInfo
+	cursor                 int
+	parent                 *templateDatasetParent
+	loading                bool
+	sourceInput            string
+	preview                TemplateDatasetPreview
+	renameInput            string
+	renamePreview          TemplateDatasetRenamePreview
+	destroyPreview         TemplateDatasetDestroyPreview
+	cloneSnapshots         []ZFSSnapshot
+	cloneCursor            int
+	cloneName              string
+	clonePreview           TemplateDatasetSnapshotClonePreview
+	snapshotDestroyPreview TemplateDatasetSnapshotDestroyPreview
+	cloneLoading           bool
+	applying               bool
+	parentApplying         bool
+	logs                   []string
+	message                string
+	parentDataset          string
+	parentMountpoint       string
+	parentEdit             bool
+	parentField            int
+	parentCustom           bool
+	patchBase              string
 }
 
 type model struct {
@@ -210,17 +282,29 @@ type model struct {
 	detailLoading      bool
 	detailScroll       int
 	detailShowAdvanced bool
+	detailNoteMode     bool
+	detailNoteSaving   bool
+	detailNoteInput    string
 	detailNotice       string
 	wizardScroll       int
 	zfsPanel           zfsPanelState
 	wizard             jailCreationWizard
 	wizardApplying     bool
+	wizardCancel       context.CancelFunc
+	downloading        bool
+	downloadRead       int64
+	downloadTotal      int64
+	progressChan       chan downloadProgressMsg
 	templateCreate     templateDatasetCreateState
 	destroy            destroyState
 	initCheck          initialCheckState
 	helpReturnMode     screenMode
+	helpTab            helpTab
 	helpScroll         int
+	helpTabScrolls     []int
 	notice             string
+	selectedJails      map[string]struct{}
+	upgrade            upgradeState
 }
 
 func newModel() model {
@@ -234,6 +318,8 @@ func newModel() model {
 	}
 	m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 	m.templateCreate = newTemplateDatasetCreateState("", m.initCheck.status, screenDashboard, false)
+	m.helpTabScrolls = make([]int, int(helpTabCount))
+	m.selectedJails = make(map[string]struct{})
 	return m
 }
 
@@ -251,10 +337,28 @@ func detailCmd(jail Jail) tea.Cmd {
 	}
 }
 
-func createJailCmd(values jailWizardValues) tea.Cmd {
+func jailNoteUpdateCmd(detail JailDetail, note string) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteJailCreation(values)
+		result := ExecuteJailNoteUpdate(detail, note)
+		return jailNoteApplyMsg{result: result}
+	}
+}
+
+func createJailCmd(ctx context.Context, values jailWizardValues, progressChan chan<- downloadProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteJailCreation(ctx, values, progressChan)
+		close(progressChan)
 		return wizardApplyMsg{result: result}
+	}
+}
+
+func waitForProgress(c chan downloadProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-c
+		if !ok {
+			return downloadProgressMsg{Done: true}
+		}
+		return msg
 	}
 }
 
@@ -281,7 +385,7 @@ func linuxBootstrapCmd(detail JailDetail) tea.Cmd {
 
 func templateDatasetCreateCmd(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteTemplateDatasetCreateWithParent(sourceInput, parentOverride, patchPreference)
+		result := ExecuteTemplateDatasetCreateWithParent(context.Background(), sourceInput, parentOverride, patchPreference)
 		return templateDatasetApplyMsg{result: result}
 	}
 }
@@ -321,6 +425,13 @@ func templateSnapshotCloneCmd(dataset, snapshot, newName string, parentOverride 
 	}
 }
 
+func templateSnapshotDestroyCmd(dataset, snapshot string, parentOverride *templateDatasetParent) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteTemplateSnapshotDestroy(dataset, snapshot, parentOverride)
+		return templateSnapshotDestroyApplyMsg{result: result}
+	}
+}
+
 func jailSnapshotCloneCmd(detail JailDetail, snapshot, newName, destination string, writeConfig bool) tea.Cmd {
 	return func() tea.Msg {
 		result := ExecuteJailSnapshotClone(detail, snapshot, newName, destination, writeConfig)
@@ -330,7 +441,7 @@ func jailSnapshotCloneCmd(detail JailDetail, snapshot, newName, destination stri
 
 func templateParentCreateCmd(dataset, mountpoint string) tea.Cmd {
 	return func() tea.Msg {
-		result := ExecuteTemplateParentDatasetCreate(dataset, mountpoint)
+		result := ExecuteTemplateParentDatasetCreate(context.Background(), dataset, mountpoint)
 		return templateParentApplyMsg{result: result}
 	}
 }
@@ -339,6 +450,33 @@ func openZFSPanelCmd(target Jail) tea.Cmd {
 	return func() tea.Msg {
 		result := resolveZFSPanelTarget(target)
 		return zfsOpenMsg{result: result}
+	}
+}
+
+func bulkToggleServiceCmd(targets []Jail) tea.Cmd {
+	return func() tea.Msg {
+		results := make([]jailServiceResult, 0, len(targets))
+		for _, t := range targets {
+			action := "start"
+			if t.Running {
+				action = "stop"
+			}
+			results = append(results, ExecuteJailServiceAction(t, action))
+		}
+		return bulkServiceApplyMsg{results: results, action: "toggle"}
+	}
+}
+
+func bulkServiceCmd(targets []Jail, action string) tea.Cmd {
+	return func() tea.Msg {
+		results := ExecuteBulkJailServiceAction(targets, action)
+		return bulkServiceApplyMsg{results: results, action: action}
+	}
+}
+
+func upgradeJailCmd(target Jail, workflow upgradeWorkflow) tea.Cmd {
+	return func() tea.Msg {
+		return ExecuteJailUpgrade(target, workflow)
 	}
 }
 
@@ -378,6 +516,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.initCheck.loading = false
 		m.initCheck.status = msg.status
 		m.initCheck.err = msg.err
+		if strings.EqualFold(strings.TrimSpace(m.initCheck.message), "Refreshing checks...") {
+			m.initCheck.message = ""
+		}
 		m.initCheck.setPhaseFromStatus()
 		return m, nil
 	case initialActionMsg:
@@ -406,6 +547,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case jailDetailMsg:
 		m.detail = msg.detail
+		if !m.detailNoteMode {
+			m.detailNoteInput = msg.detail.Note
+		}
 		m.detailErr = msg.err
 		m.detailLoading = false
 		m.boundDetailScroll()
@@ -463,8 +607,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
+	case downloadProgressMsg:
+		if msg.Done {
+			m.downloading = false
+			return m, nil
+		}
+		m.downloading = true
+		m.downloadRead = msg.Read
+		m.downloadTotal = msg.Total
+		return m, waitForProgress(m.progressChan)
 	case wizardApplyMsg:
 		m.wizardApplying = false
+		m.downloading = false
 		m.wizard.setExecutionResult(msg.result)
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
@@ -493,15 +647,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.Err != nil {
 			m.err = msg.result.Err
 			m.notice = ""
+			if m.mode == screenJailDetail {
+				m.detailErr = msg.result.Err
+				m.detailNotice = ""
+			}
 			return m, pollCmd()
 		}
 		m.err = nil
 		actionWord := "started"
 		if msg.result.Action == "stop" {
 			actionWord = "stopped"
+		} else if msg.result.Action == "restart" {
+			actionWord = "restarted"
 		}
 		m.notice = fmt.Sprintf("Jail %s %s.", msg.result.Name, actionWord)
+		if m.mode == screenJailDetail {
+			m.detailNotice = fmt.Sprintf("Jail %s.", actionWord)
+			m.detailErr = nil
+		}
 		return m, pollCmd()
+	case bulkServiceApplyMsg:
+		var failed []string
+		var succeeded []string
+		for _, r := range msg.results {
+			if r.Err != nil {
+				failed = append(failed, r.Name+": "+r.Err.Error())
+			} else {
+				succeeded = append(succeeded, r.Name)
+			}
+		}
+		m.selectedJails = make(map[string]struct{})
+		if len(failed) > 0 {
+			m.err = fmt.Errorf("bulk %s errors: %s", msg.action, strings.Join(failed, "; "))
+			m.notice = ""
+		} else {
+			actionWord := msg.action
+			if actionWord == "toggle" {
+				actionWord = "start/stop applied"
+			} else {
+				actionWord += "ed"
+			}
+			m.err = nil
+			m.notice = fmt.Sprintf("%d jail(s): %s.", len(succeeded), actionWord)
+		}
+		return m, pollCmd()
+	case upgradeApplyMsg:
+		m.upgrade.applying = false
+		m.upgrade.logs = append([]string(nil), msg.logs...)
+		m.upgrade.err = msg.err
+		if msg.err != nil {
+			m.upgrade.message = "Upgrade failed. Review the output above."
+		} else {
+			m.upgrade.message = fmt.Sprintf("Upgrade completed for %s.", msg.name)
+		}
+		return m, nil
 	case linuxBootstrapApplyMsg:
 		if msg.result.Err != nil {
 			m.detailErr = msg.result.Err
@@ -520,6 +719,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.detailLoading = true
 		return m, detailCmd(jail)
+	case jailNoteApplyMsg:
+		m.detailNoteSaving = false
+		if msg.result.Err != nil {
+			m.detailErr = msg.result.Err
+			m.detailNotice = ""
+			m.detailNoteMode = true
+			return m, nil
+		}
+		m.detailErr = nil
+		m.detailNoteMode = false
+		m.detail.Note = msg.result.Note
+		if msg.result.Note == "" {
+			m.detailNotice = "Jail note cleared."
+		} else {
+			m.detailNotice = "Jail note updated."
+		}
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, pollCmd()
+		}
+		return m, tea.Batch(pollCmd(), detailCmd(jail))
 	case templateDatasetApplyMsg:
 		if m.mode == screenTemplateDatasetCreate {
 			m.templateCreate.applying = false
@@ -619,7 +839,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateCreate.cloneLoading = false
 		m.templateCreate.cloneSnapshots = append([]ZFSSnapshot(nil), msg.snapshots...)
 		m.templateCreate.boundCloneCursor()
-		m.templateCreate.refreshClonePreview()
+		if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+			m.templateCreate.refreshSnapshotDestroyPreview()
+		} else {
+			m.templateCreate.refreshClonePreview()
+		}
 		if msg.err != nil {
 			m.templateCreate.message = msg.err.Error()
 			return m, nil
@@ -643,6 +867,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateCreate.cloneName = ""
 		m.templateCreate.message = fmt.Sprintf("Template dataset cloned: %s", msg.result.Dataset)
 		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case templateSnapshotDestroyApplyMsg:
+		if m.mode != screenTemplateDatasetCreate {
+			return m, nil
+		}
+		m.templateCreate.applying = false
+		m.templateCreate.logs = append([]string(nil), msg.result.Logs...)
+		if msg.result.Err != nil {
+			m.templateCreate.message = msg.result.Err.Error()
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeClone
+		m.templateCreate.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
+		m.templateCreate.cloneLoading = true
+		m.templateCreate.message = fmt.Sprintf("Template snapshot destroyed: %s", msg.result.Snapshot)
+		return m, templateSnapshotListCmd(msg.result.Dataset)
 	case jailSnapshotCloneApplyMsg:
 		if m.mode != screenZFSPanel {
 			return m, nil
@@ -692,10 +931,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateHelpKeys(msg)
 		}
 		if (key == "?" || key == "h") && !m.isTextEntryMode() {
-			m.helpReturnMode = m.mode
-			m.helpScroll = 0
-			m.mode = screenHelp
+			m.openHelp(m.mode)
 			return m, nil
+		}
+		if m.mode == screenUpgradeWizard {
+			return m.updateUpgradeWizardKeys(msg)
 		}
 		if m.mode == screenDestroyConfirm {
 			return m.updateDestroyKeys(msg)
@@ -751,6 +991,8 @@ func (m model) isTextEntryMode() bool {
 		return m.templateCreate.mode == templateManagerModeCreate || m.templateCreate.mode == templateManagerModeRename || m.templateCreate.mode == templateManagerModeClone
 	case screenZFSPanel:
 		return m.zfsPanel.inputMode || m.zfsPanel.cloneMode
+	case screenJailDetail:
+		return m.detailNoteMode && !m.detailNoteSaving
 	default:
 		return false
 	}
@@ -791,7 +1033,41 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		m.err = nil
 		return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
+	case "esc":
+		if len(m.selectedJails) > 0 {
+			m.selectedJails = make(map[string]struct{})
+			m.notice = "Selection cleared."
+			return m, nil
+		}
+	case "space", " ":
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		if _, selected := m.selectedJails[jail.Name]; selected {
+			delete(m.selectedJails, jail.Name)
+		} else {
+			m.selectedJails[jail.Name] = struct{}{}
+		}
+	case "ctrl+a":
+		allSelected := len(m.snapshot.Jails) > 0
+		for _, j := range m.snapshot.Jails {
+			if _, ok := m.selectedJails[j.Name]; !ok {
+				allSelected = false
+				break
+			}
+		}
+		if allSelected {
+			m.selectedJails = make(map[string]struct{})
+		} else {
+			for _, j := range m.snapshot.Jails {
+				m.selectedJails[j.Name] = struct{}{}
+			}
+		}
 	case "s", "S":
+		if len(m.selectedJails) > 0 {
+			return m, bulkToggleServiceCmd(m.selectedJailList())
+		}
 		jail, ok := m.selectedJail()
 		if !ok {
 			return m, nil
@@ -801,6 +1077,23 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			action = "stop"
 		}
 		return m, jailServiceCmd(jail, action)
+	case "R":
+		if len(m.selectedJails) > 0 {
+			return m, bulkServiceCmd(m.selectedJailList(), "restart")
+		}
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		return m, jailServiceCmd(jail, "restart")
+	case "u", "U":
+		jail, ok := m.selectedJail()
+		if !ok {
+			return m, nil
+		}
+		m.upgrade = newUpgradeState(jail, screenDashboard)
+		m.mode = screenUpgradeWizard
+		return m, nil
 	case "z":
 		jail, ok := m.selectedJail()
 		if !ok {
@@ -826,6 +1119,9 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailLoading = true
 		m.detailScroll = 0
 		m.detailShowAdvanced = false
+		m.detailNoteMode = false
+		m.detailNoteSaving = false
+		m.detailNoteInput = ""
 		m.detailErr = nil
 		m.detailNotice = ""
 		m.detail = JailDetail{
@@ -833,6 +1129,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			JID:                   jail.JID,
 			Path:                  jail.Path,
 			Hostname:              jail.Hostname,
+			Note:                  jail.Note,
 			JLSFields:             map[string]string{},
 			RuntimeValues:         map[string]string{},
 			AdvancedRuntimeFields: map[string]string{},
@@ -847,23 +1144,101 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.detailNoteMode && !m.detailNoteSaving && msg.Type == tea.KeyRunes {
+		m.appendDetailNoteInput(string(msg.Runes))
+		return m, nil
+	}
+	if m.detailNoteSaving {
+		return m, nil
+	}
+
 	switch msg.String() {
-	case "esc", "backspace", "left":
+	case "space", " ":
+		if m.detailNoteMode {
+			m.appendDetailNoteInput(" ")
+			return m, nil
+		}
+	case "esc", "left":
+		if m.detailNoteMode {
+			m.detailNoteMode = false
+			m.detailNoteInput = ""
+			m.detailNotice = "Jail note edit canceled."
+			m.detailErr = nil
+			return m, nil
+		}
 		m.mode = screenDashboard
 		return m, nil
+	case "n", "N":
+		if m.detailNoteSaving {
+			return m, nil
+		}
+		if m.detailNoteMode {
+			return m, nil
+		}
+		m.detailNoteMode = true
+		m.detailNoteInput = m.detail.Note
+		m.detailNotice = ""
+		m.detailErr = nil
+		return m, nil
+	case "enter":
+		if !m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
+		note, err := normalizeJailNote(m.detailNoteInput)
+		if err != nil {
+			m.detailErr = err
+			m.detailNotice = ""
+			return m, nil
+		}
+		m.detailNoteInput = note
+		m.detailNoteSaving = true
+		m.detailErr = nil
+		m.detailNotice = "Saving jail note..."
+		return m, jailNoteUpdateCmd(m.detail, note)
+	case "delete":
+		if m.detailNoteMode && !m.detailNoteSaving {
+			m.backspaceDetailNoteInput()
+			return m, nil
+		}
 	case "j", "down":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll++
 	case "k", "up":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll--
 	case "g", "home":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll = 0
 	case "G", "end":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll = 1 << 30
 	case "pgdown":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll += m.detailBodyHeight()
 	case "pgup":
+		if m.detailNoteMode {
+			return m, nil
+		}
 		m.detailScroll -= m.detailBodyHeight()
+	case "backspace":
+		if m.detailNoteMode && !m.detailNoteSaving {
+			m.backspaceDetailNoteInput()
+			return m, nil
+		}
 	case "r":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		jail, ok := m.detailJail()
 		if !ok {
 			return m, nil
@@ -873,15 +1248,17 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = ""
 		return m, detailCmd(jail)
 	case "a", "A":
-		m.detailShowAdvanced = !m.detailShowAdvanced
-		if m.detailShowAdvanced {
-			m.detailNotice = "Showing advanced runtime parameters."
-		} else {
-			m.detailNotice = "Advanced runtime parameters hidden."
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
 		}
+		m.detailShowAdvanced = !m.detailShowAdvanced
+		m.detailNotice = ""
 		m.detailErr = nil
 		return m, nil
 	case "b", "B":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		if !detailLooksLikeLinuxJail(m.detail) {
 			m.detailErr = fmt.Errorf("linux bootstrap retry is only available for linux jails")
 			return m, nil
@@ -895,6 +1272,9 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = "Retrying Linux bootstrap..."
 		return m, linuxBootstrapCmd(m.detail)
 	case "z":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		if m.detail.ZFS == nil || strings.TrimSpace(m.detail.ZFS.Name) == "" {
 			m.detailErr = fmt.Errorf("no ZFS dataset detected for this jail")
 			return m, nil
@@ -902,7 +1282,32 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenZFSPanel
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail, m.detail)
 		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
+	case "R":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, nil
+		}
+		m.detailErr = nil
+		m.detailNotice = "Restarting jail..."
+		return m, jailServiceCmd(jail, "restart")
+	case "u", "U":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, nil
+		}
+		m.upgrade = newUpgradeState(jail, screenJailDetail)
+		m.mode = screenUpgradeWizard
+		return m, nil
 	case "x", "X":
+		if m.detailNoteMode || m.detailNoteSaving {
+			return m, nil
+		}
 		jail, ok := m.detailJail()
 		if !ok {
 			return m, nil
@@ -940,39 +1345,11 @@ func (m model) updateDestroyKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "?" {
-		m.helpReturnMode = m.mode
-		m.helpScroll = 0
-		m.mode = screenHelp
+		m.openHelp(m.mode)
 		return m, nil
 	}
 	if m.wizard.thinDatasetMode {
-		switch msg.String() {
-		case "esc", "left":
-			if m.wizard.datasetCreateRunning {
-				return m, nil
-			}
-			m.wizard.endThinDatasetSelect()
-			m.wizard.message = "Thin template dataset selection canceled."
-			m.ensureWizardFieldVisible()
-			return m, nil
-		case "j", "down", "tab":
-			m.wizard.thinDatasetCursor++
-		case "k", "up", "shift+tab":
-			m.wizard.thinDatasetCursor--
-		case "g", "home":
-			m.wizard.thinDatasetCursor = 0
-		case "G", "end":
-			m.wizard.thinDatasetCursor = len(m.wizard.thinDatasetOpts) - 1
-		case "r", "R":
-			if m.wizard.datasetCreateRunning {
-				return m, nil
-			}
-			if err := m.wizard.beginThinDatasetSelect(); err != nil {
-				m.wizard.message = err.Error()
-				return m, nil
-			}
-			return m, nil
-		case "c", "C":
+		if msg.String() == "c" || msg.String() == "C" {
 			if m.wizard.datasetCreateRunning {
 				return m, nil
 			}
@@ -987,7 +1364,30 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = screenTemplateDatasetCreate
 			m.templateCreate.loading = true
 			return m, templateManagerRefreshCmd(m.templateCreate.parentOverride())
-		case "enter":
+		}
+		action, handled := handleWizardSelectorNavigation(msg.String(), &m.wizard.thinDatasetCursor, len(m.wizard.thinDatasetOpts))
+		if !handled {
+			return m, nil
+		}
+		switch action {
+		case wizardSelectorActionCancel:
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
+			m.wizard.endThinDatasetSelect()
+			m.wizard.message = "Thin template dataset selection canceled."
+			m.ensureWizardFieldVisible()
+			return m, nil
+		case wizardSelectorActionRefresh:
+			if m.wizard.datasetCreateRunning {
+				return m, nil
+			}
+			if err := m.wizard.beginThinDatasetSelect(); err != nil {
+				m.wizard.message = err.Error()
+				return m, nil
+			}
+			return m, nil
+		case wizardSelectorActionSubmit:
 			if m.wizard.datasetCreateRunning {
 				return m, nil
 			}
@@ -1002,31 +1402,26 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureWizardFieldVisible()
 			return m, nil
 		}
-		m.wizard.boundThinDatasetCursor()
 		return m, nil
 	}
 	if m.wizard.userlandMode {
-		switch msg.String() {
-		case "esc", "left":
+		action, handled := handleWizardSelectorNavigation(msg.String(), &m.wizard.userlandCursor, len(m.wizard.userlandOpts))
+		if !handled {
+			return m, nil
+		}
+		switch action {
+		case wizardSelectorActionCancel:
 			m.wizard.endUserlandSelect()
 			m.wizard.message = "Userland selection canceled."
 			m.ensureWizardFieldVisible()
 			return m, nil
-		case "j", "down", "tab":
-			m.wizard.userlandCursor++
-		case "k", "up", "shift+tab":
-			m.wizard.userlandCursor--
-		case "g", "home":
-			m.wizard.userlandCursor = 0
-		case "G", "end":
-			m.wizard.userlandCursor = len(m.wizard.userlandOpts) - 1
-		case "r", "R":
+		case wizardSelectorActionRefresh:
 			if err := m.wizard.beginUserlandSelect(); err != nil {
 				m.wizard.message = err.Error()
 				return m, nil
 			}
 			return m, nil
-		case "enter":
+		case wizardSelectorActionSubmit:
 			option, ok := m.wizard.selectedUserlandOption()
 			if !ok {
 				m.wizard.message = "No userland option selected."
@@ -1038,7 +1433,6 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureWizardFieldVisible()
 			return m, nil
 		}
-		m.wizard.boundUserlandCursor()
 		return m, nil
 	}
 
@@ -1072,26 +1466,22 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.wizard.templateMode == wizardTemplateModeLoad {
-		switch msg.String() {
-		case "esc", "left":
+		action, handled := handleWizardSelectorNavigation(msg.String(), &m.wizard.templateCursor, len(m.wizard.templates))
+		if !handled {
+			return m, nil
+		}
+		switch action {
+		case wizardSelectorActionCancel:
 			m.wizard.endTemplateMode()
 			m.wizard.message = "Template load canceled."
 			return m, nil
-		case "j", "down", "tab":
-			m.wizard.templateCursor++
-		case "k", "up", "shift+tab":
-			m.wizard.templateCursor--
-		case "g", "home":
-			m.wizard.templateCursor = 0
-		case "G", "end":
-			m.wizard.templateCursor = len(m.wizard.templates) - 1
-		case "r", "R":
+		case wizardSelectorActionRefresh:
 			if err := m.wizard.beginTemplateLoad(); err != nil {
 				m.wizard.message = err.Error()
 				return m, nil
 			}
 			return m, nil
-		case "enter":
+		case wizardSelectorActionSubmit:
 			template, ok := m.wizard.selectedTemplate()
 			if !ok {
 				m.wizard.message = "No template selected."
@@ -1114,7 +1504,6 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureWizardFieldVisible()
 			return m, nil
 		}
-		m.wizard.boundTemplateCursor()
 		return m, nil
 	}
 
@@ -1125,6 +1514,23 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "space", " ":
+		if !m.wizardApplying && !m.wizard.isConfirmationStep() {
+			if field, ok := m.wizard.activeField(); ok && field.ID == "note" {
+				m.wizard.appendToActive(" ")
+				m.boundWizardScroll()
+				return m, nil
+			}
+		}
+	case "c", "C":
+		if m.wizardApplying {
+			if m.wizardCancel != nil {
+				m.wizardCancel()
+				m.wizard.message = "Canceling creation... (waiting for safe rollback)"
+			}
+			return m, nil
+		}
+		// otherwise allow typing 'c' in text fields? Wait, if it's KeyRunes it was already handled above.
 	case "esc":
 		if m.wizardApplying {
 			return m, nil
@@ -1247,11 +1653,21 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.ensureWizardFieldVisible()
 				return m, nil
 			}
+
 			m.wizard.clearExecutionResult()
 			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
-			return m, createJailCmd(m.wizard.values)
+			m.downloading = false
+			m.downloadRead = 0
+			m.downloadTotal = 0
+			m.progressChan = make(chan downloadProgressMsg, 100)
+			ctx, cancel := context.WithCancel(context.Background())
+			m.wizardCancel = cancel
+			return m, tea.Batch(
+				createJailCmd(ctx, m.wizard.values, m.progressChan),
+				waitForProgress(m.progressChan),
+			)
 		}
 		if m.wizardApplying {
 			return m, nil
@@ -1272,11 +1688,41 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+type wizardSelectorAction int
+
+const (
+	wizardSelectorActionNone wizardSelectorAction = iota
+	wizardSelectorActionCancel
+	wizardSelectorActionRefresh
+	wizardSelectorActionSubmit
+)
+
+func handleWizardSelectorNavigation(key string, cursor *int, count int) (wizardSelectorAction, bool) {
+	switch key {
+	case "esc", "left":
+		return wizardSelectorActionCancel, true
+	case "j", "down", "tab":
+		*cursor = *cursor + 1
+	case "k", "up", "shift+tab":
+		*cursor = *cursor - 1
+	case "g", "home":
+		*cursor = 0
+	case "G", "end":
+		*cursor = count - 1
+	case "r", "R":
+		return wizardSelectorActionRefresh, true
+	case "enter":
+		return wizardSelectorActionSubmit, true
+	default:
+		return wizardSelectorActionNone, false
+	}
+	*cursor = boundSelectionCursor(*cursor, count)
+	return wizardSelectorActionNone, true
+}
+
 func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "?" {
-		m.helpReturnMode = m.mode
-		m.helpScroll = 0
-		m.mode = screenHelp
+		m.openHelp(m.mode)
 		return m, nil
 	}
 
@@ -1308,6 +1754,12 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Template parent edit canceled."
 			return m, nil
 		}
+		if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+			m.templateCreate.mode = templateManagerModeClone
+			m.templateCreate.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
+			m.templateCreate.message = "Template snapshot destroy canceled."
+			return m, nil
+		}
 		if m.templateCreate.mode != templateManagerModeBrowse {
 			m.templateCreate.mode = templateManagerModeBrowse
 			m.templateCreate.message = "Template manager action canceled."
@@ -1327,10 +1779,14 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.boundCursor()
 			return m, nil
 		}
-		if m.templateCreate.mode == templateManagerModeClone {
+		if m.templateCreate.mode == templateManagerModeClone || m.templateCreate.mode == templateManagerModeSnapshotDestroy {
 			m.templateCreate.cloneCursor++
 			m.templateCreate.boundCloneCursor()
-			m.templateCreate.refreshClonePreview()
+			if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+				m.templateCreate.refreshSnapshotDestroyPreview()
+			} else {
+				m.templateCreate.refreshClonePreview()
+			}
 			return m, nil
 		}
 		if m.templateCreate.parentEdit {
@@ -1346,10 +1802,14 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.boundCursor()
 			return m, nil
 		}
-		if m.templateCreate.mode == templateManagerModeClone {
+		if m.templateCreate.mode == templateManagerModeClone || m.templateCreate.mode == templateManagerModeSnapshotDestroy {
 			m.templateCreate.cloneCursor--
 			m.templateCreate.boundCloneCursor()
-			m.templateCreate.refreshClonePreview()
+			if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+				m.templateCreate.refreshSnapshotDestroyPreview()
+			} else {
+				m.templateCreate.refreshClonePreview()
+			}
 			return m, nil
 		}
 		if m.templateCreate.parentEdit {
@@ -1421,6 +1881,18 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Press enter to destroy this template dataset."
 		}
 		return m, nil
+	case "s", "S":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeBrowse {
+			return m, nil
+		}
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			m.templateCreate.message = "No template dataset selected."
+			return m, nil
+		}
+		m.mode = screenZFSPanel
+		m.zfsPanel = newZFSPanelState(item.Name, screenTemplateDatasetCreate, JailDetail{})
+		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case "n", "N":
 		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeBrowse {
 			return m, nil
@@ -1436,9 +1908,33 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.templateCreate.cloneCursor = 0
 		m.templateCreate.cloneName = filepath.Base(item.Name) + "-clone"
 		m.templateCreate.clonePreview = TemplateDatasetSnapshotClonePreview{}
+		m.templateCreate.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
 		m.templateCreate.logs = nil
 		m.templateCreate.message = "Loading template snapshots..."
 		return m, templateSnapshotListCmd(item.Name)
+	case "ctrl+x":
+		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeClone {
+			return m, nil
+		}
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			m.templateCreate.message = "No template dataset selected."
+			return m, nil
+		}
+		snapshot, ok := m.templateCreate.selectedCloneSnapshot()
+		if !ok {
+			m.templateCreate.message = "No snapshot selected."
+			return m, nil
+		}
+		m.templateCreate.mode = templateManagerModeSnapshotDestroy
+		m.templateCreate.logs = nil
+		m.templateCreate.snapshotDestroyPreview = InspectTemplateSnapshotDestroy(item.Name, snapshot.Name, m.templateCreate.parentOverride())
+		if m.templateCreate.snapshotDestroyPreview.Err != nil {
+			m.templateCreate.message = m.templateCreate.snapshotDestroyPreview.Err.Error()
+		} else {
+			m.templateCreate.message = "Press enter to destroy this template snapshot."
+		}
+		return m, nil
 	case "ctrl+e":
 		if m.templateCreate.applying || m.templateCreate.parentApplying || m.templateCreate.mode != templateManagerModeCreate {
 			return m, nil
@@ -1557,6 +2053,16 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.applying = true
 			return m, templateSnapshotCloneCmd(m.templateCreate.clonePreview.Current.Name, m.templateCreate.clonePreview.Snapshot, m.templateCreate.cloneName, m.templateCreate.parentOverride())
 		}
+		if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+			if m.templateCreate.snapshotDestroyPreview.Err != nil {
+				m.templateCreate.message = m.templateCreate.snapshotDestroyPreview.Err.Error()
+				return m, nil
+			}
+			m.templateCreate.message = "Destroying template snapshot..."
+			m.templateCreate.logs = nil
+			m.templateCreate.applying = true
+			return m, templateSnapshotDestroyCmd(m.templateCreate.snapshotDestroyPreview.Current.Name, m.templateCreate.snapshotDestroyPreview.Snapshot, m.templateCreate.parentOverride())
+		}
 	case "ctrl+r":
 		if m.templateCreate.applying || m.templateCreate.parentApplying {
 			return m, nil
@@ -1566,7 +2072,7 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.templateCreate.message = "Template dataset preview refreshed."
 			return m, nil
 		}
-		if m.templateCreate.mode == templateManagerModeClone {
+		if m.templateCreate.mode == templateManagerModeClone || m.templateCreate.mode == templateManagerModeSnapshotDestroy {
 			item, ok := m.templateCreate.selectedItem()
 			if !ok {
 				m.templateCreate.message = "No template dataset selected."
@@ -1603,24 +2109,145 @@ func (m model) updateTemplateDatasetKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateHelpKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "left", "backspace", "enter", "h", "?":
+	case "esc", "backspace", "enter", "?":
 		m.mode = m.helpReturnMode
 		return m, nil
+	case "left", "h", "shift+tab":
+		m.moveHelpTab(-1)
+	case "right", "l", "tab":
+		m.moveHelpTab(1)
 	case "j", "down":
-		m.helpScroll++
+		m.helpScrollDelta(1)
 	case "k", "up":
-		m.helpScroll--
+		m.helpScrollDelta(-1)
 	case "g", "home":
-		m.helpScroll = 0
+		m.setHelpScroll(0)
 	case "G", "end":
-		m.helpScroll = 1 << 30
+		m.setHelpScroll(1 << 30)
 	case "pgdown":
-		m.helpScroll += m.helpBodyHeight()
+		m.helpScrollDelta(m.helpContentHeight())
 	case "pgup":
-		m.helpScroll -= m.helpBodyHeight()
+		m.helpScrollDelta(-m.helpContentHeight())
 	}
 	m.boundHelpScroll()
 	return m, nil
+}
+
+func (m model) updateUpgradeWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.upgrade.applying {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q":
+		return m, tea.Quit
+	case "esc", "backspace", "left":
+		if !m.upgrade.selecting {
+			m.upgrade.selecting = true
+			m.upgrade.logs = nil
+			m.upgrade.err = nil
+			m.upgrade.message = ""
+			return m, nil
+		}
+		m.mode = m.upgrade.returnMode
+		return m, nil
+	case "j", "down":
+		if m.upgrade.selecting {
+			m.upgrade.cursor++
+			if m.upgrade.cursor >= len(upgradeWorkflowAll) {
+				m.upgrade.cursor = len(upgradeWorkflowAll) - 1
+			}
+		}
+	case "k", "up":
+		if m.upgrade.selecting {
+			m.upgrade.cursor--
+			if m.upgrade.cursor < 0 {
+				m.upgrade.cursor = 0
+			}
+		}
+	case "enter", "right":
+		if m.upgrade.selecting {
+			m.upgrade.workflow = upgradeWorkflowAll[m.upgrade.cursor]
+			m.upgrade.selecting = false
+			m.upgrade.logs = nil
+			m.upgrade.err = nil
+			m.upgrade.message = "Press enter to execute this upgrade workflow."
+			return m, nil
+		}
+		m.upgrade.applying = true
+		m.upgrade.logs = nil
+		m.upgrade.err = nil
+		m.upgrade.message = "Running upgrade..."
+		return m, upgradeJailCmd(m.upgrade.target, m.upgrade.workflow)
+	}
+	return m, nil
+}
+
+func (m model) renderUpgradeWizardView() string {
+	title := titleStyle.Render("Jail Upgrade")
+	meta := detailKeyStyle.Render("Jail:") + " " + selectedRowStyle.Render(valueOrDash(m.upgrade.target.Name))
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
+
+	bodyWidth := max(12, m.width-2)
+	lines := []string{}
+
+	if m.upgrade.selecting {
+		lines = append(lines, sectionStyle.Render("Select Upgrade Workflow"))
+		lines = append(lines, "")
+		for idx, wf := range upgradeWorkflowAll {
+			label := upgradeWorkflowLabel(wf)
+			if idx == m.upgrade.cursor {
+				lines = append(lines, selectedRowStyle.Width(max(1, bodyWidth)).Render(truncate("> "+label, bodyWidth)))
+			} else {
+				lines = append(lines, truncate("  "+label, bodyWidth))
+			}
+		}
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Description"))
+		for _, line := range upgradeWorkflowDescriptionLines(upgradeWorkflowAll[m.upgrade.cursor], m.upgrade.target) {
+			lines = append(lines, truncate(line, bodyWidth))
+		}
+	} else {
+		lines = append(lines, sectionStyle.Render("Upgrade Plan"))
+		lines = append(lines, truncate("Workflow: "+upgradeWorkflowLabel(m.upgrade.workflow), bodyWidth))
+		lines = append(lines, "")
+		for _, line := range upgradeWorkflowDescriptionLines(m.upgrade.workflow, m.upgrade.target) {
+			lines = append(lines, truncate(line, bodyWidth))
+		}
+		if len(m.upgrade.logs) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Execution output"))
+			for _, line := range m.upgrade.logs {
+				lines = append(lines, truncate(line, bodyWidth))
+			}
+		}
+	}
+
+	hint := "j/k: select workflow | enter: confirm | esc: cancel | q: quit"
+	if !m.upgrade.selecting {
+		hint = "enter: run upgrade | esc: back to selection | q: quit"
+		if m.upgrade.applying {
+			hint = "Upgrade in progress... please wait | ctrl+c: quit"
+		}
+	}
+	message := m.upgrade.message
+	footerRenderer := footerStyle
+	if m.upgrade.err != nil {
+		message = "error: " + m.upgrade.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) View() string {
@@ -1642,6 +2269,9 @@ func (m model) View() string {
 	if m.mode == screenDestroyConfirm {
 		return m.renderDestroyView()
 	}
+	if m.mode == screenUpgradeWizard {
+		return m.renderUpgradeWizardView()
+	}
 	if m.mode == screenHelp {
 		return m.renderHelpView()
 	}
@@ -1651,14 +2281,76 @@ func (m model) View() string {
 	return m.renderDashboard()
 }
 
+func (m *model) ensureHelpState() {
+	if len(m.helpTabScrolls) != int(helpTabCount) {
+		m.helpTabScrolls = make([]int, int(helpTabCount))
+	}
+	if m.helpTab < 0 || m.helpTab >= helpTabCount {
+		m.helpTab = helpTabOverview
+	}
+}
+
+func helpDefaultTabForMode(mode screenMode) helpTab {
+	switch mode {
+	case screenDashboard, screenJailDetail, screenDestroyConfirm:
+		return helpTabDashboard
+	case screenCreateWizard, screenTemplateDatasetCreate:
+		return helpTabCreate
+	case screenZFSPanel:
+		return helpTabZFS
+	case screenUpgradeWizard:
+		return helpTabUpgrade
+	case screenInitialCheck:
+		return helpTabSetup
+	default:
+		return helpTabOverview
+	}
+}
+
+func (m *model) openHelp(returnMode screenMode) {
+	m.ensureHelpState()
+	m.helpReturnMode = returnMode
+	m.helpTab = helpDefaultTabForMode(returnMode)
+	m.helpTabScrolls[int(m.helpTab)] = 0
+	m.helpScroll = 0
+	m.mode = screenHelp
+	m.boundHelpScroll()
+}
+
+func (m *model) moveHelpTab(delta int) {
+	m.ensureHelpState()
+	next := int(m.helpTab) + delta
+	if next < 0 {
+		next = int(helpTabCount) - 1
+	}
+	if next >= int(helpTabCount) {
+		next = 0
+	}
+	m.helpTab = helpTab(next)
+	m.helpScroll = m.helpTabScrolls[next]
+	m.boundHelpScroll()
+}
+
+func (m *model) helpScrollDelta(delta int) {
+	m.ensureHelpState()
+	m.helpScroll = m.helpTabScrolls[int(m.helpTab)] + delta
+}
+
+func (m *model) setHelpScroll(value int) {
+	m.ensureHelpState()
+	m.helpScroll = value
+}
+
 func (m model) renderHelpView() string {
 	title := titleStyle.Render("Help / Shortcuts")
-	meta := summaryStyle.Render("Press esc to return")
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	meta := summaryStyle.Render("Tab: " + m.currentHelpTabContent().Label + "  esc: close")
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
+	footer := m.renderFooterWithMessage("left/right or h/l: switch tabs | j/k or pgup/pgdown: scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
 
 	bodyHeight := m.helpBodyHeight()
 	lines := m.helpLines(max(12, m.width-2))
-	maxOffset := max(0, len(lines)-bodyHeight)
+	contentHeight := m.helpContentHeight()
+	maxOffset := max(0, len(lines)-contentHeight)
 	offset := m.helpScroll
 	if offset < 0 {
 		offset = 0
@@ -1666,97 +2358,309 @@ func (m model) renderHelpView() string {
 	if offset > maxOffset {
 		offset = maxOffset
 	}
-	end := min(len(lines), offset+bodyHeight)
+	end := min(len(lines), offset+contentHeight)
+
+	bodyLines := []string{m.renderHelpTabBar(max(12, m.width-2)), ""}
+	bodyLines = append(bodyLines, lines[offset:end]...)
 
 	body := lipgloss.NewStyle().
 		Width(m.width).
 		Height(bodyHeight).
 		Padding(0, 1).
-		Render(strings.Join(lines[offset:end], "\n"))
+		Render(strings.Join(bodyLines, "\n"))
 
-	footer := m.renderFooterWithMessage("j/k or pgup/pgdown scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) helpLines(width int) []string {
-	lines := []string{
-		sectionStyle.Render("Global"),
-		truncate("?: open help page (h works outside text input)", width),
-		truncate("ctrl+c: quit the application", width),
-		truncate("q: quit outside text input", width),
-		"",
-		sectionStyle.Render("Initial Config Check"),
-		truncate("runs at startup before dashboard", width),
-		truncate("y/n or d/c/n prompts apply or skip setup actions", width),
-		truncate("enter continues to dashboard when complete", width),
-		"",
-		sectionStyle.Render("Dashboard"),
-		truncate("j/k, arrows, pgup/pgdown, g/G: navigate jail list", width),
-		truncate("enter or d: open jail detail view", width),
-		truncate("c: open jail creation wizard", width),
-		truncate("i: re-run initial config check", width),
-		truncate("t: open template manager", width),
-		truncate("s: start or stop selected jail", width),
-		truncate("z: open ZFS panel for selected jail", width),
-		truncate("x: destroy selected jail (confirmation required)", width),
-		truncate("r: refresh dashboard data", width),
-		"",
-		sectionStyle.Render("Jail Detail"),
-		truncate("j/k, pgup/pgdown, g/G: scroll detail", width),
-		truncate("a: toggle advanced runtime/default parameters", width),
-		truncate("startup policy shows jail_list order and configured depend values", width),
-		truncate("network summary shows configured/runtime network state plus host validation", width),
-		truncate("r: refresh selected jail details", width),
-		truncate("b: retry linux bootstrap for a running linux jail", width),
-		truncate("z: open ZFS integration panel", width),
-		truncate("x: destroy this jail (confirmation required)", width),
-		truncate("esc: return to dashboard", width),
-		"",
-		sectionStyle.Render("Destroy Confirm"),
-		truncate("enter/y: stop and destroy selected jail", width),
-		truncate("esc/n: cancel and return", width),
-		"",
-		sectionStyle.Render("ZFS Panel"),
-		truncate("j/k: select snapshot", width),
-		truncate("c: create snapshot", width),
-		truncate("r: rollback selected snapshot (confirmation required)", width),
-		truncate("n: clone selected snapshot as a new jail", width),
-		truncate("e: edit compression, quota, or reservation on an exact jail dataset", width),
-		truncate("selected snapshot details show creation time, used size, and rollback implications", width),
-		truncate("x: refresh snapshot list", width),
-		truncate("esc: cancel prompt or return to detail", width),
-		"",
-		sectionStyle.Render("Creation Wizard"),
-		truncate("common jail settings are on one page; linux adds a bootstrap step before confirmation", width),
-		truncate("tab/shift+tab/up/down: move field", width),
-		truncate("pgup/pgdown: scroll long wizard pages", width),
-		truncate("enter/right: next step", width),
-		truncate("left: previous step", width),
-		truncate("s/l on the confirmation step: save/load templates", width),
-		truncate("ctrl+u: open userland selector", width),
-		truncate("ctrl+t: open template manager in thin-jail selection mode", width),
-		truncate("startup order updates rc.conf jail_list; dependencies write depend in jail.conf", width),
-		truncate("linux step supports default or custom bootstrap mirrors; retry uses the saved mirror choice", width),
-		truncate("vnet preflight checks bridge/uplink host state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create", width),
-		truncate("?: open help page", width),
-		truncate("confirmation enter: execute create actions", width),
-		"",
-		sectionStyle.Render("Template Manager"),
-		truncate("j/k: select | c: create | n: clone snapshot | r: rename | x: destroy", width),
-		truncate("enter applies the selected mountpoint when opened from the thin-jail wizard", width),
-		truncate("create mode accepts a source path, release tag, userland entry, or custom URL", width),
-		truncate("clone mode lets you pick a snapshot and clone it into a new template dataset", width),
-		truncate("when parent templates dataset is missing: enter creates proposed parent, ctrl+e edits parent values", width),
-		truncate("ctrl+r: refresh the template list, or refresh create preview while creating", width),
-		truncate("esc: return to dashboard", width),
+	tab := m.currentHelpTabContent()
+	lines := make([]string, 0, 96)
+	for idx, section := range tab.Sections {
+		lines = append(lines, sectionStyle.Render(section.Title))
+		if strings.TrimSpace(section.Summary) != "" {
+			appendHelpWrappedLines(&lines, width, section.Summary, helpNoteStyle, "")
+		}
+		if len(section.Shortcuts) > 0 {
+			lines = append(lines, detailSectionStyle.Render("Keys"))
+			pairs := make([][2]string, 0, len(section.Shortcuts))
+			for _, shortcut := range section.Shortcuts {
+				pairs = append(pairs, [2]string{shortcut.Keys, shortcut.Action})
+			}
+			lines = append(lines, renderKeyValueLinesWithLabelWidth(width, helpShortcutLabelWidth(width), pairs...)...)
+		}
+		if len(section.Notes) > 0 {
+			lines = append(lines, detailSectionStyle.Render("Notes"))
+			for _, note := range section.Notes {
+				appendHelpWrappedLines(&lines, max(12, width-2), note, helpNoteStyle, "  ")
+			}
+		}
+		if idx+1 < len(tab.Sections) {
+			lines = append(lines, "")
+		}
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "No help available.")
 	}
 	return lines
+}
+
+func (m model) currentHelpTabContent() helpTabContent {
+	tabs := helpTabs()
+	if len(tabs) == 0 {
+		return helpTabContent{Label: "Help"}
+	}
+	idx := int(m.helpTab)
+	if idx < 0 || idx >= len(tabs) {
+		return tabs[0]
+	}
+	return tabs[idx]
+}
+
+func (m model) renderHelpTabBar(width int) string {
+	tabs := helpTabs()
+	items := make([]string, 0, len(tabs))
+	for idx, tab := range tabs {
+		style := helpTabStyle
+		if helpTab(idx) == m.helpTab {
+			style = helpTabActiveStyle
+		}
+		items = append(items, style.Render(tab.Label))
+	}
+	line := lipgloss.JoinHorizontal(lipgloss.Top, items...)
+	if lipgloss.Width(line) >= width {
+		return line
+	}
+	return line + strings.Repeat(" ", width-lipgloss.Width(line))
+}
+
+func helpTabs() []helpTabContent {
+	return []helpTabContent{
+		{
+			Label: "Overview",
+			Sections: []helpSection{
+				{
+					Title:   "Global",
+					Summary: "Keys available across the app outside active text entry fields.",
+					Shortcuts: []helpShortcut{
+						{Keys: "?, h", Action: "open help"},
+						{Keys: "ctrl+c", Action: "quit the application"},
+						{Keys: "q", Action: "quit outside text input"},
+					},
+					Notes: []string{
+						"Help opens on the tab that matches the current screen.",
+					},
+				},
+				{
+					Title:   "Navigation Patterns",
+					Summary: "Most screens reuse the same small set of movement and confirmation keys.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k, arrows", Action: "move through lists or scrollable content"},
+						{Keys: "pgup/pgdown", Action: "page through longer views"},
+						{Keys: "g/G", Action: "jump to top or bottom where supported"},
+						{Keys: "enter", Action: "open, confirm, or execute the selected action"},
+						{Keys: "esc", Action: "cancel the current prompt or return to the previous screen"},
+					},
+					Notes: []string{
+						"Destructive actions usually switch to a preview or confirmation step before anything is changed.",
+						"Use left/right or h/l inside Help to switch tabs, then j/k or pgup/pgdown to scroll within the active tab.",
+					},
+				},
+			},
+		},
+		{
+			Label: "Dashboard",
+			Sections: []helpSection{
+				{
+					Title:   "Dashboard",
+					Summary: "Browse discovered jails, select multiple targets, and launch deeper workflows.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k, arrows, pgup/pgdown, g/G", Action: "navigate the jail list"},
+						{Keys: "enter, d", Action: "open the selected jail detail view"},
+						{Keys: "c", Action: "open the jail creation wizard"},
+						{Keys: "i", Action: "re-run the initial config check"},
+						{Keys: "t", Action: "open the template manager"},
+						{Keys: "s", Action: "start or stop the selected jail, or all selected jails"},
+						{Keys: "R", Action: "restart the selected jail, or all selected jails"},
+						{Keys: "u", Action: "open the guided upgrade wizard for the selected jail"},
+						{Keys: "space", Action: "toggle bulk selection for the highlighted jail"},
+						{Keys: "ctrl+a", Action: "select all jails or clear the current selection"},
+						{Keys: "esc", Action: "clear jail selection when any jails are selected"},
+						{Keys: "z", Action: "open the ZFS panel for the selected jail"},
+						{Keys: "x", Action: "open destroy confirmation for the selected jail"},
+						{Keys: "r", Action: "refresh dashboard data"},
+					},
+					Notes: []string{
+						"Bulk service actions apply to the current jail selection when one or more jails are marked.",
+					},
+				},
+				{
+					Title:   "Jail Detail",
+					Summary: "Inspect the selected jail, refresh runtime state, and branch into service, upgrade, or ZFS actions.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k, pgup/pgdown, g/G", Action: "scroll the detail pane"},
+						{Keys: "a", Action: "toggle advanced runtime and default parameter sections"},
+						{Keys: "n", Action: "edit the short dashboard note stored for this jail"},
+						{Keys: "r", Action: "refresh selected jail details"},
+						{Keys: "R", Action: "restart this jail"},
+						{Keys: "u", Action: "open the guided upgrade wizard for this jail"},
+						{Keys: "b", Action: "retry linux bootstrap for a running linux jail"},
+						{Keys: "z", Action: "open the ZFS integration panel"},
+						{Keys: "x", Action: "open destroy confirmation for this jail"},
+						{Keys: "esc", Action: "return to the dashboard"},
+					},
+					Notes: []string{
+						"Startup policy shows jail_list order and configured depend values.",
+						"Notes are stored in managed jail.conf metadata and shown on the dashboard quick-details panel.",
+						"Network summary combines configured values, runtime state, and host-side validation results.",
+					},
+				},
+				{
+					Title:   "Destroy Confirm",
+					Summary: "Final confirmation before stopping and destroying the selected jail.",
+					Shortcuts: []helpShortcut{
+						{Keys: "enter, y", Action: "stop and destroy the selected jail"},
+						{Keys: "esc, n", Action: "cancel and return"},
+					},
+				},
+			},
+		},
+		{
+			Label: "Create",
+			Sections: []helpSection{
+				{
+					Title:   "Creation Wizard",
+					Summary: "Collect jail settings, validate prerequisites, and execute the create workflow.",
+					Shortcuts: []helpShortcut{
+						{Keys: "tab, shift+tab, up/down", Action: "move between fields"},
+						{Keys: "pgup/pgdown", Action: "scroll longer wizard pages"},
+						{Keys: "enter, right", Action: "advance to the next step or execute on confirmation"},
+						{Keys: "left", Action: "return to the previous step"},
+						{Keys: "s, l", Action: "save or load templates on the confirmation step"},
+						{Keys: "ctrl+u", Action: "open the userland selector"},
+						{Keys: "ctrl+t", Action: "open the template manager for thin-jail template selection"},
+						{Keys: "?", Action: "open help from the wizard"},
+					},
+					Notes: []string{
+						"Startup order updates rc.conf jail_list; dependency settings write depend in jail.conf.",
+						"Linux setup supports default or custom bootstrap mirrors, and retry reuses the saved mirror choice.",
+						"VNET preflight checks bridge and uplink state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create.",
+					},
+				},
+				{
+					Title:   "Template Manager",
+					Summary: "Manage reusable thin-jail template datasets and choose a mountpoint when the wizard opens this screen in selection mode.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k", Action: "select a template dataset"},
+						{Keys: "enter", Action: "apply the selected mountpoint when opened from the thin-jail wizard"},
+						{Keys: "c", Action: "create a template dataset from a source path, release tag, userland entry, or custom URL"},
+						{Keys: "n", Action: "open snapshot management for the selected template dataset"},
+						{Keys: "r", Action: "rename the selected template dataset"},
+						{Keys: "x", Action: "destroy the selected template dataset"},
+						{Keys: "s", Action: "open the selected template dataset in the ZFS panel"},
+						{Keys: "ctrl+r", Action: "refresh the dataset list, or refresh the create preview while creating"},
+					},
+					Notes: []string{
+						"When the templates parent dataset is missing, enter creates the proposed parent and ctrl+e lets you edit the parent dataset and mountpoint first.",
+					},
+				},
+				{
+					Title:   "Template Snapshots",
+					Summary: "Within template snapshot management, work with snapshots from the selected template dataset.",
+					Shortcuts: []helpShortcut{
+						{Keys: "up/down", Action: "select a snapshot"},
+						{Keys: "enter", Action: "clone the selected snapshot into a new template dataset"},
+						{Keys: "ctrl+x", Action: "switch to snapshot destroy mode for the selected snapshot"},
+						{Keys: "ctrl+r", Action: "refresh the snapshot list"},
+						{Keys: "esc", Action: "return to the template dataset view"},
+					},
+					Notes: []string{
+						"Snapshot destroy is blocked when the snapshot still has clone dependents or when current jails use datasets cloned from that snapshot.",
+					},
+				},
+			},
+		},
+		{
+			Label: "ZFS",
+			Sections: []helpSection{
+				{
+					Title:   "ZFS Panel",
+					Summary: "Inspect snapshots and selected dataset properties for an exact jail dataset or template dataset.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k", Action: "select a snapshot"},
+						{Keys: "c", Action: "create a snapshot"},
+						{Keys: "r", Action: "rollback to the selected snapshot with confirmation"},
+						{Keys: "n", Action: "clone the selected jail snapshot as a new jail"},
+						{Keys: "e", Action: "edit compression, quota, or reservation on an exact jail dataset"},
+						{Keys: "x", Action: "refresh the snapshot list"},
+						{Keys: "esc", Action: "cancel the current prompt or return to the previous screen"},
+					},
+					Notes: []string{
+						"The selected snapshot details show creation time, used size, and rollback implications.",
+						"Rollback preview highlights newer snapshots that would be removed and warns when dependencies may block the rollback.",
+					},
+				},
+			},
+		},
+		{
+			Label: "Upgrade",
+			Sections: []helpSection{
+				{
+					Title:   "Upgrade Wizard",
+					Summary: "Choose a supported upgrade workflow for the selected jail and review the execution plan before running it.",
+					Shortcuts: []helpShortcut{
+						{Keys: "j/k", Action: "select an upgrade workflow"},
+						{Keys: "enter", Action: "confirm the workflow or execute the upgrade"},
+						{Keys: "esc", Action: "return to workflow selection or leave the wizard"},
+					},
+					Notes: []string{
+						"Classic upgrades patch the jail base with freebsd-update and do not require the jail to be running.",
+						"Thin-template upgrades detect the clone origin, patch the template dataset, create a post-upgrade snapshot, then restore readonly mode.",
+						"Pkg reinstall upgrades run pkg upgrade -f inside the jail and start the jail first when needed.",
+					},
+				},
+			},
+		},
+		{
+			Label: "Setup",
+			Sections: []helpSection{
+				{
+					Title:   "Initial Config Check",
+					Summary: "Runs at startup before the dashboard and can be reopened later from the dashboard.",
+					Shortcuts: []helpShortcut{
+						{Keys: "y/n or d/c/n", Action: "apply or skip the proposed setup action, depending on the prompt"},
+						{Keys: "enter", Action: "continue to the dashboard when the check is complete"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func appendHelpWrappedLines(lines *[]string, width int, text string, style lipgloss.Style, prefix string) {
+	width = max(12, width)
+	for _, part := range wrapText(strings.TrimSpace(text), width) {
+		if prefix != "" {
+			part = prefix + part
+		}
+		*lines = append(*lines, style.Render(part))
+	}
+}
+
+func helpShortcutLabelWidth(width int) int {
+	switch {
+	case width >= 100:
+		return 28
+	case width >= 80:
+		return 24
+	default:
+		return 20
+	}
 }
 
 func (m model) renderDestroyView() string {
 	title := titleStyle.Render("Destroy Jail")
 	meta := detailKeyStyle.Render("Selected:") + " " + selectedRowStyle.Render(valueOrDash(m.destroy.target.Name))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	bodyWidth := max(12, m.width-2)
 	lines := []string{sectionStyle.Render("Confirmation")}
@@ -1771,13 +2675,6 @@ func (m model) renderDestroyView() string {
 		}
 	}
 
-	bodyHeight := max(5, m.height-3)
-	body := lipgloss.NewStyle().
-		Width(m.width).
-		Height(bodyHeight).
-		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
-
 	hint := "enter/y: destroy jail | esc/n: cancel | q: quit"
 	if m.destroy.applying {
 		hint = "Destroying jail... please wait | q: quit"
@@ -1789,35 +2686,57 @@ func (m model) renderDestroyView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) helpBodyHeight() int {
-	return max(5, m.height-3)
+	title := titleStyle.Render("Help / Shortcuts")
+	meta := summaryStyle.Render("Tab: " + m.currentHelpTabContent().Label + "  esc: close")
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
+	footer := m.renderFooterWithMessage("left/right or h/l: switch tabs | j/k or pgup/pgdown: scroll | esc/enter: close help | ctrl+c: quit", "", footerStyle)
+	return m.pageBodyHeight(header, footer, 0)
+}
+
+func (m model) helpContentHeight() int {
+	return max(1, m.helpBodyHeight()-2)
 }
 
 func (m *model) boundHelpScroll() {
 	if m.mode != screenHelp {
 		return
 	}
+	m.ensureHelpState()
 	lines := m.helpLines(max(12, m.width-2))
-	maxOffset := max(0, len(lines)-m.helpBodyHeight())
+	maxOffset := max(0, len(lines)-m.helpContentHeight())
 	if m.helpScroll < 0 {
 		m.helpScroll = 0
 	}
 	if m.helpScroll > maxOffset {
 		m.helpScroll = maxOffset
 	}
+	m.helpTabScrolls[int(m.helpTab)] = m.helpScroll
 }
 
 func (m model) renderDashboard() string {
 	header := m.renderHeader()
-	bodyHeight := max(6, m.height-4)
-	leftWidth := max(50, (m.width*2)/3)
-	if leftWidth > m.width-24 {
-		leftWidth = m.width - 24
+	footer := m.renderFooter()
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
+	const (
+		dashboardMinLeftWidth  = 32
+		dashboardMinRightWidth = 24
+	)
+	leftWidth := max(dashboardMinLeftWidth, m.width/3)
+	maxLeftWidth := m.width - dashboardMinRightWidth - 1
+	if leftWidth > maxLeftWidth {
+		leftWidth = maxLeftWidth
 	}
-	if leftWidth < 32 {
+	if leftWidth < dashboardMinLeftWidth {
 		leftWidth = m.width
 	}
 	rightWidth := m.width - leftWidth - 1
@@ -1827,8 +2746,7 @@ func (m model) renderDashboard() string {
 
 	listPanel := m.renderJailList(leftWidth, bodyHeight)
 	if rightWidth == 0 {
-		footer := m.renderFooter()
-		return lipgloss.JoinVertical(lipgloss.Left, header, listPanel, footer)
+		return lipgloss.JoinVertical(lipgloss.Left, header, "", listPanel, footer)
 	}
 
 	detailPanel := m.renderDetailPanel(rightWidth, bodyHeight)
@@ -1837,9 +2755,8 @@ func (m model) renderDashboard() string {
 		Render(strings.Repeat("|\n", bodyHeight-1) + "|")
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
-	footer := m.renderFooter()
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) renderJailDetailView() string {
@@ -1853,9 +2770,27 @@ func (m model) renderJailDetailView() string {
 		lastUpdated = m.detail.LastUpdated.Format("15:04:05")
 	}
 	meta := summaryStyle.Render(fmt.Sprintf("Jail:%s  Updated:%s", name, lastUpdated))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := m.detailBodyHeight()
+	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
+	if m.detailNoteMode {
+		hint = "type to edit note | enter: save | backspace: delete | esc: cancel | ctrl+c: quit"
+	} else {
+		if detailLooksLikeLinuxJail(m.detail) {
+			hint += " | b: retry linux bootstrap"
+		}
+		hint += " | n: edit note | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
+	}
+	message := ""
+	if m.detailErr != nil {
+		message = "warning: " + m.detailErr.Error()
+	} else if m.detailNotice != "" {
+		message = m.detailNotice
+	} else if m.detailLoading {
+		message = "loading detail..."
+	}
+	footer := m.renderFooterWithMessage(hint, message, footerStyle)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	contentWidth := max(12, m.width-2)
 	lines := m.detailLines(contentWidth)
 	maxOffset := max(0, len(lines)-bodyHeight)
@@ -1873,38 +2808,18 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
-	if detailLooksLikeLinuxJail(m.detail) {
-		hint += " | b: retry linux bootstrap"
-	}
-	hint += " | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
-	message := ""
-	footerRenderer := footerStyle
-	if m.detailErr != nil {
-		message = "warning: " + m.detailErr.Error()
-		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
-	} else if m.detailNotice != "" {
-		message = m.detailNotice
-		if looksLikeWarningText(m.detailNotice) {
-			footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
-		}
-	} else if m.detailLoading {
-		message = "loading detail..."
-	}
-	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) renderWizardView() string {
 	step := m.wizard.currentStep()
 	title := titleStyle.Render("Jail Creation Wizard")
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	hint := m.wizardFooterHint()
 	footer := m.renderFooterWithMessage(hint, m.wizard.message, footerStyle)
-	bodyHeight := max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	bodyHeight := m.pageBodyHeight(header, footer, 1)
 	body := ""
 	if leftWidth, rightWidth, ok := m.wizardSplitPaneWidths(); ok {
 		leftLines, _ := m.wizardFieldEntryLayout(max(12, leftWidth-2), false)
@@ -1934,7 +2849,7 @@ func (m model) renderWizardView() string {
 			Render(strings.Join(lines[offset:end], "\n"))
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) wizardFooterHint() string {
@@ -1961,7 +2876,7 @@ func (m model) wizardFooterHint() string {
 		hint = "Creating template dataset... please wait | ctrl+c: quit"
 	}
 	if m.wizardApplying {
-		hint = "Applying changes... please wait | ctrl+c: quit"
+		hint = "Applying changes... please wait | c: cancel | ctrl+c: quit"
 	}
 	return hint
 }
@@ -1970,9 +2885,9 @@ func (m model) wizardBodyHeight() int {
 	step := m.wizard.currentStep()
 	title := titleStyle.Render("Jail Creation Wizard")
 	meta := summaryStyle.Render(fmt.Sprintf("Step %d/%d: %s", m.wizard.step+1, len(m.wizard.steps()), step.Title))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 	footer := m.renderFooterWithMessage(m.wizardFooterHint(), m.wizard.message, footerStyle)
-	return max(4, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	return m.pageBodyHeight(header, footer, 1)
 }
 
 func (m model) wizardSplitPaneWidths() (int, int, bool) {
@@ -2011,12 +2926,87 @@ func wizardViewportBounds(totalLines, scroll, height int) (int, int) {
 	return scroll, end
 }
 
+func renderWizardSelectionList(width int, title string, labels []string, cursor int, emptyLines []string, previewTitle string, previewLines []string) []string {
+	lines := []string{sectionStyle.Render(title)}
+	if len(labels) == 0 {
+		lines = append(lines, emptyLines...)
+		return lines
+	}
+	cursor = boundSelectionCursor(cursor, len(labels))
+	for idx, label := range labels {
+		row := "  " + label
+		if idx == cursor {
+			row = truncate("> "+label, width)
+			row = selectedRowStyle.Width(max(1, width)).Render(row)
+			lines = append(lines, row)
+			continue
+		}
+		lines = append(lines, truncate(row, width))
+	}
+	if len(previewLines) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render(previewTitle))
+		for _, line := range previewLines {
+			lines = append(lines, truncate(line, width))
+		}
+	}
+	return lines
+}
+
 func (m model) renderTemplateDatasetCreateView() string {
 	title := titleStyle.Render("Template Manager")
 	meta := summaryStyle.Render("Reusable ZFS templates for thin jails")
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
-
-	bodyHeight := max(6, m.height-3)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
+	hint := "j/k: select | c: create | n: manage snapshots | r: rename | x: destroy | s: ZFS panel | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
+		hint = "j/k: select | enter: apply mountpoint | c: create | n: manage snapshots | r: rename | x: destroy | s: ZFS panel | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.mode == templateManagerModeCreate {
+		hint = "type source | p: toggle patch | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
+		if m.templateCreate.parentEdit {
+			hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
+		}
+		if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
+			hint = "type source | p: toggle patch | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | esc: back | ctrl+c: quit"
+		}
+	}
+	if m.templateCreate.mode == templateManagerModeRename {
+		hint = "type new name | enter: rename | backspace: edit | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.mode == templateManagerModeDestroy {
+		hint = "enter: destroy dataset | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.mode == templateManagerModeClone {
+		hint = "type clone name | up/down: snapshot | enter: clone | ctrl+x: destroy snapshot | backspace: edit | ctrl+r: refresh snapshots | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.mode == templateManagerModeSnapshotDestroy {
+		hint = "up/down: snapshot | enter: destroy selected snapshot | ctrl+r: refresh snapshots | esc: back | ctrl+c: quit"
+	}
+	if m.templateCreate.loading {
+		hint = "Refreshing template datasets... please wait | ctrl+c: quit"
+	}
+	if m.templateCreate.cloneLoading {
+		hint = "Loading template snapshots... please wait | ctrl+c: quit"
+	}
+	if m.templateCreate.parentApplying {
+		hint = "Creating template parent dataset... please wait | ctrl+c: quit"
+	}
+	if m.templateCreate.applying {
+		switch m.templateCreate.mode {
+		case templateManagerModeRename:
+			hint = "Renaming template dataset... please wait | ctrl+c: quit"
+		case templateManagerModeDestroy:
+			hint = "Destroying template dataset... please wait | ctrl+c: quit"
+		case templateManagerModeClone:
+			hint = "Cloning template snapshot... please wait | ctrl+c: quit"
+		case templateManagerModeSnapshotDestroy:
+			hint = "Destroying template snapshot... please wait | ctrl+c: quit"
+		default:
+			hint = "Creating template dataset... please wait | ctrl+c: quit"
+		}
+	}
+	footer := m.renderFooterWithMessage(hint, m.templateCreate.message, footerStyle)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	leftWidth := max(30, m.width/3)
 	if leftWidth > m.width-28 {
 		leftWidth = m.width - 28
@@ -2048,52 +3038,7 @@ func (m model) renderTemplateDatasetCreateView() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, listPanel, separator, detailPanel)
 	}
 
-	hint := "j/k: select | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
-	if m.templateCreate.selectMode && m.templateCreate.mode == templateManagerModeBrowse {
-		hint = "j/k: select | enter: apply mountpoint | c: create | n: clone | r: rename | x: destroy | ctrl+r: refresh | ?: help | esc: back | ctrl+c: quit"
-	}
-	if m.templateCreate.mode == templateManagerModeCreate {
-		hint = "type source | p: toggle patch | enter: create | backspace: edit | ctrl+r: refresh preview | ctrl+e: edit parent | esc: back | ctrl+c: quit"
-		if m.templateCreate.parentEdit {
-			hint = "type parent values | tab/shift+tab: switch field | enter: create parent | esc: stop editing | ctrl+c: quit"
-		}
-		if m.templateCreate.preview.NeedsParentCreate && !m.templateCreate.parentEdit {
-			hint = "type source | p: toggle patch | enter: create proposed parent | ctrl+e: edit parent values | ctrl+r: refresh preview | esc: back | ctrl+c: quit"
-		}
-	}
-	if m.templateCreate.mode == templateManagerModeRename {
-		hint = "type new name | enter: rename | backspace: edit | esc: back | ctrl+c: quit"
-	}
-	if m.templateCreate.mode == templateManagerModeDestroy {
-		hint = "enter: destroy dataset | esc: back | ctrl+c: quit"
-	}
-	if m.templateCreate.mode == templateManagerModeClone {
-		hint = "type clone name | j/k: snapshot | enter: clone | backspace: edit | ctrl+r: refresh snapshots | esc: back | ctrl+c: quit"
-	}
-	if m.templateCreate.loading {
-		hint = "Refreshing template datasets... please wait | ctrl+c: quit"
-	}
-	if m.templateCreate.cloneLoading {
-		hint = "Loading template snapshots... please wait | ctrl+c: quit"
-	}
-	if m.templateCreate.parentApplying {
-		hint = "Creating template parent dataset... please wait | ctrl+c: quit"
-	}
-	if m.templateCreate.applying {
-		switch m.templateCreate.mode {
-		case templateManagerModeRename:
-			hint = "Renaming template dataset... please wait | ctrl+c: quit"
-		case templateManagerModeDestroy:
-			hint = "Destroying template dataset... please wait | ctrl+c: quit"
-		case templateManagerModeClone:
-			hint = "Cloning template snapshot... please wait | ctrl+c: quit"
-		default:
-			hint = "Creating template dataset... please wait | ctrl+c: quit"
-		}
-	}
-	footer := m.renderFooterWithMessage(hint, m.templateCreate.message, footerStyle)
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) templateManagerListLines(width, height int) []string {
@@ -2182,37 +3127,33 @@ func (m model) templateManagerDetailLines(width int) []string {
 			lines = append(lines, mountLine)
 		}
 		if preview.Dataset != "" {
-			lines = append(lines, truncate("Derived dataset: "+preview.Dataset, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Derived dataset", preview.Dataset})...)
 		}
 		if preview.Mountpoint != "" {
-			lines = append(lines, truncate("Target mountpoint: "+preview.Mountpoint, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Target mountpoint", preview.Mountpoint})...)
 		}
-		lines = append(lines, truncate("Patch to latest level: "+yesNoText(preview.PatchSelected), width))
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Patch to latest level", yesNoText(preview.PatchSelected)})...)
 		if preview.PatchRelease != "" {
-			lines = append(lines, truncate("Patch release: "+preview.PatchRelease, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Patch release", preview.PatchRelease})...)
 		}
-		lines = append(lines, truncate("Readonly after create: yes", width))
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Readonly after create", "yes"})...)
 		if preview.SourceKind != "" {
-			lines = append(lines, truncate("Source type: "+preview.SourceKind, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Source type", preview.SourceKind})...)
 		}
 		if preview.ResolvedSource != "" {
-			lines = append(lines, truncate("Resolved source: "+preview.ResolvedSource, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Resolved source", preview.ResolvedSource})...)
 		}
 		if preview.Action != "" {
-			lines = append(lines, truncate("Create action: "+preview.Action, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Create action", preview.Action})...)
 		}
 		if preview.NeedsParentCreate {
-			lines = append(lines, truncate("No templates parent dataset was discovered. Create the proposed parent or edit the values first.", width))
+			appendWrappedText(&lines, width, "No templates parent dataset was discovered. Create the proposed parent or edit the values first.")
 		}
 		if strings.TrimSpace(preview.PatchNote) != "" {
-			for _, line := range wrapText(preview.PatchNote, width) {
-				lines = append(lines, truncate(line, width))
-			}
+			appendWrappedText(&lines, width, preview.PatchNote)
 		}
 		if preview.Err != nil {
-			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-				lines = append(lines, wizardErrorStyle.Render(line))
-			}
+			appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 		}
 	case templateManagerModeRename:
 		appendSection(&lines, width, "Rename template dataset")
@@ -2221,27 +3162,27 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if current.Name == "" {
 			lines = append(lines, "No template dataset selected.")
 		} else {
-			lines = append(lines, truncate("Current dataset: "+current.Name, width))
-			lines = append(lines, truncate("Current mountpoint: "+current.Mountpoint, width))
-			lines = append(lines, truncate("Current readonly: "+yesNoText(current.Readonly), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Current dataset", current.Name},
+				[2]string{"Current mountpoint", current.Mountpoint},
+				[2]string{"Current readonly", yesNoText(current.Readonly)},
+			)...)
 			lines = append(lines, selectedRowStyle.Width(max(1, width)).Render(truncate("> New name: "+valueOrPlaceholder(m.templateCreate.renameInput, filepath.Base(current.Name)), width)))
 			if preview.NewDataset != "" {
-				lines = append(lines, truncate("Renamed dataset: "+preview.NewDataset, width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Renamed dataset", preview.NewDataset})...)
 			}
 			if preview.NewMountpoint != "" {
-				lines = append(lines, truncate("New mountpoint: "+preview.NewMountpoint, width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"New mountpoint", preview.NewMountpoint})...)
 			}
-			lines = append(lines, truncate("Readonly after rename: "+yesNoText(preview.ReadonlyPreserved), width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Readonly after rename", yesNoText(preview.ReadonlyPreserved)})...)
 			if !current.Readonly {
-				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: current template dataset is writable; handbook-style templates should be readonly.", width)))
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Warning: current template dataset is writable; handbook-style templates should be readonly.")
 			}
 			if len(preview.UpdatedWizardTemplates) > 0 {
-				lines = append(lines, truncate("Saved wizard templates updated on rename: "+strings.Join(preview.UpdatedWizardTemplates, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Saved wizard templates updated on rename", strings.Join(preview.UpdatedWizardTemplates, ", ")})...)
 			}
 			if preview.Err != nil {
-				for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-					lines = append(lines, wizardErrorStyle.Render(line))
-				}
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 			}
 		}
 	case templateManagerModeDestroy:
@@ -2251,26 +3192,26 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if current.Name == "" {
 			lines = append(lines, "No template dataset selected.")
 		} else {
-			lines = append(lines, truncate("Dataset: "+current.Name, width))
-			lines = append(lines, truncate("Mountpoint: "+current.Mountpoint, width))
-			lines = append(lines, truncate("Readonly: "+yesNoText(preview.Readonly), width))
-			lines = append(lines, truncate("Destroy scope: zfs destroy -r "+preview.DestroyScope, width))
-			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", current.SnapshotCount), width))
-			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(current.CloneDependents)), width))
-			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(preview.ReferencedTemplates)), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Dataset", current.Name},
+				[2]string{"Mountpoint", current.Mountpoint},
+				[2]string{"Readonly", yesNoText(preview.Readonly)},
+				[2]string{"Destroy scope", "zfs destroy -r " + preview.DestroyScope},
+				[2]string{"Snapshots", fmt.Sprintf("%d", current.SnapshotCount)},
+				[2]string{"Clone dependents", fmt.Sprintf("%d", len(current.CloneDependents))},
+				[2]string{"Saved wizard template refs", fmt.Sprintf("%d", len(preview.ReferencedTemplates))},
+			)...)
 			if !preview.Readonly {
-				lines = append(lines, wizardErrorStyle.Render(truncate("Warning: this template dataset is writable; handbook-style templates should be readonly.", width)))
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Warning: this template dataset is writable; handbook-style templates should be readonly.")
 			}
 			if len(current.CloneDependents) > 0 {
-				lines = append(lines, truncate("Dependents: "+strings.Join(current.CloneDependents, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependents", strings.Join(current.CloneDependents, ", ")})...)
 			}
 			if len(preview.ReferencedTemplates) > 0 {
-				lines = append(lines, truncate("Referenced by: "+strings.Join(preview.ReferencedTemplates, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Referenced by", strings.Join(preview.ReferencedTemplates, ", ")})...)
 			}
 			if preview.Err != nil {
-				for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-					lines = append(lines, wizardErrorStyle.Render(line))
-				}
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 			}
 		}
 	case templateManagerModeClone:
@@ -2303,21 +3244,62 @@ func (m model) templateManagerDetailLines(width int) []string {
 		appendSection(&lines, width, "Preview")
 		preview := m.templateCreate.clonePreview
 		if preview.Snapshot != "" {
-			lines = append(lines, truncate("Snapshot: "+preview.Snapshot, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Snapshot", preview.Snapshot})...)
 		}
 		if preview.NewDataset != "" {
-			lines = append(lines, truncate("Clone dataset: "+preview.NewDataset, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Clone dataset", preview.NewDataset})...)
 		}
 		if preview.NewMountpoint != "" {
-			lines = append(lines, truncate("Clone mountpoint: "+preview.NewMountpoint, width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Clone mountpoint", preview.NewMountpoint})...)
 		}
 		if preview.NewDataset != "" {
-			lines = append(lines, truncate("Readonly after clone: "+yesNoText(preview.ReadonlyAfter), width))
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Readonly after clone", yesNoText(preview.ReadonlyAfter)})...)
 		}
 		if preview.Err != nil {
-			for _, line := range wrapText("Error: "+preview.Err.Error(), width) {
-				lines = append(lines, wizardErrorStyle.Render(line))
+			appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
+		}
+	case templateManagerModeSnapshotDestroy:
+		appendSection(&lines, width, "Destroy template snapshot")
+		item, ok := m.templateCreate.selectedItem()
+		if !ok {
+			lines = append(lines, "No template dataset selected.")
+			break
+		}
+		lines = append(lines, truncate("Dataset: "+item.Name, width))
+		appendSection(&lines, width, "Snapshots")
+		if m.templateCreate.cloneLoading {
+			lines = append(lines, "Loading snapshots...")
+			break
+		}
+		if len(m.templateCreate.cloneSnapshots) == 0 {
+			lines = append(lines, "No snapshots found for this template dataset.")
+			break
+		}
+		for idx, snapshot := range m.templateCreate.cloneSnapshots {
+			row := fmt.Sprintf("  %s  %s  %s", truncate(snapshotShortName(snapshot.Name), 18), truncate(snapshot.Creation, 18), snapshot.Used)
+			if idx == m.templateCreate.cloneCursor {
+				row = selectedRowStyle.Width(max(1, width)).Render(truncate("> "+fmt.Sprintf("%s  %s  %s", snapshotShortName(snapshot.Name), snapshot.Creation, snapshot.Used), width))
+			} else {
+				row = truncate(row, width)
 			}
+			lines = append(lines, row)
+		}
+		appendSection(&lines, width, "Preview")
+		preview := m.templateCreate.snapshotDestroyPreview
+		if preview.Snapshot != "" {
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Snapshot", preview.Snapshot},
+				[2]string{"Destroy command", "zfs destroy " + preview.Snapshot},
+			)...)
+		}
+		if len(preview.ReferencedJails) > 0 {
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Current jails", strings.Join(preview.ReferencedJails, ", ")})...)
+		}
+		if len(preview.ReferencedClones) > 0 {
+			lines = append(lines, renderKeyValueLines(width, [2]string{"Clone dependents", strings.Join(preview.ReferencedClones, ", ")})...)
+		}
+		if preview.Err != nil {
+			appendWrappedStyledText(&lines, width, wizardErrorStyle, "Error: "+preview.Err.Error())
 		}
 	default:
 		appendSection(&lines, width, "Inspect")
@@ -2325,51 +3307,71 @@ func (m model) templateManagerDetailLines(width int) []string {
 		if !ok {
 			lines = append(lines, "No template dataset selected.")
 		} else {
-			lines = append(lines, truncate("Dataset: "+item.Name, width))
-			lines = append(lines, truncate("Mountpoint: "+item.Mountpoint, width))
-			lines = append(lines, truncate("Readonly: "+yesNoText(item.Readonly), width))
-			lines = append(lines, truncate("Used: "+item.Used+"  Avail: "+item.Avail, width))
-			lines = append(lines, truncate("Refer: "+item.Refer+"  Compression: "+item.Compression, width))
-			lines = append(lines, truncate("Quota: "+valueOrDash(item.Quota)+"  Reservation: "+valueOrDash(item.Reservation), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Dataset", item.Name},
+				[2]string{"Mountpoint", item.Mountpoint},
+				[2]string{"Readonly", yesNoText(item.Readonly)},
+				[2]string{"Used", item.Used + "  Avail: " + item.Avail},
+				[2]string{"Refer", item.Refer + "  Compression: " + item.Compression},
+				[2]string{"Quota", valueOrDash(item.Quota) + "  Reservation: " + valueOrDash(item.Reservation)},
+			)...)
 			if strings.TrimSpace(item.Origin) != "" && item.Origin != "-" {
-				lines = append(lines, truncate("Origin: "+item.Origin, width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Origin", item.Origin})...)
 			}
-			lines = append(lines, truncate(fmt.Sprintf("Snapshots: %d", item.SnapshotCount), width))
-			lines = append(lines, truncate(fmt.Sprintf("Child datasets: %d", len(item.ChildDatasets)), width))
-			lines = append(lines, truncate(fmt.Sprintf("Clone dependents: %d", len(item.CloneDependents)), width))
-			lines = append(lines, truncate(fmt.Sprintf("Saved wizard template refs: %d", len(item.WizardTemplateRefs)), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Snapshots", fmt.Sprintf("%d", item.SnapshotCount)},
+				[2]string{"Child datasets", fmt.Sprintf("%d", len(item.ChildDatasets))},
+				[2]string{"Clone dependents", fmt.Sprintf("%d", len(item.CloneDependents))},
+				[2]string{"Saved wizard template refs", fmt.Sprintf("%d", len(item.WizardTemplateRefs))},
+			)...)
 			appendSection(&lines, width, "Safety")
-			lines = append(lines, truncate("Rename allowed: "+yesNoText(item.RenameAllowed), width))
-			lines = append(lines, truncate("Destroy allowed: "+yesNoText(item.DestroyAllowed), width))
+			lines = append(lines, renderKeyValueLines(width,
+				[2]string{"Rename allowed", yesNoText(item.RenameAllowed)},
+				[2]string{"Destroy allowed", yesNoText(item.DestroyAllowed)},
+			)...)
 			if len(item.SafetyIssues) > 0 {
 				for _, issue := range item.SafetyIssues {
 					prefix := "Issue: "
 					if strings.Contains(strings.ToLower(issue), "writable") {
 						prefix = "Warning: "
 					}
-					lines = append(lines, wizardErrorStyle.Render(truncate(prefix+issue, width)))
+					appendWrappedStyledText(&lines, width, wizardErrorStyle, prefix+issue)
 				}
 			}
 			if len(item.CloneDependents) > 0 {
-				lines = append(lines, truncate("Dependents: "+strings.Join(item.CloneDependents, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependents", strings.Join(item.CloneDependents, ", ")})...)
 			}
 			if len(item.ChildDatasets) > 0 {
-				lines = append(lines, truncate("Child datasets: "+strings.Join(item.ChildDatasets, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Child datasets", strings.Join(item.ChildDatasets, ", ")})...)
 			}
 			if len(item.WizardTemplateRefs) > 0 {
-				lines = append(lines, truncate("Saved template refs: "+strings.Join(item.WizardTemplateRefs, ", "), width))
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Saved template refs", strings.Join(item.WizardTemplateRefs, ", ")})...)
 			}
 		}
 	}
 	if len(m.templateCreate.logs) > 0 {
 		appendSection(&lines, width, "Execution output")
 		for _, line := range m.templateCreate.logs {
-			lines = append(lines, truncate(line, width))
+			appendWrappedText(&lines, width, line)
 		}
 	}
 	return lines
 }
 
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// ... skipping to wizardLines
 func (m model) wizardLines(width int) []string {
 	step := m.wizard.currentStep()
 	lines := []string{sectionStyle.Render(step.Title)}
@@ -2391,83 +3393,56 @@ func (m model) wizardLines(width int) []string {
 	}
 
 	if m.wizard.templateMode == wizardTemplateModeLoad {
-		lines = append(lines, sectionStyle.Render("Load Template"))
-		if len(m.wizard.templates) == 0 {
-			lines = append(lines, "No templates available.")
-			return lines
+		labels := make([]string, 0, len(m.wizard.templates))
+		for _, template := range m.wizard.templates {
+			labels = append(labels, template.Name)
 		}
-		for idx, template := range m.wizard.templates {
-			row := "  " + template.Name
-			if idx == m.wizard.templateCursor {
-				row = truncate("> "+template.Name, width)
-				row = selectedRowStyle.Width(max(1, width)).Render(row)
-				lines = append(lines, row)
-				continue
-			}
-			lines = append(lines, truncate(row, width))
-		}
+		previewLines := []string(nil)
 		if template, ok := m.wizard.selectedTemplate(); ok {
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Selected Template Preview"))
-			lines = append(lines, truncate("Name: "+template.Name, width))
-			lines = append(lines, truncate("Destination: "+template.Values.Dataset, width))
-			lines = append(lines, truncate("Template/Release: "+template.Values.TemplateRelease, width))
-			lines = append(lines, truncate("IPv4: "+template.Values.IP4, width))
+			previewLines = []string{
+				"Name: " + template.Name,
+				"Destination: " + template.Values.Dataset,
+				"Template/Release: " + template.Values.TemplateRelease,
+				"IPv4: " + template.Values.IP4,
+			}
 		}
-		return lines
+		return renderWizardSelectionList(width, "Load Template", labels, m.wizard.templateCursor, []string{"No templates available."}, "Selected Template Preview", previewLines)
 	}
 
 	if m.wizard.userlandMode {
-		lines = append(lines, sectionStyle.Render("Select Userland Source"))
-		if len(m.wizard.userlandOpts) == 0 {
-			lines = append(lines, "No userland options found.")
-			return lines
+		labels := make([]string, 0, len(m.wizard.userlandOpts))
+		for _, option := range m.wizard.userlandOpts {
+			labels = append(labels, option.Label)
 		}
-		for idx, option := range m.wizard.userlandOpts {
-			row := "  " + option.Label
-			if idx == m.wizard.userlandCursor {
-				row = truncate("> "+option.Label, width)
-				row = selectedRowStyle.Width(max(1, width)).Render(row)
-				lines = append(lines, row)
-				continue
-			}
-			lines = append(lines, truncate(row, width))
-		}
+		previewLines := []string(nil)
 		if option, ok := m.wizard.selectedUserlandOption(); ok {
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Selected Value"))
-			lines = append(lines, truncate(option.Value, width))
-			lines = append(lines, truncate("Tip: type a custom https URL directly in Template/Release for custom download.", width))
+			previewLines = []string{
+				option.Value,
+				"Tip: type a custom https URL directly in Template/Release for custom download.",
+			}
 		}
-		return lines
+		return renderWizardSelectionList(width, "Select Userland Source", labels, m.wizard.userlandCursor, []string{"No userland options found."}, "Selected Value", previewLines)
 	}
 
 	if m.wizard.thinDatasetMode {
-		lines = append(lines, sectionStyle.Render("Select Thin Template Dataset"))
-		if len(m.wizard.thinDatasetOpts) == 0 {
-			lines = append(lines, "No thin template datasets found.")
-			lines = append(lines, "")
-			lines = append(lines, truncate("Press c to create a template dataset from the current Template/Release value.", width))
-			return lines
+		labels := make([]string, 0, len(m.wizard.thinDatasetOpts))
+		for _, option := range m.wizard.thinDatasetOpts {
+			labels = append(labels, option.Label)
 		}
-		for idx, option := range m.wizard.thinDatasetOpts {
-			row := "  " + option.Label
-			if idx == m.wizard.thinDatasetCursor {
-				row = truncate("> "+option.Label, width)
-				row = selectedRowStyle.Width(max(1, width)).Render(row)
-				lines = append(lines, row)
-				continue
-			}
-			lines = append(lines, truncate(row, width))
+		emptyLines := []string{
+			"No thin template datasets found.",
+			"",
+			truncate("Press c to create a template dataset from the current Template/Release value.", width),
 		}
+		previewLines := []string(nil)
 		if option, ok := m.wizard.selectedThinDatasetOption(); ok {
-			lines = append(lines, "")
-			lines = append(lines, sectionStyle.Render("Selected Value"))
-			lines = append(lines, truncate(option.Value, width))
-			lines = append(lines, truncate("Thin jails require an extracted template dataset mountpoint, not a release tag or archive.", width))
-			lines = append(lines, truncate("Press c to create a new template dataset from the current Template/Release value.", width))
+			previewLines = []string{
+				option.Value,
+				"Thin jails require an extracted template dataset mountpoint, not a release tag or archive.",
+				"Press c to create a new template dataset from the current Template/Release value.",
+			}
 		}
-		return lines
+		return renderWizardSelectionList(width, "Select Thin Template Dataset", labels, m.wizard.thinDatasetCursor, emptyLines, "Selected Value", previewLines)
 	}
 
 	if m.wizard.isConfirmationStep() {
@@ -2487,22 +3462,35 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.jailConfPreviewLines() {
 			appendWrappedLiteralLine(&lines, line, width)
 		}
-		lines = append(lines, "")
-		lines = append(lines, sectionStyle.Render("Creation plan"))
-		for _, line := range m.wizard.commandPlanLines() {
-			lines = append(lines, truncate(line, width))
+		if m.wizardApplying {
+			if m.downloading && m.downloadTotal > 0 {
+				percent := float64(m.downloadRead) / float64(m.downloadTotal)
+				barWidth := width - 20
+				if barWidth < 10 {
+					barWidth = 10
+				}
+				filled := int(float64(barWidth) * percent)
+				bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+				lines = append(lines, "")
+				lines = append(lines, sectionStyle.Render("Downloading Archive"))
+				lines = append(lines, fmt.Sprintf(" %s %3.0f%%", bar, percent*100))
+				lines = append(lines, fmt.Sprintf(" %s / %s", formatBytes(m.downloadRead), formatBytes(m.downloadTotal)))
+			}
 		}
+
 		if len(m.wizard.executionLogs) > 0 {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Execution output"))
 			for _, line := range m.wizard.executionLogs {
-				lines = append(lines, truncate(line, width))
+				appendWrappedLiteralLine(&lines, line, width)
 			}
 		}
 		if m.wizard.executionError != "" {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Execution error"))
-			lines = append(lines, truncate(m.wizard.executionError, width))
+			for _, line := range wrapText(m.wizard.executionError, max(1, width)) {
+				lines = append(lines, truncate(line, width))
+			}
 		}
 		return lines
 	}
@@ -2706,6 +3694,18 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"pkg-cache.local",
 			},
 		}
+	case "note":
+		return wizardFieldGuide{
+			Purpose: "Optional short description shown in dashboard quick details and the jail detail overview.",
+			Format:  fmt.Sprintf("Up to %d characters; keep it short and role-focused.", maxJailNoteLen),
+			Examples: []string{
+				"nginx reverse proxy",
+				"wordpress",
+			},
+			Notes: []string{
+				"Leave blank when the jail name already says enough.",
+			},
+		}
 	case "dataset":
 		return wizardFieldGuide{
 			Purpose: "Absolute jail root path. The final path must end with the jail name.",
@@ -2791,7 +3791,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"persistent to manage rc.conf bridge settings before jail creation",
 			},
 			Notes: []string{
-				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for bridge, uplink, or defaultrouter.",
+				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for the bridge or uplink.",
 			},
 		}
 	case "uplink":
@@ -2903,7 +3903,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"/data:/srv/data, /logs:/var/log/app",
 			},
 			Notes: []string{
-				"Mount targets must stay inside the jail root after normalization.",
+				"Each target path is cleaned before validation. After resolving . and .. segments, it still has to point somewhere under the jail root; paths that escape to locations like / or /etc are rejected.",
 			},
 		}
 	case "linux_distro":
@@ -3119,17 +4119,30 @@ func (m model) detailLines(width int) []string {
 		memText = fmt.Sprintf("%dMB", jail.MemoryMB)
 	}
 
-	appendRenderedSection(&lines, "Overview", renderKeyValueLines(width,
+	appendRenderedSectionWithStyle(&lines, detailSectionStyle, "Overview", renderKeyValueLines(width,
 		[2]string{"Name", m.detail.Name},
 		[2]string{"State", state},
+		[2]string{"Type", valueOrDash(jail.Type)},
 		[2]string{"JID", jidText},
 		[2]string{"CPU", cpuText},
 		[2]string{"Memory", memText},
 		[2]string{"Path", m.detail.Path},
 		[2]string{"Hostname", m.detail.Hostname},
 	))
+	lines = append(lines, renderKeyValueLinesWithValueFallback(width, "",
+		[2]string{"Note", m.detail.Note},
+	)...)
 
-	appendSection(&lines, width, "Configured state")
+	if m.detailNoteMode || m.detailNoteSaving {
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Note editor")
+		lines = append(lines, renderKeyValueLinesWithValueFallback(width, "",
+			[2]string{"Note", m.detailNoteInput},
+			[2]string{"Length", fmt.Sprintf("%d/%d", jailNoteLength(m.detailNoteInput), maxJailNoteLen)},
+		)...)
+		lines = append(lines, truncate("Press enter to save, esc to cancel, and leave the field blank to clear the note.", width))
+	}
+
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "Configured state")
 	lines = append(lines, renderKeyValueLines(width, [2]string{"Source", m.detail.JailConfSource})...)
 	if len(m.detail.JailConfValues) == 0 && len(m.detail.JailConfFlags) == 0 {
 		lines = append(lines, truncate("No matching jail block found.", width))
@@ -3142,7 +4155,7 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 
-	appendSection(&lines, width, "Startup policy")
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "Startup policy")
 	if m.detail.StartupConfig == nil {
 		lines = append(lines, truncate("Startup policy unavailable.", width))
 	} else {
@@ -3164,35 +4177,39 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 
-	appendRenderedSection(&lines, "Runtime state", renderKeyValueLines(width,
+	appendRenderedSectionWithStyle(&lines, detailSectionStyle, "Runtime state", renderKeyValueLines(width,
 		[2]string{"State", state},
 		[2]string{"CPU", cpuText},
 		[2]string{"Memory", memText},
 	))
-	runtimeNotes := make([]string, 0, 2)
+	runtimeNotes := []string{
+		"Runtime values come from the running jail and may differ from jail.conf defaults or the configured state shown above.",
+	}
 	if len(m.detail.RuntimeValues) == 0 {
-		runtimeNotes = append(runtimeNotes, "No running runtime record for this jail.")
+		runtimeNotes = append(runtimeNotes, "No running runtime record is available for this jail.")
 	} else {
 		for _, key := range orderedRuntimeKeys(m.detail.RuntimeValues) {
 			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.RuntimeValues[key]})...)
 		}
 	}
-	if !m.detailShowAdvanced {
-		runtimeNotes = append(runtimeNotes, "Raw runtime/default parameters hidden; press a to show.")
+	if m.detailShowAdvanced {
+		runtimeNotes = append(runtimeNotes, "Advanced runtime/default parameters are shown below; press a to hide them.")
+	} else {
+		runtimeNotes = append(runtimeNotes, "Advanced runtime/default parameters are hidden; press a to show them.")
 	}
 
 	if m.detail.NetworkSummary != nil {
-		appendSection(&lines, width, "Network summary")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Network summary")
 		networkLabelWidth := 25
 		if width < 72 {
 			networkLabelWidth = 20
 		}
 		networkPairs := make([][2]string, 0, len(m.detail.NetworkSummary.Configured)+len(m.detail.NetworkSummary.Runtime))
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Configured) {
-			networkPairs = append(networkPairs, [2]string{"Configured " + key, m.detail.NetworkSummary.Configured[key]})
+			networkPairs = append(networkPairs, [2]string{key, m.detail.NetworkSummary.Configured[key]})
 		}
 		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Runtime) {
-			networkPairs = append(networkPairs, [2]string{"Runtime " + key, m.detail.NetworkSummary.Runtime[key]})
+			networkPairs = append(networkPairs, [2]string{key, m.detail.NetworkSummary.Runtime[key]})
 		}
 		if len(networkPairs) > 0 {
 			lines = append(lines, renderKeyValueLinesWithLabelWidth(width, networkLabelWidth, networkPairs...)...)
@@ -3208,7 +4225,7 @@ func (m model) detailLines(width int) []string {
 		}
 	}
 
-	appendSection(&lines, width, "ZFS dataset")
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "ZFS dataset")
 	if m.detail.ZFS == nil {
 		lines = append(lines, truncate("No dataset matched the jail path.", width))
 	} else {
@@ -3225,7 +4242,7 @@ func (m model) detailLines(width int) []string {
 		)...)
 	}
 
-	appendSection(&lines, width, "rctl")
+	appendSectionWithStyle(&lines, width, detailSectionStyle, "rctl")
 	if m.detail.RctlConfig != nil {
 		lines = append(lines, renderKeyValueLines(width,
 			[2]string{"Limit mode", valueOrDash(m.detail.RctlConfig.Mode)},
@@ -3260,7 +4277,7 @@ func (m model) detailLines(width int) []string {
 	}
 
 	if m.detail.LinuxReadiness != nil {
-		appendSection(&lines, width, "Linux readiness")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Linux readiness")
 		for _, line := range m.linuxReadinessLines() {
 			if looksLikeWarningText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
@@ -3271,19 +4288,19 @@ func (m model) detailLines(width int) []string {
 	}
 
 	if len(m.detail.SourceErrors) > 0 {
-		appendSection(&lines, width, "Source errors")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Source errors")
 		for _, source := range sortedKeys(m.detail.SourceErrors) {
 			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
 		}
 	}
 	if len(runtimeNotes) > 0 {
-		appendSection(&lines, width, "Runtime notes")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Runtime notes")
 		for _, line := range runtimeNotes {
 			lines = append(lines, truncate(line, width))
 		}
 	}
 	if m.detailShowAdvanced {
-		appendSection(&lines, width, "Advanced runtime parameters")
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Advanced runtime parameters")
 		if len(m.detail.AdvancedRuntimeFields) == 0 {
 			lines = append(lines, truncate("No additional runtime/default parameters.", width))
 		} else {
@@ -3299,7 +4316,6 @@ func orderedRuntimeKeys(values map[string]string) []string {
 	order := []string{
 		"JID",
 		"Live path",
-		"Live hostname",
 		"Network mode",
 		"Interface",
 		"IPv4",
@@ -3349,7 +4365,7 @@ func (m model) linuxReadinessLines() []string {
 	for _, reason := range readiness.Host.EnableDrift {
 		lines = append(lines, "Warning: linux_enable drift: "+reason)
 	}
-	if readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
+	if readiness.RuntimeChecked && readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
 		lines = append(lines, "Warning: linux service status check failed: "+readiness.Host.ServiceStatusErr)
 	}
 	if readiness.RuntimeChecked {
@@ -3526,6 +4542,16 @@ func (m model) selectedJail() (Jail, bool) {
 	return m.snapshot.Jails[idx], true
 }
 
+func (m model) selectedJailList() []Jail {
+	result := make([]Jail, 0, len(m.selectedJails))
+	for _, jail := range m.snapshot.Jails {
+		if _, ok := m.selectedJails[jail.Name]; ok {
+			result = append(result, jail)
+		}
+	}
+	return result
+}
+
 func newTemplateDatasetCreateState(sourceInput string, status initialConfigStatus, returnMode screenMode, selectMode bool) templateDatasetCreateState {
 	state := templateDatasetCreateState{
 		returnMode:  returnMode,
@@ -3576,6 +4602,24 @@ func (s *templateDatasetCreateState) refreshClonePreview() {
 		return
 	}
 	s.clonePreview = InspectTemplateSnapshotClone(item.Name, snapshot.Name, s.cloneName, s.parentOverride())
+}
+
+func (s *templateDatasetCreateState) refreshSnapshotDestroyPreview() {
+	item, ok := s.selectedItem()
+	if !ok {
+		s.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{}
+		return
+	}
+	s.boundCloneCursor()
+	snapshot, ok := s.selectedCloneSnapshot()
+	if !ok {
+		s.snapshotDestroyPreview = TemplateDatasetSnapshotDestroyPreview{
+			Current: item,
+			Err:     fmt.Errorf("select a snapshot to destroy"),
+		}
+		return
+	}
+	s.snapshotDestroyPreview = InspectTemplateSnapshotDestroy(item.Name, snapshot.Name, s.parentOverride())
 }
 
 func (s *templateDatasetCreateState) appendSource(text string) {
@@ -3742,6 +4786,10 @@ func (s *templateDatasetCreateState) syncSelection() {
 		if item, ok := s.selectedItem(); ok {
 			s.destroyPreview = InspectTemplateDatasetDestroy(item.Name, s.parentOverride())
 		}
+		return
+	}
+	if s.mode == templateManagerModeSnapshotDestroy {
+		s.refreshSnapshotDestroyPreview()
 	}
 }
 
@@ -3761,16 +4809,23 @@ func (m model) renderHeader() string {
 		m.snapshot.TotalMemoryMB,
 		lastUpdated,
 	))
-	return lipgloss.NewStyle().Width(m.width).Render(title + "  " + summary)
+	return headerBarStyle.Width(m.width).Render(title + "  " + summary)
 }
 
 func (m model) renderFooter() string {
-	hint := "j/k or up/down: scroll | g/G: top/bottom | enter/d: details | c: create wizard | i: initial config | t: template manager | s: start/stop | z: ZFS | x: destroy | h: help | r: refresh | q: quit"
+	hint := "j/k: navigate | enter/d: detail | c: create | s: start/stop | R: restart | u: upgrade | space: select | ctrl+a: all | z: ZFS | x: destroy | t: templates | i: config | h: help | r: refresh | q: quit"
 	footerRenderer := footerStyle
 	message := m.notice
 	if m.err != nil {
 		message = "warning: " + m.err.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	if len(m.selectedJails) > 0 && m.err == nil {
+		selMsg := fmt.Sprintf("%d selected | s: start/stop | R: restart | esc: clear selection", len(m.selectedJails))
+		if m.notice != "" {
+			selMsg += " | " + m.notice
+		}
+		message = selMsg
 	}
 	return m.renderFooterWithMessage(hint, message, footerRenderer)
 }
@@ -3789,6 +4844,14 @@ func (m model) renderFooterWithMessage(hint, message string, footerRenderer lipg
 
 	lines = append(lines, footerRenderer.Width(width).Render(hint))
 	return strings.Join(lines, "\n")
+}
+
+func (m model) pageBodyHeight(header, footer string, verticalPadding int) int {
+	height := m.height - lipgloss.Height(header) - lipgloss.Height(footer) - 1 - verticalPadding*2
+	if height < 1 {
+		return 1
+	}
+	return height
 }
 
 func (m model) renderJailList(width, height int) string {
@@ -3823,24 +4886,15 @@ func (m model) renderRows(maxRows, width int) string {
 
 	for idx := start; idx < end; idx++ {
 		jail := m.snapshot.Jails[idx]
-		prefix := " "
+		sel := " "
+		if _, ok := m.selectedJails[jail.Name]; ok {
+			sel = "*"
+		}
+		cursorChar := " "
 		if idx == m.cursor {
-			prefix = ">"
+			cursorChar = ">"
 		}
-		jid := "-"
-		if jail.JID > 0 {
-			jid = strconv.Itoa(jail.JID)
-		}
-
-		line := fmt.Sprintf(
-			"%s %s %-18s JID:%-5s CPU:%6.2f%% MEM:%5dMB",
-			prefix,
-			statusBadge(jail.Running),
-			truncate(jail.Name, 18),
-			jid,
-			jail.CPUPercent,
-			jail.MemoryMB,
-		)
+		line := fmt.Sprintf("%s%s %s %s", cursorChar, sel, statusBadge(jail.Running), jail.Name)
 		line = truncate(line, max(1, width-3))
 		if idx == m.cursor {
 			line = selectedRowStyle.Width(max(1, width-2)).Render(line)
@@ -3868,10 +4922,20 @@ func (m model) renderDetailPanel(width, height int) string {
 		lines = append(lines, renderKeyValueLines(max(12, width-2),
 			[2]string{"Name", j.Name},
 			[2]string{"State", state},
+			[2]string{"Type", valueOrDash(j.Type)},
+			[2]string{"Hostname", valueOrDash(j.Hostname)},
 			[2]string{"JID", jidText},
 			[2]string{"CPU", fmt.Sprintf("%.2f%%", j.CPUPercent)},
 			[2]string{"Memory", fmt.Sprintf("%dMB", j.MemoryMB)},
 		)...)
+		lines = append(lines, renderKeyValueLinesWithValueFallback(max(12, width-2), "(no notes)",
+			[2]string{"Note", j.Note},
+		)...)
+		if strings.TrimSpace(j.QuotaUsage) != "" {
+			lines = append(lines, renderKeyValueLines(max(12, width-2),
+				[2]string{"Quota", j.QuotaUsage},
+			)...)
+		}
 	}
 
 	return lipgloss.NewStyle().
@@ -3879,6 +4943,33 @@ func (m model) renderDetailPanel(width, height int) string {
 		Height(height).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) appendDetailNoteInput(text string) {
+	if text == "" {
+		return
+	}
+	for _, r := range text {
+		if r == '\n' || r == '\r' {
+			continue
+		}
+		if jailNoteLength(m.detailNoteInput) >= maxJailNoteLen {
+			break
+		}
+		m.detailNoteInput += string(r)
+	}
+	m.detailErr = nil
+	m.detailNotice = ""
+}
+
+func (m *model) backspaceDetailNoteInput() {
+	runes := []rune(m.detailNoteInput)
+	if len(runes) == 0 {
+		return
+	}
+	m.detailNoteInput = string(runes[:len(runes)-1])
+	m.detailErr = nil
+	m.detailNotice = ""
 }
 
 func (m *model) boundCursor() {
@@ -3972,53 +5063,85 @@ func looksLikeWarningText(message string) bool {
 }
 
 func appendSection(lines *[]string, width int, title string, body ...string) {
+	appendSectionWithStyle(lines, width, sectionStyle, title, body...)
+}
+
+func appendSectionWithStyle(lines *[]string, width int, style lipgloss.Style, title string, body ...string) {
 	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
 		*lines = append(*lines, "")
 	}
-	*lines = append(*lines, sectionStyle.Render(title))
+	*lines = append(*lines, style.Render(title))
 	for _, line := range body {
 		*lines = append(*lines, truncate(line, width))
 	}
 }
 
 func appendRenderedSection(lines *[]string, title string, body []string) {
+	appendRenderedSectionWithStyle(lines, sectionStyle, title, body)
+}
+
+func appendRenderedSectionWithStyle(lines *[]string, style lipgloss.Style, title string, body []string) {
 	if len(*lines) > 0 && (*lines)[len(*lines)-1] != "" {
 		*lines = append(*lines, "")
 	}
-	*lines = append(*lines, sectionStyle.Render(title))
+	*lines = append(*lines, style.Render(title))
 	*lines = append(*lines, body...)
 }
 
+func appendWrappedText(lines *[]string, width int, text string) {
+	for _, line := range wrapText(text, max(8, width)) {
+		*lines = append(*lines, line)
+	}
+}
+
+func appendWrappedStyledText(lines *[]string, width int, style lipgloss.Style, text string) {
+	for _, line := range wrapText(text, max(8, width)) {
+		*lines = append(*lines, style.Render(line))
+	}
+}
+
 func renderKeyValueLines(width int, pairs ...[2]string) []string {
+	return renderKeyValueLinesWithValueFallback(width, "-", pairs...)
+}
+
+func renderKeyValueLinesWithValueFallback(width int, blankFallback string, pairs ...[2]string) []string {
 	labelWidth := 25
 	if width < 72 {
 		labelWidth = 20
 	}
-	return renderKeyValueLinesWithLabelWidth(width, labelWidth, pairs...)
+	return renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth, blankFallback, pairs...)
 }
 
 func renderKeyValueLinesWithLabelWidth(width, labelWidth int, pairs ...[2]string) []string {
+	return renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth, "-", pairs...)
+}
+
+func renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth int, blankFallback string, pairs ...[2]string) []string {
 	lines := make([]string, 0, len(pairs)*2)
 	for _, pair := range pairs {
-		lines = append(lines, renderKeyValue(width, labelWidth, pair[0], pair[1])...)
+		lines = append(lines, renderKeyValueWithFallback(width, labelWidth, pair[0], pair[1], blankFallback)...)
 	}
 	return lines
 }
 
 func renderKeyValue(width, labelWidth int, label, value string) []string {
+	return renderKeyValueWithFallback(width, labelWidth, label, value, "-")
+}
+
+func renderKeyValueWithFallback(width, labelWidth int, label, value, blankFallback string) []string {
 	label = strings.TrimSpace(label)
 	if label == "" {
-		return []string{truncate(valueOrDash(value), width)}
+		return []string{truncate(valueOrPlaceholder(value, blankFallback), width)}
 	}
 	if labelWidth < 8 {
 		labelWidth = 8
 	}
 	valueWidth := max(8, width-labelWidth-2)
-	wrapped := wrapText(valueOrDash(value), valueWidth)
+	wrapped := wrapText(valueOrPlaceholder(value, blankFallback), valueWidth)
 	prefix := fmt.Sprintf("%-*s", labelWidth, label+":")
 	lines := make([]string, 0, len(wrapped))
 	if len(wrapped) == 0 {
-		return []string{detailKeyStyle.Render(prefix) + " -"}
+		return []string{detailKeyStyle.Render(prefix) + " " + blankFallback}
 	}
 	lines = append(lines, detailKeyStyle.Render(prefix)+" "+wrapped[0])
 	continuation := strings.Repeat(" ", labelWidth+1)

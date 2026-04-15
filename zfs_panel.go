@@ -628,7 +628,7 @@ func (m model) updateZFSPanelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) renderZFSPanelView() string {
 	title := titleStyle.Render("ZFS Integration Panel")
 	meta := summaryStyle.Render("Dataset: " + valueOrDash(m.zfsPanel.dataset))
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	hint := "j/k: select snapshot | c: create snapshot | r: rollback selected | n: clone as jail | e: edit property | x: refresh | esc: back | q: quit"
 	if m.zfsPanel.inputMode {
@@ -655,7 +655,7 @@ func (m model) renderZFSPanelView() string {
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
-	bodyHeight := max(5, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	lines := m.zfsPanelLines(max(12, m.width-2), bodyHeight)
 	body := lipgloss.NewStyle().
 		Width(m.width).
@@ -663,7 +663,7 @@ func (m model) renderZFSPanelView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) zfsPanelLines(width, height int) []string {
@@ -681,13 +681,7 @@ func (m model) zfsPanelLines(width, height int) []string {
 			if idx == m.zfsPanel.cursor {
 				prefix = ">"
 			}
-			row := fmt.Sprintf(
-				"%s %-24s created:%-18s used:%s",
-				prefix,
-				truncate(snapshotShortName(snapshot.Name), 24),
-				truncate(snapshot.Creation, 18),
-				snapshot.Used,
-			)
+			row := fmt.Sprintf("%s %s", prefix, snapshotShortName(snapshot.Name))
 			row = truncate(row, width)
 			if idx == m.zfsPanel.cursor {
 				row = selectedRowStyle.Width(max(1, width)).Render(row)
@@ -783,21 +777,12 @@ func (m model) zfsPanelLines(width, height int) []string {
 		lines = append(lines, truncate("Allowed values: compression={inherit,on,off,lz4,zle,gzip,gzip-1..9}; quota/reservation={inherit,none,<size>}", width))
 	}
 
-	if len(m.zfsPanel.logs) > 0 {
-		appendSection(&lines, width, "Last operation")
-		maxLogs := min(8, len(m.zfsPanel.logs))
-		for _, line := range m.zfsPanel.logs[len(m.zfsPanel.logs)-maxLogs:] {
-			lines = append(lines, truncate(line, width))
-		}
-	}
-
 	return lines
 }
 
 func (m model) zfsRollbackImplicationLines(width int, snapshot ZFSSnapshot) []string {
 	newer := m.zfsNewerSnapshots(snapshot.Name)
 	lines := []string{
-		truncate("Rollback command: zfs rollback -r "+snapshot.Name, width),
 		truncate("Dataset contents will revert to the selected snapshot state.", width),
 	}
 	if len(newer) == 0 {

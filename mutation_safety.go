@@ -14,6 +14,12 @@ type fileMutationBackup struct {
 	BackupPath   string
 }
 
+type managedPathBackup struct {
+	Path       string
+	Existed    bool
+	FileBackup *fileMutationBackup
+}
+
 func backupFileForMutation(path, category string, logs *[]string) (*fileMutationBackup, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -59,13 +65,68 @@ func restoreFileMutationBackup(backup *fileMutationBackup, logs *[]string) error
 	if err != nil {
 		return fmt.Errorf("failed to inspect backup %q: %w", backup.BackupPath, err)
 	}
-	if err := copyFileContents(backup.BackupPath, backup.OriginalPath, info.Mode().Perm()); err != nil {
+	targetPath, err := resolveReplaceTargetPath(backup.OriginalPath)
+	if err != nil {
+		return err
+	}
+	if err := copyFileContents(backup.BackupPath, targetPath, info.Mode().Perm()); err != nil {
 		return fmt.Errorf("failed to restore %q from backup %q: %w", backup.OriginalPath, backup.BackupPath, err)
 	}
 	if logs != nil {
 		*logs = append(*logs, fmt.Sprintf("restore: %s <- %s", backup.OriginalPath, backup.BackupPath))
 	}
 	return nil
+}
+
+func backupPathsForMutation(paths []string, category string, logs *[]string) ([]managedPathBackup, error) {
+	backups := make([]managedPathBackup, 0, len(paths))
+	seen := map[string]struct{}{}
+	for _, raw := range paths {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+
+		_, statErr := os.Stat(path)
+		existed := statErr == nil
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("failed to inspect %q before backup: %w", path, statErr)
+		}
+
+		backup, err := backupFileForMutation(path, category, logs)
+		if err != nil {
+			return nil, err
+		}
+		backups = append(backups, managedPathBackup{
+			Path:       path,
+			Existed:    existed,
+			FileBackup: backup,
+		})
+	}
+	return backups, nil
+}
+
+func restorePathMutationBackups(backups []managedPathBackup, logs *[]string) {
+	for idx := len(backups) - 1; idx >= 0; idx-- {
+		backup := backups[idx]
+		if backup.FileBackup != nil {
+			if err := restoreFileMutationBackup(backup.FileBackup, logs); err != nil {
+				if logs != nil {
+					*logs = append(*logs, "rollback warning: "+err.Error())
+				}
+			}
+			continue
+		}
+		if !backup.Existed {
+			if err := removeFileIfExists(backup.Path, logs); err != nil && logs != nil {
+				*logs = append(*logs, "rollback warning: "+err.Error())
+			}
+		}
+	}
 }
 
 func mutationBackupDir(category string) (string, error) {
@@ -125,4 +186,114 @@ func copyFileContents(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+func writeFileAtomicReplace(dst string, content []byte, mode os.FileMode) error {
+	dst = strings.TrimSpace(dst)
+	if dst == "" {
+		return fmt.Errorf("destination path is required")
+	}
+	targetPath, err := resolveReplaceTargetPath(dst)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(targetPath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func writeFileAtomicExclusive(dst string, content []byte, mode os.FileMode) error {
+	dst = strings.TrimSpace(dst)
+	if dst == "" {
+		return fmt.Errorf("destination path is required")
+	}
+	dir := filepath.Dir(dst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(tmpPath, dst); err != nil {
+		if os.IsExist(err) {
+			return os.ErrExist
+		}
+		return err
+	}
+	cleanup = false
+	_ = os.Remove(tmpPath)
+	return nil
+}
+
+func resolveReplaceTargetPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("destination path is required")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		return "", fmt.Errorf("failed to inspect %q: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve symlink %q: %w", path, err)
+	}
+	resolved = strings.TrimSpace(resolved)
+	if resolved == "" {
+		return "", fmt.Errorf("resolved symlink target for %q is empty", path)
+	}
+	return resolved, nil
 }

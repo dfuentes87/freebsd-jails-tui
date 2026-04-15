@@ -69,14 +69,31 @@ func validateJailDestinationPath(destination, jailName string) (string, error) {
 }
 
 func validateAccessibleAbsolutePath(value, field string) (string, error) {
-	clean, err := validateAbsolutePath(value, field)
+	clean, _, err := validateAccessibleAbsolutePathInfo(value, field)
+	return clean, err
+}
+
+func validateAccessibleAbsoluteDirectory(value, field string) (string, error) {
+	clean, info, err := validateAccessibleAbsolutePathInfo(value, field)
 	if err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(clean); err != nil {
-		return "", fmt.Errorf("%s %q is not accessible", field, clean)
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s %q must be a directory", field, clean)
 	}
 	return clean, nil
+}
+
+func validateAccessibleAbsolutePathInfo(value, field string) (string, os.FileInfo, error) {
+	clean, err := validateAbsolutePath(value, field)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := os.Stat(clean)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s %q is not accessible", field, clean)
+	}
+	return clean, info, nil
 }
 
 func validateUnusedMountpointPath(value, field string) (string, error) {

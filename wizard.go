@@ -12,12 +12,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
 	jailNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	memoryLimitPattern = regexp.MustCompile(`^[0-9]+[KMGTP]?$`)
 )
+
+const maxJailNoteLen = 120
 
 type wizardField struct {
 	ID          string
@@ -63,6 +66,7 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "jail_type", Label: "Type", Placeholder: "thick", Help: "Options: thick, thin, vnet, linux"},
 			{ID: "name", Label: "Jail name", Placeholder: "web01", Help: "Allowed: letters, numbers, ., _, -"},
 			{ID: "hostname", Label: "Hostname", Placeholder: "web01.example.internal", Help: "Optional, defaults to jail name"},
+			{ID: "note", Label: "Note", Placeholder: "nginx reverse proxy", Help: "Optional short dashboard note"},
 			{ID: "dataset", Label: "Destination", Placeholder: "/usr/local/jails/containers/web01", Help: "Full jail root path"},
 			{ID: "template_release", Label: "Template/Release", Placeholder: "15.0-RELEASE", Help: "Local path, release tag, or custom https URL"},
 			{ID: "patch_base", Label: "Patch FreeBSD base", Placeholder: "auto", Help: "auto, yes, or no"},
@@ -79,7 +83,7 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "cpu_percent", Label: "CPU %", Placeholder: "50", Help: ""},
 			{ID: "memory_limit", Label: "Memory", Placeholder: "2G"},
 			{ID: "process_limit", Label: "Max processes", Placeholder: "512", Help: ""},
-			{ID: "mount_points", Label: "Mount points (optional)", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
+			{ID: "mount_points", Label: "Mount points", Placeholder: "/data,/logs", Help: "Example: /mnt/shared,/var/cache/pkg"},
 		},
 	},
 	{
@@ -113,6 +117,7 @@ type jailWizardValues struct {
 	IP6             string
 	DefaultRouter   string
 	Hostname        string
+	Note            string
 	PatchBase       string
 	StartupOrder    string
 	Dependencies    string
@@ -326,6 +331,19 @@ func (w *jailCreationWizard) beginThinDatasetSelect() error {
 	return nil
 }
 
+func boundSelectionCursor(cursor, count int) int {
+	if count <= 0 {
+		return 0
+	}
+	if cursor < 0 {
+		return 0
+	}
+	if cursor >= count {
+		return count - 1
+	}
+	return cursor
+}
+
 func (w *jailCreationWizard) endThinDatasetSelect() {
 	w.thinDatasetMode = false
 	w.thinDatasetOpts = nil
@@ -334,16 +352,7 @@ func (w *jailCreationWizard) endThinDatasetSelect() {
 }
 
 func (w *jailCreationWizard) boundUserlandCursor() {
-	if len(w.userlandOpts) == 0 {
-		w.userlandCursor = 0
-		return
-	}
-	if w.userlandCursor < 0 {
-		w.userlandCursor = 0
-	}
-	if w.userlandCursor >= len(w.userlandOpts) {
-		w.userlandCursor = len(w.userlandOpts) - 1
-	}
+	w.userlandCursor = boundSelectionCursor(w.userlandCursor, len(w.userlandOpts))
 }
 
 func (w *jailCreationWizard) selectedUserlandOption() (userlandOption, bool) {
@@ -355,16 +364,7 @@ func (w *jailCreationWizard) selectedUserlandOption() (userlandOption, bool) {
 }
 
 func (w *jailCreationWizard) boundThinDatasetCursor() {
-	if len(w.thinDatasetOpts) == 0 {
-		w.thinDatasetCursor = 0
-		return
-	}
-	if w.thinDatasetCursor < 0 {
-		w.thinDatasetCursor = 0
-	}
-	if w.thinDatasetCursor >= len(w.thinDatasetOpts) {
-		w.thinDatasetCursor = len(w.thinDatasetOpts) - 1
-	}
+	w.thinDatasetCursor = boundSelectionCursor(w.thinDatasetCursor, len(w.thinDatasetOpts))
 }
 
 func (w *jailCreationWizard) selectedThinDatasetOption() (templateDatasetOption, bool) {
@@ -384,16 +384,7 @@ func (w *jailCreationWizard) selectedTemplate() (wizardTemplate, bool) {
 }
 
 func (w *jailCreationWizard) boundTemplateCursor() {
-	if len(w.templates) == 0 {
-		w.templateCursor = 0
-		return
-	}
-	if w.templateCursor < 0 {
-		w.templateCursor = 0
-	}
-	if w.templateCursor >= len(w.templates) {
-		w.templateCursor = len(w.templates) - 1
-	}
+	w.templateCursor = boundSelectionCursor(w.templateCursor, len(w.templates))
 }
 
 func (w *jailCreationWizard) appendTemplateInput(input string) {
@@ -597,6 +588,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.DefaultRouter
 	case "hostname":
 		return &w.values.Hostname
+	case "note":
+		return &w.values.Note
 	case "patch_base":
 		return &w.values.PatchBase
 	case "startup_order":
@@ -654,6 +647,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.DefaultRouter
 	case "hostname":
 		return w.values.Hostname
+	case "note":
+		return w.values.Note
 	case "patch_base":
 		return w.values.PatchBase
 	case "startup_order":
@@ -708,6 +703,13 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 	if w.currentStepHasField("name") && !jailNamePattern.MatchString(strings.TrimSpace(w.values.Name)) {
 		return "name", fmt.Errorf("invalid jail name")
 	}
+	if w.currentStepHasField("note") {
+		note, err := normalizeJailNote(w.values.Note)
+		if err != nil {
+			return "note", err
+		}
+		w.values.Note = note
+	}
 	if w.currentStepHasField("dataset") && strings.TrimSpace(w.values.Dataset) == "" {
 		return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 	}
@@ -717,6 +719,9 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 				return "dataset", fmt.Errorf("destination is required: enter full path like /usr/local/jails/containers/%s", strings.TrimSpace(w.values.Name))
 			}
 			return "dataset", err
+		}
+		if checkJailRootExistsAndNotEmpty(w.values) {
+			return "dataset", fmt.Errorf("destination directory already exists and is not empty; please manually investigate or remove it")
 		}
 	}
 	if w.currentStepHasField("template_release") && strings.TrimSpace(w.values.TemplateRelease) == "" {
@@ -807,7 +812,7 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		if _, err := parseStartupOrderValue(w.values.StartupOrder); err != nil {
 			return "startup_order", err
 		}
-		dependencies, err := parseJailDependencyNames(w.values.Dependencies, w.values.Name)
+		dependencies, err := validateExistingJailDependencies(w.values.Dependencies, w.values.Name)
 		if err != nil {
 			return "dependencies", err
 		}
@@ -872,6 +877,24 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func requiresDownload(input string) bool {
+	input = strings.TrimSpace(input)
+	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
+		return true
+	}
+	if releaseValuePattern.MatchString(strings.ToUpper(input)) {
+		localBaseArchive := "/usr/freebsd-dist/base.txz"
+		if _, err := os.Stat(localBaseArchive); err == nil {
+			return false
+		}
+		if _, ok := findReleaseArchiveInUserland(defaultUserlandDir, input); ok {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 func validateTemplateReleaseInput(values jailWizardValues) error {
@@ -991,7 +1014,7 @@ func validateMountPointInput(raw string) error {
 			if source == "" {
 				return fmt.Errorf("mount source is required before ':'")
 			}
-			cleanSource, err := validateAccessibleAbsolutePath(source, "mount source")
+			cleanSource, err := validateAccessibleAbsoluteDirectory(source, "mount source")
 			if err != nil {
 				return err
 			}
@@ -1108,6 +1131,7 @@ func (w jailCreationWizard) summaryLines() []string {
 		fmt.Sprintf("IPv6: %s", valueOrDash(w.values.IP6)),
 		fmt.Sprintf("Default router: %s", valueOrDash(w.values.DefaultRouter)),
 		fmt.Sprintf("Hostname: %s", valueOrDash(w.values.Hostname)),
+		fmt.Sprintf("Note: %s", valueOrDash(w.values.Note)),
 		fmt.Sprintf("Startup order: %s", startupOrderSummary(w.values.StartupOrder)),
 		fmt.Sprintf("Dependencies: %s", dependencySummary(w.values.Dependencies)),
 		fmt.Sprintf("CPU %%: %s", valueOrDash(w.values.CPUPercent)),
@@ -1191,13 +1215,17 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		addStep("Ensure destination path exists:")
 		addDetail(fmt.Sprintf("   mkdir -p %s", destination))
 		addStep("Provision jail root from selected template/release:")
-		addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
+		if requiresDownload(w.values.TemplateRelease) {
+			addDetail(fmt.Sprintf("   # source: %s (not found locally, will download)", w.values.TemplateRelease))
+		} else {
+			addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
+		}
 	}
 	if normalizedJailType(w.values.JailType) != "thin" {
 		patchDecision := resolveFreeBSDPatchDecision(w.values.TemplateRelease, w.values.PatchBase)
 		if patchDecision.Effective {
 			addStep("Patch extracted FreeBSD base to latest level:")
-			addDetail(fmt.Sprintf("   freebsd-update -b %s fetch install", destination))
+			addDetail(fmt.Sprintf("   env PAGER=cat freebsd-update --not-running-from-cron -b %s fetch install", destination))
 		}
 	}
 
@@ -1216,9 +1244,6 @@ func (w jailCreationWizard) commandPlanLines() []string {
 			addDetail(fmt.Sprintf("   sysrc ifconfig_%s=%q", strings.TrimSpace(w.values.Bridge), bridgeConfig))
 			if strings.TrimSpace(w.values.Uplink) != "" {
 				addDetail(fmt.Sprintf("   sysrc ifconfig_%s=up", strings.TrimSpace(w.values.Uplink)))
-			}
-			if strings.TrimSpace(w.values.DefaultRouter) != "" {
-				addDetail(fmt.Sprintf("   sysrc defaultrouter=%s", strings.TrimSpace(w.values.DefaultRouter)))
 			}
 		}
 		if w.networkPrereqs.BridgeCreateNeeded {
@@ -1371,6 +1396,33 @@ func jailFstabPathForName(name string) string {
 	return filepath.Join("/etc", "fstab."+name)
 }
 
+func checkJailRootExistsAndNotEmpty(values jailWizardValues) bool {
+	if normalizedJailType(values.JailType) == "thin" {
+		return false
+	}
+	destination := strings.TrimSpace(values.Dataset)
+	if !strings.HasPrefix(destination, "/") {
+		// Try to resolve ZFS dataset mountpoint
+		out, err := exec.Command("zfs", "list", "-H", "-o", "mountpoint", destination).Output()
+		if err == nil {
+			mountpoint := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+			if mountpoint != "" && mountpoint != "-" && mountpoint != "legacy" {
+				destination = mountpoint
+			} else {
+				destination = "/" + strings.Trim(destination, "/")
+			}
+		} else {
+			destination = "/" + strings.Trim(destination, "/")
+		}
+	}
+
+	entries, err := os.ReadDir(destination)
+	if err != nil {
+		return false
+	}
+	return len(entries) > 0
+}
+
 func defaultJailPathForValues(values jailWizardValues) string {
 	destination := strings.TrimSpace(values.Dataset)
 	if strings.HasPrefix(destination, "/") {
@@ -1395,7 +1447,7 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 	jailType := normalizedJailType(values.JailType)
 	lines := []string{
 		fmt.Sprintf("%s {", name),
-		"  exec.consolelog = \"/var/log/jail_console_${name}.log\";",
+		fmt.Sprintf("  exec.consolelog = \"/var/log/jail_console_%s.log\";", name),
 		"  allow.raw_sockets;",
 		"  exec.clean;",
 		"  mount.devfs;",
@@ -1427,6 +1479,9 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 		lines = append(lines,
 			fmt.Sprintf("  # freebsd-jails-tui: rctl_mode=persistent cpu_percent=%s memory_limit=%s process_limit=%s;", metadataDashValue(values.CPUPercent), metadataDashValue(values.MemoryLimit), metadataDashValue(values.ProcessLimit)),
 		)
+	}
+	if note, err := normalizeJailNote(values.Note); err == nil && note != "" {
+		lines = append(lines, fmt.Sprintf("  # freebsd-jails-tui: note=%s;", encodeTUIMetadataValue(note)))
 	}
 
 	if strings.TrimSpace(values.DefaultRouter) != "" {
@@ -1597,6 +1652,31 @@ func parseJailDependencyNames(raw, self string) ([]string, error) {
 	return deps, nil
 }
 
+func validateExistingJailDependencies(raw, self string) ([]string, error) {
+	deps, err := parseJailDependencyNames(raw, self)
+	if err != nil {
+		return nil, err
+	}
+	if len(deps) == 0 {
+		return nil, nil
+	}
+	configured := discoverConfiguredJails()
+	known := make(map[string]struct{}, len(configured))
+	for _, name := range configured {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		known[name] = struct{}{}
+	}
+	for _, dep := range deps {
+		if _, ok := known[dep]; !ok {
+			return nil, fmt.Errorf("dependency %q is not a configured jail", dep)
+		}
+	}
+	return deps, nil
+}
+
 func mustParseJailDependencyNames(raw string) []string {
 	deps, _ := parseJailDependencyNames(raw, "")
 	return deps
@@ -1723,6 +1803,34 @@ func metadataDashValue(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func normalizeJailNote(value string) (string, error) {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if utf8.RuneCountInString(value) > maxJailNoteLen {
+		return "", fmt.Errorf("note must be %d characters or fewer", maxJailNoteLen)
+	}
+	return value, nil
+}
+
+func jailNoteLength(value string) int {
+	return utf8.RuneCountInString(value)
+}
+
+func encodeTUIMetadataValue(value string) string {
+	return neturl.PathEscape(strings.TrimSpace(value))
+}
+
+func decodeTUIMetadataValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	decoded, err := neturl.PathUnescape(value)
+	if err != nil {
+		return value
+	}
+	return decoded
 }
 
 func freeBSDPatchSummary(sourceInput, preference string) string {

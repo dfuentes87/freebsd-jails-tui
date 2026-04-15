@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"bufio"
@@ -529,17 +530,58 @@ func discoverJailNamedDatasets() ([]string, error) {
 func enableRCDefaultsCmd(enableJail, enableParallel bool) tea.Cmd {
 	return func() tea.Msg {
 		var logs []string
+		rcConfPaths := []string{"/etc/rc.conf", "/etc/rc.conf.local"}
+		var rcConfBackups []managedPathBackup
+		backupsReady := false
+		ensureBackups := func() error {
+			if backupsReady {
+				return nil
+			}
+			backups, err := backupPathsForMutation(rcConfPaths, "initial-check-rcconf", &logs)
+			if err != nil {
+				return err
+			}
+			rcConfBackups = backups
+			backupsReady = true
+			return nil
+		}
+		restoreBackups := func() {
+			if !backupsReady {
+				return
+			}
+			restorePathMutationBackups(rcConfBackups, &logs)
+		}
+		changed := false
+
 		if enableJail {
-			if _, err := runLoggedCommand(&logs, "sysrc", "jail_enable=YES"); err != nil {
+			if err := ensureRCSettingSafeToMutate("jail_enable"); err != nil {
 				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_enable."}
 			}
+			if err := ensureBackups(); err != nil {
+				return initialActionMsg{logs: logs, err: err, message: "Failed preparing rc.conf backup."}
+			}
+			if _, err := runLoggedCommand(context.Background(), &logs, "sysrc", "jail_enable=YES"); err != nil {
+				restoreBackups()
+				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_enable."}
+			}
+			changed = true
 		}
 		if enableParallel {
-			if _, err := runLoggedCommand(&logs, "sysrc", "jail_parallel_start=YES"); err != nil {
+			if err := ensureRCSettingSafeToMutate("jail_parallel_start"); err != nil {
+				restoreBackups()
 				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_parallel_start."}
 			}
+			if err := ensureBackups(); err != nil {
+				restoreBackups()
+				return initialActionMsg{logs: logs, err: err, message: "Failed preparing rc.conf backup."}
+			}
+			if _, err := runLoggedCommand(context.Background(), &logs, "sysrc", "jail_parallel_start=YES"); err != nil {
+				restoreBackups()
+				return initialActionMsg{logs: logs, err: err, message: "Failed enabling jail_parallel_start."}
+			}
+			changed = true
 		}
-		if !enableJail && !enableParallel {
+		if !changed {
 			logs = append(logs, "No rc.conf settings required updates.")
 		}
 		return initialActionMsg{
@@ -633,7 +675,7 @@ func createDatasetLayoutCmd(baseDataset, mountpoint, media, templates, container
 		}
 
 		var logs []string
-		if _, err := runLoggedCommand(&logs, "zfs", "create", "-o", "mountpoint="+mountpoint, baseDataset); err != nil {
+		if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "create", "-o", "mountpoint="+mountpoint, baseDataset); err != nil {
 			return initialActionMsg{
 				logs:    logs,
 				err:     err,
@@ -645,7 +687,7 @@ func createDatasetLayoutCmd(baseDataset, mountpoint, media, templates, container
 			if dataset == "" {
 				continue
 			}
-			if _, err := runLoggedCommand(&logs, "zfs", "create", dataset); err != nil {
+			if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "create", dataset); err != nil {
 				return initialActionMsg{
 					logs:    logs,
 					err:     err,
@@ -864,9 +906,16 @@ func (m model) renderInitialCheckView() string {
 		checked = m.initCheck.status.CheckedAt.Format("15:04:05")
 	}
 	meta := summaryStyle.Render("Checked: " + checked)
-	header := lipgloss.NewStyle().Width(m.width).Render(title + "  " + meta)
+	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
-	bodyHeight := max(5, m.height-3)
+	footerRenderer := footerStyle
+	message := m.initCheck.message
+	if m.initCheck.err != nil {
+		message = "error: " + m.initCheck.err.Error()
+		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+	}
+	footer := m.renderFooterWithMessage(m.initialCheckFooterHint(), message, footerRenderer)
+	bodyHeight := m.pageBodyHeight(header, footer, 0)
 	lines := m.initialCheckLines(max(12, m.width-2))
 	if len(lines) > bodyHeight {
 		lines = lines[:bodyHeight]
@@ -876,15 +925,7 @@ func (m model) renderInitialCheckView() string {
 		Height(bodyHeight).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
-
-	footerRenderer := footerStyle
-	message := m.initCheck.message
-	if m.initCheck.err != nil {
-		message = "error: " + m.initCheck.err.Error()
-		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
-	}
-	footer := m.renderFooterWithMessage(m.initialCheckFooterHint(), message, footerRenderer)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
 }
 
 func (m model) initialCheckLines(width int) []string {
@@ -918,7 +959,6 @@ func (m model) initialCheckLines(width int) []string {
 		[2]string{"jail.conf path", valueOrDash(m.initCheck.status.JailConfStatus.ConfigPath)},
 		[2]string{"jail.conf.d include", includeState},
 	)...)
-	lines = append(lines, truncate("Expected include: "+jailConfDInclude, width))
 	if strings.TrimSpace(m.initCheck.status.JailConfStatus.ReadError) != "" {
 		lines = append(lines, wizardErrorStyle.Render(truncate("  "+m.initCheck.status.JailConfStatus.ReadError, width)))
 	}

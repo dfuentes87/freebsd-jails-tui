@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -22,6 +26,21 @@ type TemplateDatasetSnapshotCloneResult struct {
 	Mountpoint string
 	Logs       []string
 	Err        error
+}
+
+type TemplateDatasetSnapshotDestroyPreview struct {
+	Current          TemplateDatasetInfo
+	Snapshot         string
+	ReferencedJails  []string
+	ReferencedClones []string
+	Err              error
+}
+
+type TemplateDatasetSnapshotDestroyResult struct {
+	Dataset  string
+	Snapshot string
+	Logs     []string
+	Err      error
 }
 
 type JailSnapshotClonePreview struct {
@@ -60,30 +79,15 @@ func InspectTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 		preview.Err = fmt.Errorf("select a snapshot from the current template dataset")
 		return preview
 	}
-	validatedName, err := validateTemplateRenameLeafName(preview.NewName)
+	validatedName, newDataset, newMountpoint, err := validateTemplateDatasetTarget(info.ParentDataset, info.ParentMountpoint, preview.NewName)
 	if err != nil {
 		preview.Err = err
 		return preview
 	}
 	preview.NewName = validatedName
 	preview.ReadonlyAfter = true
-	preview.NewDataset = info.ParentDataset + "/" + preview.NewName
-	preview.NewMountpoint = filepath.Join(info.ParentMountpoint, preview.NewName)
-	if preview.NewDataset, err = validateZFSDatasetName(preview.NewDataset, "template dataset"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if preview.NewMountpoint, err = validateAbsolutePath(preview.NewMountpoint, "template mountpoint"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if preview.NewMountpoint, err = validateUnusedMountpointPath(preview.NewMountpoint, "template mountpoint"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if zfsDatasetExists(preview.NewDataset) {
-		preview.Err = fmt.Errorf("template dataset %q already exists", preview.NewDataset)
-	}
+	preview.NewDataset = newDataset
+	preview.NewMountpoint = newMountpoint
 	return preview
 }
 
@@ -101,18 +105,173 @@ func ExecuteTemplateSnapshotClone(dataset, snapshot, newName string, parentOverr
 	}
 	result.Dataset = preview.NewDataset
 	result.Mountpoint = preview.NewMountpoint
-	if _, err := runLoggedCommand(&logs, "zfs", "clone", preview.Snapshot, preview.NewDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "clone", preview.Snapshot, preview.NewDataset); err != nil {
 		return fail(fmt.Errorf("failed to clone template snapshot %q: %w", preview.Snapshot, err))
 	}
-	if _, err := runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.NewDataset)
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.NewDataset)
 		return fail(fmt.Errorf("failed to set mountpoint for %q: %w", preview.NewDataset, err))
 	}
-	if err := finalizeTemplateDatasetReadonly(preview.NewDataset, &logs); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.NewDataset)
+	if err := finalizeTemplateDatasetReadonly(context.Background(), preview.NewDataset, &logs); err != nil {
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.NewDataset)
 		return fail(err)
 	}
 	result.Logs = logs
+	return result
+}
+
+func InspectTemplateSnapshotDestroy(dataset, snapshot string, parentOverride *templateDatasetParent) TemplateDatasetSnapshotDestroyPreview {
+	preview := TemplateDatasetSnapshotDestroyPreview{
+		Snapshot: strings.TrimSpace(snapshot),
+	}
+	info, err := CollectTemplateDatasetDetail(dataset, parentOverride)
+	if err != nil {
+		preview.Err = err
+		return preview
+	}
+	preview.Current = info
+	if preview.Snapshot == "" || !strings.HasPrefix(preview.Snapshot, info.Name+"@") {
+		preview.Err = fmt.Errorf("select a snapshot from the current template dataset")
+		return preview
+	}
+
+	if !zfsSnapshotExists(preview.Snapshot) {
+		preview.Err = fmt.Errorf("snapshot %q does not exist", preview.Snapshot)
+		return preview
+	}
+
+	currentJails := collectCurrentJailDatasetReferences()
+	out, err := exec.Command("zfs", "list", "-H", "-o", "name,origin", "-t", "filesystem").Output()
+	if err != nil {
+		preview.Err = fmt.Errorf("failed to list zfs filesystems to check dependencies: %w", err)
+		return preview
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		fields := strings.Split(scanner.Text(), "\t")
+		if len(fields) != 2 {
+			continue
+		}
+		dependent := strings.TrimSpace(fields[0])
+		if dependent == "" || strings.TrimSpace(fields[1]) != preview.Snapshot {
+			continue
+		}
+		preview.ReferencedClones = append(preview.ReferencedClones, dependent)
+		preview.ReferencedJails = append(preview.ReferencedJails, currentJails[dependent]...)
+	}
+	if err := scanner.Err(); err != nil {
+		preview.Err = fmt.Errorf("failed to scan zfs dependency list: %w", err)
+		return preview
+	}
+
+	preview.ReferencedClones = uniqueSortedStrings(preview.ReferencedClones)
+	preview.ReferencedJails = uniqueSortedStrings(preview.ReferencedJails)
+	if len(preview.ReferencedJails) > 0 {
+		preview.Err = fmt.Errorf("snapshot %q is in use by %d current jail(s)", preview.Snapshot, len(preview.ReferencedJails))
+		return preview
+	}
+	if len(preview.ReferencedClones) > 0 {
+		preview.Err = fmt.Errorf("snapshot %q has %d clone dependent(s)", preview.Snapshot, len(preview.ReferencedClones))
+	}
+
+	return preview
+}
+
+func ExecuteTemplateSnapshotDestroy(dataset, snapshot string, parentOverride *templateDatasetParent) TemplateDatasetSnapshotDestroyResult {
+	result := TemplateDatasetSnapshotDestroyResult{}
+	logs := make([]string, 0, 8)
+	fail := func(err error) TemplateDatasetSnapshotDestroyResult {
+		result.Logs = logs
+		result.Err = err
+		return result
+	}
+	preview := InspectTemplateSnapshotDestroy(dataset, snapshot, parentOverride)
+	if preview.Err != nil {
+		return fail(preview.Err)
+	}
+
+	result.Dataset = preview.Current.Name
+	result.Snapshot = preview.Snapshot
+
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "destroy", preview.Snapshot); err != nil {
+		return fail(fmt.Errorf("failed to destroy template snapshot %q: %w", preview.Snapshot, err))
+	}
+
+	result.Logs = logs
+	return result
+}
+
+func collectCurrentJailDatasetReferences() map[string][]string {
+	refs := map[string][]string{}
+	runningByName := map[string]runningJail{}
+	names := map[string]struct{}{}
+
+	running, _ := discoverRunningJails()
+	for _, jail := range running {
+		name := strings.TrimSpace(jail.Name)
+		if name == "" {
+			continue
+		}
+		runningByName[name] = jail
+		names[name] = struct{}{}
+	}
+	for _, name := range discoverConfiguredJails() {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		names[name] = struct{}{}
+	}
+
+	for name := range names {
+		path := strings.TrimSpace(runningByName[name].Path)
+		if path == "" {
+			conf, err := discoverJailConf(name)
+			if err == nil {
+				path = strings.TrimSpace(conf.Values["path"])
+			}
+		}
+		if path == "" {
+			continue
+		}
+		info, err := discoverZFSDataset(path)
+		if err != nil || info == nil || info.MatchType != "exact" {
+			continue
+		}
+		dataset := strings.TrimSpace(info.Name)
+		if dataset == "" {
+			continue
+		}
+		refs[dataset] = append(refs[dataset], name)
+	}
+
+	for dataset, names := range refs {
+		refs[dataset] = uniqueSortedStrings(names)
+	}
+	return refs
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i]) < strings.ToLower(result[j])
+	})
 	return result
 }
 
@@ -176,6 +335,13 @@ func InspectJailSnapshotClone(detail JailDetail, snapshot, newName, destination 
 				return preview
 			}
 			preview.FstabPath = jailFstabPathForName(preview.NewName)
+			if _, err := os.Stat(preview.FstabPath); err == nil {
+				preview.Err = fmt.Errorf("fstab file %q already exists", preview.FstabPath)
+				return preview
+			} else if !os.IsNotExist(err) {
+				preview.Err = fmt.Errorf("failed to inspect fstab file %q: %w", preview.FstabPath, err)
+				return preview
+			}
 		}
 	}
 	return preview
@@ -208,13 +374,13 @@ func ExecuteJailSnapshotClone(detail JailDetail, snapshot, newName, destination 
 	result.Destination = preview.Destination
 	result.ConfigPath = preview.ConfigPath
 
-	if _, err := runLoggedCommand(&logs, "zfs", "clone", preview.Snapshot, preview.CloneDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "clone", preview.Snapshot, preview.CloneDataset); err != nil {
 		return fail(fmt.Errorf("failed to clone jail snapshot %q: %w", preview.Snapshot, err))
 	}
 	addCleanup(func() {
-		_, _ = runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.CloneDataset)
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.CloneDataset)
 	})
-	if _, err := runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.Destination, preview.CloneDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.Destination, preview.CloneDataset); err != nil {
 		return fail(fmt.Errorf("failed to set mountpoint for %q: %w", preview.CloneDataset, err))
 	}
 	if !preview.WriteConfig {
@@ -249,6 +415,9 @@ func clonedJailConfigLines(detail JailDetail, newName, destination, newFstabPath
 	if len(detail.JailConfRaw) == 0 {
 		return nil, fmt.Errorf("source jail config could not be read")
 	}
+	oldName := strings.TrimSpace(detail.Name)
+	oldEpair := vnetEpairName(oldName)
+	newEpair := vnetEpairName(newName)
 	lines := []string{fmt.Sprintf("%s {", newName)}
 	hasFstabLine := false
 	for _, raw := range detail.JailConfRaw {
@@ -257,7 +426,7 @@ func clonedJailConfigLines(detail JailDetail, newName, destination, newFstabPath
 			continue
 		}
 		trimmed = strings.TrimSuffix(trimmed, ";")
-		if key, _, ok := strings.Cut(trimmed, "="); ok {
+		if key, value, ok := strings.Cut(trimmed, "="); ok {
 			key = strings.TrimSpace(key)
 			switch key {
 			case "path":
@@ -272,7 +441,34 @@ func clonedJailConfigLines(detail JailDetail, newName, destination, newFstabPath
 					lines = append(lines, fmt.Sprintf("  mount.fstab = %q;", newFstabPath))
 				}
 				continue
+			case "exec.consolelog":
+				current := strings.Trim(strings.TrimSpace(strings.TrimSuffix(value, ";")), `"`)
+				if oldName != "" && strings.Contains(current, oldName) {
+					current = strings.ReplaceAll(current, oldName, newName)
+				}
+				if current == "" {
+					current = fmt.Sprintf("/var/log/jail_console_%s.log", newName)
+				}
+				lines = append(lines, fmt.Sprintf("  exec.consolelog = %q;", current))
+				continue
+			case "vnet.interface":
+				if oldEpair != "" && strings.Contains(raw, oldEpair) {
+					lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+					continue
+				}
 			}
+		}
+		if oldEpair != "" && strings.Contains(trimmed, "exec.prestart") {
+			lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+			continue
+		}
+		if oldEpair != "" && strings.Contains(trimmed, "exec.start") {
+			lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+			continue
+		}
+		if oldEpair != "" && strings.Contains(trimmed, "exec.poststop") {
+			lines = append(lines, strings.ReplaceAll(raw, oldEpair, newEpair))
+			continue
 		}
 		lines = append(lines, raw)
 	}
@@ -293,10 +489,14 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read %q: %w", src, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("failed to create directory for %q: %w", dst, err)
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("failed to inspect %q: %w", src, err)
 	}
-	if err := os.WriteFile(dst, content, 0o644); err != nil {
+	if err := writeFileAtomicExclusive(dst, content, info.Mode().Perm()); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("refusing to overwrite existing file %q", dst)
+		}
 		return fmt.Errorf("failed to write %q: %w", dst, err)
 	}
 	return nil

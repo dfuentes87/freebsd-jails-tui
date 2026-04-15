@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +30,19 @@ type JailRctlConfig struct {
 	ProcessLimit  string
 	Persistent    bool
 	PersistentErr string
+}
+
+type managedRctlBlockMalformedError struct {
+	JailName string
+}
+
+func (e managedRctlBlockMalformedError) Error() string {
+	return fmt.Sprintf("managed rctl block for jail %q is missing end marker in %s; refusing to rewrite it", e.JailName, rctlConfPath)
+}
+
+func isManagedRctlBlockMalformedError(err error) bool {
+	var target managedRctlBlockMalformedError
+	return errors.As(err, &target)
 }
 
 func hasAnyRctlLimits(values jailWizardValues) bool {
@@ -123,7 +138,7 @@ func managedRctlRulesForJail(values jailWizardValues, jailName string) []string 
 	return rules
 }
 
-func syncPersistentJailRctlRules(values jailWizardValues, jailName string, logs *[]string) (func(), error) {
+func syncPersistentJailRctlRules(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) (func(), error) {
 	return rewriteManagedJailRctlBlock(jailName, managedRctlRulesForJail(values, jailName), logs)
 }
 
@@ -140,7 +155,10 @@ func rewriteManagedJailRctlBlock(jailName string, rules []string, logs *[]string
 	if err != nil {
 		return nil, err
 	}
-	updated, changed := replaceManagedRctlBlock(existing, jailName, rules)
+	updated, changed, err := replaceManagedRctlBlock(existing, jailName, rules)
+	if err != nil {
+		return nil, err
+	}
 	if !changed {
 		return nil, nil
 	}
@@ -180,10 +198,13 @@ func writeRctlConfLines(lines []string, logs *[]string) error {
 	if logs != nil {
 		*logs = append(*logs, "$ write "+rctlConfPath)
 	}
-	return os.WriteFile(rctlConfPath, []byte(content), 0o644)
+	if err := writeFileAtomicReplace(rctlConfPath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", rctlConfPath, err)
+	}
+	return nil
 }
 
-func replaceManagedRctlBlock(lines []string, jailName string, rules []string) ([]string, bool) {
+func replaceManagedRctlBlock(lines []string, jailName string, rules []string) ([]string, bool, error) {
 	begin := fmt.Sprintf("# freebsd-jails-tui: rctl=%s begin", jailName)
 	end := fmt.Sprintf("# freebsd-jails-tui: rctl=%s end", jailName)
 	updated := make([]string, 0, len(lines)+len(rules)+4)
@@ -204,11 +225,14 @@ func replaceManagedRctlBlock(lines []string, jailName string, rules []string) ([
 		}
 		updated = append(updated, line)
 	}
+	if inBlock {
+		return nil, false, managedRctlBlockMalformedError{JailName: jailName}
+	}
 	for len(updated) > 0 && strings.TrimSpace(updated[len(updated)-1]) == "" {
 		updated = updated[:len(updated)-1]
 	}
 	if len(rules) == 0 {
-		return updated, removed
+		return updated, removed, nil
 	}
 	if len(updated) > 0 {
 		updated = append(updated, "")
@@ -216,7 +240,7 @@ func replaceManagedRctlBlock(lines []string, jailName string, rules []string) ([
 	updated = append(updated, begin)
 	updated = append(updated, rules...)
 	updated = append(updated, end)
-	return updated, true
+	return updated, true, nil
 }
 
 func rctlConfigFromRawLines(lines []string) *JailRctlConfig {

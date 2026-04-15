@@ -19,6 +19,9 @@ type Jail struct {
 	JID        int
 	Path       string
 	Hostname   string
+	Note       string
+	Type       string
+	QuotaUsage string
 	Running    bool
 	CPUPercent float64
 	MemoryMB   int
@@ -38,6 +41,7 @@ type JailDetail struct {
 	JID                   int
 	Path                  string
 	Hostname              string
+	Note                  string
 	JLSFields             map[string]string
 	RuntimeValues         map[string]string
 	AdvancedRuntimeFields map[string]string
@@ -65,6 +69,7 @@ type ZFSDatasetInfo struct {
 	Compression string
 	Quota       string
 	Reservation string
+	Origin      string
 	MatchType   string
 }
 
@@ -113,6 +118,10 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 	if metricErr != nil {
 		errs = append(errs, metricErr)
 	}
+	zfsRows, zfsErr := listZFSFilesystems()
+	if zfsErr != nil {
+		errs = append(errs, zfsErr)
+	}
 
 	names := make([]string, 0, len(nameSet))
 	for name := range nameSet {
@@ -127,6 +136,25 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 			j.JID = run.JID
 			j.Path = run.Path
 			j.Hostname = run.Hostname
+		}
+		if conf, err := discoverJailConf(name); err == nil {
+			if j.Path == "" {
+				j.Path = strings.TrimSpace(conf.Values["path"])
+			}
+			if j.Hostname == "" {
+				j.Hostname = strings.TrimSpace(conf.Values["host.hostname"])
+			}
+			j.Note = parseTUIMetadata(conf.RawLines)["note"]
+			j.Type = inferDashboardJailType(conf, zfsRows, j.Path)
+		}
+		if info := discoverZFSDatasetFromRows(zfsRows, j.Path); info != nil {
+			j.QuotaUsage = formatQuotaUsage(info)
+			if strings.TrimSpace(j.Type) == "" && strings.TrimSpace(info.Origin) != "" && info.Origin != "-" {
+				j.Type = "thin"
+			}
+		}
+		if strings.TrimSpace(j.Type) == "" {
+			j.Type = "thick"
 		}
 		if metric, ok := metrics[j.JID]; ok {
 			j.CPUPercent = metric.CPUPercent
@@ -196,6 +224,7 @@ func CollectJailDetail(name string, jid int, pathHint string, now time.Time) (Ja
 		detail.JailConfRaw = conf.RawLines
 		detail.JailConfValues = conf.Values
 		detail.JailConfFlags = conf.Flags
+		detail.Note = parseTUIMetadata(conf.RawLines)["note"]
 		if detail.Path == "" {
 			detail.Path = conf.Values["path"]
 		}
@@ -496,37 +525,25 @@ func discoverJailMetrics() (map[int]jailMetric, error) {
 }
 
 func discoverZFSDataset(jailPath string) (*ZFSDatasetInfo, error) {
+	rows, err := listZFSFilesystems()
+	if err != nil {
+		return nil, err
+	}
+	return discoverZFSDatasetFromRows(rows, jailPath), nil
+}
+
+func discoverZFSDatasetFromRows(rows []zfsFilesystemRow, jailPath string) *ZFSDatasetInfo {
 	jailPath = strings.TrimSpace(jailPath)
 	if jailPath == "" {
-		return nil, nil
+		return nil
 	}
 	jailPath = filepath.Clean(jailPath)
-
-	out, err := exec.Command(
-		"zfs",
-		"list",
-		"-H",
-		"-o",
-		"name,mountpoint,used,avail,refer,compression,quota,reservation",
-		"-t",
-		"filesystem",
-	).Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run zfs list: %w", err)
-	}
-
 	var (
 		best      *ZFSDatasetInfo
 		bestScore = -1
 	)
-
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		cols := strings.Split(scanner.Text(), "\t")
-		if len(cols) != 8 {
-			continue
-		}
-		mountpoint := strings.TrimSpace(cols[1])
+	for _, row := range rows {
+		mountpoint := strings.TrimSpace(row.Mountpoint)
 		if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
 			continue
 		}
@@ -548,19 +565,55 @@ func discoverZFSDataset(jailPath string) (*ZFSDatasetInfo, error) {
 		}
 		bestScore = score
 		best = &ZFSDatasetInfo{
-			Name:        cols[0],
+			Name:        row.Name,
 			Mountpoint:  mountpoint,
-			Used:        cols[2],
-			Avail:       cols[3],
-			Refer:       cols[4],
-			Compression: cols[5],
-			Quota:       cols[6],
-			Reservation: cols[7],
+			Used:        row.Used,
+			Avail:       row.Avail,
+			Refer:       row.Refer,
+			Compression: row.Compression,
+			Quota:       row.Quota,
+			Reservation: row.Reservation,
+			Origin:      row.Origin,
 			MatchType:   matchType,
 		}
 	}
+	return best
+}
 
-	return best, nil
+func formatQuotaUsage(info *ZFSDatasetInfo) string {
+	if info == nil {
+		return ""
+	}
+	quota := strings.TrimSpace(info.Quota)
+	if quota == "" || quota == "-" || strings.EqualFold(quota, "none") || strings.EqualFold(quota, "inherit") {
+		return ""
+	}
+	used := strings.TrimSpace(info.Used)
+	if used == "" || used == "-" {
+		return quota
+	}
+	return used + " / " + quota
+}
+
+func inferDashboardJailType(conf jailConfData, rows []zfsFilesystemRow, jailPath string) string {
+	for _, flag := range conf.Flags {
+		switch strings.TrimSpace(flag) {
+		case "allow.mount.linprocfs", "allow.mount.linsysfs":
+			return "linux"
+		case "vnet":
+			return "vnet"
+		}
+	}
+	for _, raw := range conf.RawLines {
+		switch {
+		case strings.Contains(raw, "/compat/"), strings.Contains(raw, "linux_distro="):
+			return "linux"
+		}
+	}
+	if info := discoverZFSDatasetFromRows(rows, jailPath); info != nil && info.MatchType == "exact" && strings.TrimSpace(info.Origin) != "" && info.Origin != "-" {
+		return "thin"
+	}
+	return "thick"
 }
 
 func discoverRctlRules(name string, jid int) ([]string, error) {
@@ -620,8 +673,17 @@ func parseKVFields(line string) map[string]string {
 
 func extractJailBlock(content, jailName string) ([]string, bool) {
 	lines := strings.Split(content, "\n")
-	openPattern := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(jailName) + `\s*\{`)
-	start := -1
+	start, end, found := findJailBlockBounds(lines, jailName)
+	if !found || end < 0 {
+		return nil, false
+	}
+	return append([]string(nil), lines[start+1:end]...), true
+}
+
+func findJailBlockBounds(lines []string, jailName string) (start, end int, found bool) {
+	openPattern := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(strings.TrimSpace(jailName)) + `\s*\{`)
+	start = -1
+	end = -1
 	depth := 0
 
 	for idx, line := range lines {
@@ -629,27 +691,59 @@ func extractJailBlock(content, jailName string) ([]string, bool) {
 			continue
 		}
 		start = idx
-		depth = strings.Count(line, "{") - strings.Count(line, "}")
+		depth = braceDeltaIgnoringQuotesAndComments(line)
 		if depth <= 0 {
 			depth = 1
 		}
+		found = true
 		break
 	}
-	if start < 0 {
-		return nil, false
+	if !found {
+		return start, end, false
 	}
 
-	var block []string
 	for idx := start + 1; idx < len(lines); idx++ {
-		line := lines[idx]
-		nextDepth := depth + strings.Count(line, "{") - strings.Count(line, "}")
-		if nextDepth <= 0 {
-			break
+		depth += braceDeltaIgnoringQuotesAndComments(lines[idx])
+		if depth <= 0 {
+			end = idx
+			return start, end, true
 		}
-		block = append(block, line)
-		depth = nextDepth
 	}
-	return block, true
+	return start, end, true
+}
+
+func braceDeltaIgnoringQuotesAndComments(line string) int {
+	delta := 0
+	inQuotes := false
+	escaped := false
+	for idx := 0; idx < len(line); idx++ {
+		ch := line[idx]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inQuotes && ch == '\\' {
+			escaped = true
+			continue
+		}
+		switch ch {
+		case '"':
+			inQuotes = !inQuotes
+		case '#':
+			if !inQuotes {
+				return delta
+			}
+		case '{':
+			if !inQuotes {
+				delta++
+			}
+		case '}':
+			if !inQuotes {
+				delta--
+			}
+		}
+	}
+	return delta
 }
 
 func parseJailBlockLines(lines []string) (map[string]string, []string) {

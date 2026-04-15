@@ -1,4 +1,5 @@
 package main
+import "context"
 
 import (
 	"fmt"
@@ -150,6 +151,28 @@ func CollectTemplateDatasetDetail(dataset string, parentOverride *templateDatase
 	return TemplateDatasetInfo{}, fmt.Errorf("template dataset %q was not found under the templates parent dataset", dataset)
 }
 
+func validateTemplateDatasetTarget(parentDataset, parentMountpoint, newName string) (string, string, string, error) {
+	validatedName, err := validateTemplateRenameLeafName(newName)
+	if err != nil {
+		return "", "", "", err
+	}
+	newDataset := parentDataset + "/" + validatedName
+	newMountpoint := filepath.Join(parentMountpoint, validatedName)
+	if newDataset, err = validateZFSDatasetName(newDataset, "template dataset"); err != nil {
+		return "", "", "", err
+	}
+	if newMountpoint, err = validateAbsolutePath(newMountpoint, "template mountpoint"); err != nil {
+		return "", "", "", err
+	}
+	if newMountpoint, err = validateUnusedMountpointPath(newMountpoint, "template mountpoint"); err != nil {
+		return "", "", "", err
+	}
+	if zfsDatasetExists(newDataset) {
+		return "", "", "", fmt.Errorf("template dataset %q already exists", newDataset)
+	}
+	return validatedName, newDataset, newMountpoint, nil
+}
+
 func InspectTemplateDatasetRename(dataset, newName string, parentOverride *templateDatasetParent) TemplateDatasetRenamePreview {
 	preview := TemplateDatasetRenamePreview{
 		NewName: strings.TrimSpace(newName),
@@ -166,7 +189,7 @@ func InspectTemplateDatasetRename(dataset, newName string, parentOverride *templ
 		preview.Err = fmt.Errorf("template dataset %q cannot be renamed: %s", info.Name, strings.Join(info.SafetyIssues, "; "))
 		return preview
 	}
-	validatedName, err := validateTemplateRenameLeafName(preview.NewName)
+	validatedName, newDataset, newMountpoint, err := validateTemplateDatasetTarget(info.ParentDataset, info.ParentMountpoint, preview.NewName)
 	if err != nil {
 		preview.Err = err
 		return preview
@@ -176,24 +199,8 @@ func InspectTemplateDatasetRename(dataset, newName string, parentOverride *templ
 		preview.Err = fmt.Errorf("new template name must differ from the current name")
 		return preview
 	}
-
-	preview.NewDataset = info.ParentDataset + "/" + preview.NewName
-	preview.NewMountpoint = filepath.Join(info.ParentMountpoint, preview.NewName)
-	if preview.NewDataset, err = validateZFSDatasetName(preview.NewDataset, "template dataset"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if preview.NewMountpoint, err = validateAbsolutePath(preview.NewMountpoint, "template mountpoint"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if preview.NewMountpoint, err = validateUnusedMountpointPath(preview.NewMountpoint, "template mountpoint"); err != nil {
-		preview.Err = err
-		return preview
-	}
-	if _, err := exec.Command("zfs", "list", "-H", "-o", "name", preview.NewDataset).Output(); err == nil {
-		preview.Err = fmt.Errorf("template dataset %q already exists", preview.NewDataset)
-	}
+	preview.NewDataset = newDataset
+	preview.NewMountpoint = newMountpoint
 	return preview
 }
 
@@ -224,16 +231,16 @@ func ExecuteTemplateDatasetRename(dataset, newName string, parentOverride *templ
 		}
 	}
 
-	if _, err := runLoggedCommand(&logs, "zfs", "rename", preview.Current.Name, preview.NewDataset); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "rename", preview.Current.Name, preview.NewDataset); err != nil {
 		return fail(fmt.Errorf("failed to rename template dataset %q: %w", preview.Current.Name, err))
 	}
-	if _, err := runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.NewMountpoint, preview.NewDataset); err != nil {
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
 		return fail(fmt.Errorf("failed to set mountpoint for %q: %w", preview.NewDataset, err))
 	}
 	if _, err := rewriteWizardTemplateReleaseReferences(preview.Current.Mountpoint, preview.NewMountpoint); err != nil {
-		_, _ = runLoggedCommand(&logs, "zfs", "set", "mountpoint="+preview.Current.Mountpoint, preview.NewDataset)
-		_, _ = runLoggedCommand(&logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "set", "mountpoint="+preview.Current.Mountpoint, preview.NewDataset)
+		_, _ = runLoggedCommand(context.Background(), &logs, "zfs", "rename", preview.NewDataset, preview.Current.Name)
 		if restoreErr := restoreWizardTemplateStoreBackup(templateBackup, &logs); restoreErr != nil {
 			logs = append(logs, "rollback warning: "+restoreErr.Error())
 		}
@@ -275,7 +282,7 @@ func ExecuteTemplateDatasetDestroy(dataset string, parentOverride *templateDatas
 		return fail(preview.Err)
 	}
 	result.Dataset = preview.Current.Name
-	if _, err := runLoggedCommand(&logs, "zfs", "destroy", "-r", preview.Current.Name); err != nil {
+	if _, err := runLoggedCommand(context.Background(), &logs, "zfs", "destroy", "-r", preview.Current.Name); err != nil {
 		return fail(fmt.Errorf("failed to destroy template dataset %q: %w", preview.Current.Name, err))
 	}
 	result.Logs = logs

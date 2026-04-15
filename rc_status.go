@@ -46,17 +46,32 @@ func collectRCSettingStatus(key, expected string) RCSettingStatus {
 		status.DriftReasons = append(status.DriftReasons, fmt.Sprintf("effective value is %s, expected %s", displayRCValue(status.Effective), status.Expected))
 	}
 
-	unique := map[string]struct{}{}
-	for _, source := range status.SourceValues {
-		unique[strings.ToUpper(strings.TrimSpace(source.Value))] = struct{}{}
-	}
-	if len(unique) > 1 {
+	if rcSettingHasConflictingSources(status) {
 		status.DriftReasons = append(status.DriftReasons, "conflicting values are defined across rc.conf files")
 	}
 	if status.ReadError != "" {
 		status.DriftReasons = append(status.DriftReasons, status.ReadError)
 	}
 	return status
+}
+
+func rcSettingHasConflictingSources(status RCSettingStatus) bool {
+	unique := map[string]struct{}{}
+	for _, source := range status.SourceValues {
+		unique[strings.ToUpper(strings.TrimSpace(source.Value))] = struct{}{}
+	}
+	return len(unique) > 1
+}
+
+func ensureRCSettingSafeToMutate(key string) error {
+	status := collectRCSettingStatus(strings.TrimSpace(key), "")
+	if status.ReadError != "" {
+		return fmt.Errorf("failed to inspect %s before update: %s", status.Key, status.ReadError)
+	}
+	if rcSettingHasConflictingSources(status) {
+		return fmt.Errorf("%s has conflicting values across /etc/rc.conf and /etc/rc.conf.local; resolve them manually before the TUI updates it", status.Key)
+	}
+	return nil
 }
 
 func matchesExpectedRCValue(value, expected string) bool {

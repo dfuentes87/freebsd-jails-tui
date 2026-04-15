@@ -76,8 +76,18 @@ func collectJailConfDIncludeStatus() jailConfIncludeStatus {
 		status.ReadError = fmt.Sprintf("failed to read %s: %v", status.ConfigPath, err)
 		return status
 	}
-	status.IncludePresent = strings.Contains(string(content), jailConfDInclude)
+	status.IncludePresent = hasJailConfDIncludeLine(string(content))
 	return status
+}
+
+func hasJailConfDIncludeLine(content string) bool {
+	for _, rawLine := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(stripInlineComment(rawLine))
+		if line == jailConfDInclude {
+			return true
+		}
+	}
+	return false
 }
 
 func (status jailConfIncludeStatus) needsFix() bool {
@@ -134,7 +144,7 @@ func ensureJailConfDInclude(logs *[]string) error {
 			*logs = append(*logs, "$ write "+status.ConfigPath)
 		}
 	}
-	if err := os.WriteFile(status.ConfigPath, []byte(content), 0o644); err != nil {
+	if err := writeFileAtomicReplace(status.ConfigPath, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write %s: %w", status.ConfigPath, err)
 	}
 	return nil
