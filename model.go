@@ -169,9 +169,14 @@ type zfsPropertyApplyMsg struct {
 type tickMsg time.Time
 
 type downloadProgressMsg struct {
-	Read  int64
-	Total int64
-	Done  bool
+	Read      int64
+	Total     int64
+	Done      bool
+	Step      int
+	StepTotal int
+	Phase     string
+	Detail    string
+	LogLine   string
 }
 
 type screenMode int
@@ -294,6 +299,11 @@ type model struct {
 	wizard             jailCreationWizard
 	wizardApplying     bool
 	wizardCancel       context.CancelFunc
+	wizardApplyStarted time.Time
+	wizardPhaseStep    int
+	wizardPhaseTotal   int
+	wizardPhaseLabel   string
+	wizardPhaseDetail  string
 	downloading        bool
 	downloadRead       int64
 	downloadTotal      int64
@@ -615,12 +625,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.downloading = false
 			return m, nil
 		}
-		m.downloading = true
-		m.downloadRead = msg.Read
-		m.downloadTotal = msg.Total
+		if msg.Step > 0 {
+			m.wizardPhaseStep = msg.Step
+		}
+		if msg.StepTotal > 0 {
+			m.wizardPhaseTotal = msg.StepTotal
+		}
+		if strings.TrimSpace(msg.Phase) != "" {
+			m.wizardPhaseLabel = strings.TrimSpace(msg.Phase)
+		}
+		if strings.TrimSpace(msg.Detail) != "" {
+			m.wizardPhaseDetail = strings.TrimSpace(msg.Detail)
+		}
+		if strings.TrimSpace(msg.LogLine) != "" {
+			m.wizard.executionLogs = append(m.wizard.executionLogs, strings.TrimRight(msg.LogLine, "\n"))
+		}
+		if msg.Read > 0 || msg.Total > 0 {
+			m.downloading = true
+			m.downloadRead = msg.Read
+			m.downloadTotal = msg.Total
+		}
 		return m, waitForProgress(m.progressChan)
 	case wizardApplyMsg:
 		m.wizardApplying = false
+		m.wizardApplyStarted = time.Time{}
+		m.wizardPhaseStep = 0
+		m.wizardPhaseTotal = 0
+		m.wizardPhaseLabel = ""
+		m.wizardPhaseDetail = ""
 		m.downloading = false
 		m.wizard.setExecutionResult(msg.result)
 		if msg.result.Err == nil {
@@ -1685,6 +1717,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
+			m.wizardApplyStarted = time.Now()
+			m.wizardPhaseStep = 0
+			m.wizardPhaseTotal = 0
+			m.wizardPhaseLabel = "Preparing jail creation"
+			m.wizardPhaseDetail = "Running final validations and starting background work."
 			m.wizardScroll = 0
 			m.downloading = false
 			m.downloadRead = 0
@@ -3399,6 +3436,21 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSeconds := int(d.Round(time.Second) / time.Second)
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	if minutes >= 60 {
+		hours := minutes / 60
+		minutes = minutes % 60
+		return fmt.Sprintf("%dh%02dm%02ds", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
+}
+
 // ... skipping to wizardLines
 func (m model) wizardLines(width int) []string {
 	step := m.wizard.currentStep()
@@ -3481,8 +3533,18 @@ func (m model) wizardLines(width int) []string {
 		if m.wizardApplying {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Status"))
-			lines = append(lines, truncate("Creation in progress. Linux bootstrap and package installation can take a while.", width))
-			lines = append(lines, truncate("Scroll for the generated jail.conf preview and any execution output.", width))
+			if m.wizardPhaseTotal > 0 && m.wizardPhaseStep > 0 {
+				lines = append(lines, truncate(fmt.Sprintf("[%d/%d] %s", m.wizardPhaseStep, m.wizardPhaseTotal, valueOrDash(m.wizardPhaseLabel)), width))
+			} else {
+				lines = append(lines, truncate(valueOrDash(m.wizardPhaseLabel), width))
+			}
+			if strings.TrimSpace(m.wizardPhaseDetail) != "" {
+				lines = append(lines, truncate(m.wizardPhaseDetail, width))
+			}
+			if !m.wizardApplyStarted.IsZero() {
+				lines = append(lines, truncate("Elapsed: "+formatElapsed(time.Since(m.wizardApplyStarted)), width))
+			}
+			lines = append(lines, truncate("Creation is running in the background. Linux bootstrap and package installation can take a while.", width))
 		}
 		if shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
 			lines = append(lines, "")
@@ -4163,6 +4225,8 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(prereqs.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
+		fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)),
+		fmt.Sprintf("debootstrap scripts present: %s", yesNoText(prereqs.Debootstrap.ScriptsPresent)),
 		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap mirror host: %s", valueOrDash(prereqs.MirrorHost)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
@@ -4192,6 +4256,19 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
 		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
 	}
+	if strings.TrimSpace(prereqs.Debootstrap.CheckError) != "" {
+		lines = append(lines, "Host debootstrap check: "+prereqs.Debootstrap.CheckError)
+	}
+	lines = append(lines,
+		fmt.Sprintf("linux64 support: %s", yesNoText(prereqs.Capabilities.Linux64Available)),
+		fmt.Sprintf("fdescfs support: %s", yesNoText(prereqs.Capabilities.FdescfsAvailable)),
+		fmt.Sprintf("linprocfs support: %s", yesNoText(prereqs.Capabilities.LinprocfsAvailable)),
+		fmt.Sprintf("linsysfs support: %s", yesNoText(prereqs.Capabilities.LinsysfsAvailable)),
+		fmt.Sprintf("tmpfs support: %s", yesNoText(prereqs.Capabilities.TmpfsAvailable)),
+	)
+	for _, err := range prereqs.Capabilities.Errors {
+		lines = append(lines, "Warning: "+err)
+	}
 	return lines
 }
 
@@ -4199,6 +4276,7 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 	lines := []string{
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
+		fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)),
 		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
 		"Auto bootstrap requires route, DNS, and fetch access inside the running jail.",
@@ -4226,6 +4304,12 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 	}
 	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
 		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
+	}
+	if !prereqs.Capabilities.Linux64Available || !prereqs.Capabilities.FdescfsAvailable || !prereqs.Capabilities.LinprocfsAvailable || !prereqs.Capabilities.LinsysfsAvailable || !prereqs.Capabilities.TmpfsAvailable {
+		lines = append(lines, "Warning: required Linux host support is missing")
+	}
+	for _, err := range prereqs.Capabilities.Errors {
+		lines = append(lines, err)
 	}
 	return lines
 }
@@ -4484,6 +4568,8 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
+		fmt.Sprintf("Host debootstrap installed: %s", yesNoText(readiness.Debootstrap.Installed)),
+		fmt.Sprintf("debootstrap scripts present: %s", yesNoText(readiness.Debootstrap.ScriptsPresent)),
 		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
 		fmt.Sprintf("Bootstrap release: %s", valueOrDash(readiness.BootstrapRelease)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
@@ -4510,8 +4596,21 @@ func (m model) linuxReadinessLines() []string {
 	if readiness.Host.EnableReadError != "" {
 		lines = append(lines, "Warning: host ABI check failed: "+readiness.Host.EnableReadError)
 	}
+	if strings.TrimSpace(readiness.Debootstrap.CheckError) != "" {
+		lines = append(lines, "Warning: host debootstrap check failed: "+readiness.Debootstrap.CheckError)
+	}
 	for _, reason := range readiness.Host.EnableDrift {
 		lines = append(lines, "Warning: linux_enable drift: "+reason)
+	}
+	lines = append(lines,
+		fmt.Sprintf("linux64 support: %s", yesNoText(readiness.Capabilities.Linux64Available)),
+		fmt.Sprintf("fdescfs support: %s", yesNoText(readiness.Capabilities.FdescfsAvailable)),
+		fmt.Sprintf("linprocfs support: %s", yesNoText(readiness.Capabilities.LinprocfsAvailable)),
+		fmt.Sprintf("linsysfs support: %s", yesNoText(readiness.Capabilities.LinsysfsAvailable)),
+		fmt.Sprintf("tmpfs support: %s", yesNoText(readiness.Capabilities.TmpfsAvailable)),
+	)
+	for _, err := range readiness.Capabilities.Errors {
+		lines = append(lines, "Warning: "+err)
 	}
 	if readiness.RuntimeChecked && readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
 		lines = append(lines, "Warning: linux service status check failed: "+readiness.Host.ServiceStatusErr)

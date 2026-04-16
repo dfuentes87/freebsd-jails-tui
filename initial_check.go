@@ -45,6 +45,7 @@ const (
 	initialPhaseEnableRCConfirm
 	initialPhaseJailConfPrompt
 	initialPhaseRacctConfirm
+	initialPhaseDebootstrapConfirm
 	initialPhaseDirsPrompt
 	initialPhaseDirsCustomInput
 	initialPhaseDatasetsPrompt
@@ -63,6 +64,7 @@ type initialConfigStatus struct {
 
 	NeedsRacctEnable bool
 	RacctStatus      RacctStatus
+	Debootstrap      HostDebootstrapStatus
 
 	ExistingJailPaths     []string
 	HasJailPath           bool
@@ -94,11 +96,12 @@ type initialCheckState struct {
 	message string
 	logs    []string
 
-	skipRC       bool
-	skipJailConf bool
-	skipRacct    bool
-	skipDirs     bool
-	skipDatasets bool
+	skipRC          bool
+	skipJailConf    bool
+	skipRacct       bool
+	skipDebootstrap bool
+	skipDirs        bool
+	skipDatasets    bool
 
 	customDirPath string
 
@@ -134,6 +137,10 @@ func (state *initialCheckState) setPhaseFromStatus() {
 	}
 	if state.status.NeedsRacctEnable && !state.skipRacct {
 		state.phase = initialPhaseRacctConfirm
+		return
+	}
+	if !state.status.Debootstrap.Installed && !state.skipDebootstrap {
+		state.phase = initialPhaseDebootstrapConfirm
 		return
 	}
 	if (!state.status.HasJailPath || len(state.status.MissingDocJailSubdirs) > 0) && !state.skipDirs {
@@ -339,6 +346,7 @@ func (state *initialCheckState) resetSkips() {
 	state.skipRC = false
 	state.skipJailConf = false
 	state.skipRacct = false
+	state.skipDebootstrap = false
 	state.skipDirs = false
 	state.skipDatasets = false
 }
@@ -412,6 +420,7 @@ func collectInitialConfigStatus(now time.Time) (initialConfigStatus, error) {
 	status.JailConfStatus = collectJailConfDIncludeStatus()
 	status.RacctStatus = collectRacctStatus()
 	status.NeedsRacctEnable = !status.RacctStatus.LoaderConfigured
+	status.Debootstrap = collectHostDebootstrapStatus()
 	if strings.TrimSpace(status.JailConfStatus.ReadError) != "" {
 		errs = append(errs, errors.New(status.JailConfStatus.ReadError))
 	}
@@ -685,6 +694,24 @@ func enableRacctCmd() tea.Cmd {
 	}
 }
 
+func installHostDebootstrapCmd() tea.Cmd {
+	return func() tea.Msg {
+		var logs []string
+		if _, err := runLoggedCommand(context.Background(), &logs, "pkg", "install", "-y", "debootstrap"); err != nil {
+			return initialActionMsg{
+				logs:    logs,
+				err:     err,
+				message: "Failed installing host debootstrap.",
+			}
+		}
+		return initialActionMsg{
+			logs:    logs,
+			message: "Host debootstrap installed. Early Linux release validation is now available.",
+			refresh: true,
+		}
+	}
+}
+
 func createDefaultDatasetLayoutCmd() tea.Cmd {
 	return createDatasetLayoutCmd(
 		docDatasetBase,
@@ -794,6 +821,23 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "N", "s", "S":
 			m.initCheck.skipRacct = true
 			m.initCheck.message = "Skipped kern.racct.enable."
+			m.initCheck.setPhaseFromStatus()
+			return m, nil
+		case "r", "R":
+			m.initCheck.resetSkips()
+			m.initCheck.loading = true
+			return m, collectInitialConfigCmd()
+		}
+
+	case initialPhaseDebootstrapConfirm:
+		switch key {
+		case "y", "Y", "enter":
+			m.initCheck.applying = true
+			m.initCheck.message = "Installing host debootstrap..."
+			return m, installHostDebootstrapCmd()
+		case "n", "N", "s", "S":
+			m.initCheck.skipDebootstrap = true
+			m.initCheck.message = "Skipped host debootstrap installation."
 			m.initCheck.setPhaseFromStatus()
 			return m, nil
 		case "r", "R":
@@ -1033,6 +1077,23 @@ func (m model) initialCheckLines(width int) []string {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.RacctStatus.ReadError, width)))
 	}
 
+	appendSection(&lines, width, "Linux bootstrap tooling")
+	earlyValidation := "unavailable"
+	if m.initCheck.status.Debootstrap.Installed && m.initCheck.status.Debootstrap.ScriptsPresent {
+		earlyValidation = "available"
+	}
+	lines = append(lines, renderKeyValueLines(width,
+		[2]string{"Host debootstrap installed", yesNoText(m.initCheck.status.Debootstrap.Installed)},
+		[2]string{"debootstrap scripts present", yesNoText(m.initCheck.status.Debootstrap.ScriptsPresent)},
+		[2]string{"Early Linux release validation", earlyValidation},
+	)...)
+	if strings.TrimSpace(m.initCheck.status.Debootstrap.PackageVersion) != "" {
+		lines = append(lines, renderKeyValueLines(width, [2]string{"Package version", m.initCheck.status.Debootstrap.PackageVersion})...)
+	}
+	if strings.TrimSpace(m.initCheck.status.Debootstrap.CheckError) != "" {
+		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.Debootstrap.CheckError, width)))
+	}
+
 	appendSection(&lines, width, "Jail path checks")
 	if m.initCheck.status.HasJailPath {
 		lines = append(lines, truncate("Found jail paths:", width))
@@ -1080,6 +1141,10 @@ func (m model) initialCheckLines(width int) []string {
 		lines = append(lines, truncate("Enable it now by appending to /boot/loader.conf?", width))
 		lines = append(lines, wizardWarningStyle.Render(truncate("A manual system reboot will be required before rctl limits can be applied.", width)))
 		lines = append(lines, truncate("y: enable racct | n: skip", width))
+	case initialPhaseDebootstrapConfirm:
+		lines = append(lines, truncate("Host debootstrap is optional, but it makes Linux jail bootstrap safer.", width))
+		lines = append(lines, truncate("Installing it allows early validation of supported Linux bootstrap releases before jail creation starts.", width))
+		lines = append(lines, truncate("y: install debootstrap | n: skip", width))
 	case initialPhaseDirsPrompt:
 		if len(m.initCheck.status.MissingDocJailSubdirs) > 0 {
 			lines = append(lines, truncate("Standard jail subdirectories are missing under /usr/local/jails.", width))
@@ -1160,6 +1225,8 @@ func (m model) initialCheckFooterHint() string {
 		return "y: update /etc/jail.conf | n: skip | r: re-check | q: quit"
 	case initialPhaseRacctConfirm:
 		return "y: enable racct | n: skip | r: re-check | q: quit"
+	case initialPhaseDebootstrapConfirm:
+		return "y: install debootstrap | n: skip | r: re-check | q: quit"
 	case initialPhaseDirsPrompt:
 		return "d: docs default | c: custom path | n: skip | r: re-check | q: quit"
 	case initialPhaseDirsCustomInput:

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -46,6 +47,8 @@ const (
 	defaultDownloadHost    = "https://download.freebsd.org"
 	archiveDownloadTimeout = 30 * time.Minute
 )
+
+type createProgressContextKey struct{}
 
 type JailCreationResult struct {
 	Name       string
@@ -96,7 +99,45 @@ type TemplateParentDatasetResult struct {
 	Err        error
 }
 
+func withCreateProgress(ctx context.Context, ch chan<- downloadProgressMsg) context.Context {
+	if ch == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, createProgressContextKey{}, ch)
+}
+
+func createProgressChan(ctx context.Context) chan<- downloadProgressMsg {
+	if ctx == nil {
+		return nil
+	}
+	ch, _ := ctx.Value(createProgressContextKey{}).(chan<- downloadProgressMsg)
+	return ch
+}
+
+func reportCreatePhase(ctx context.Context, step, total int, phase, detail string) {
+	ch := createProgressChan(ctx)
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- downloadProgressMsg{Step: step, StepTotal: total, Phase: strings.TrimSpace(phase), Detail: strings.TrimSpace(detail)}:
+	default:
+	}
+}
+
+func reportCreateLog(ctx context.Context, line string) {
+	ch := createProgressChan(ctx)
+	if ch == nil || strings.TrimSpace(line) == "" {
+		return
+	}
+	select {
+	case ch <- downloadProgressMsg{LogLine: line}:
+	default:
+	}
+}
+
 func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressChan chan<- downloadProgressMsg) JailCreationResult {
+	ctx = withCreateProgress(ctx, progressChan)
 	if strings.TrimSpace(values.JailType) == "" {
 		values.JailType = "thick"
 	}
@@ -112,6 +153,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		msg := fmt.Sprintf(format, args...)
 		logs = append(logs, msg)
 		debugLog("JailCreation", msg)
+		reportCreateLog(ctx, msg)
 	}
 	cleanups := make([]func(), 0, 8)
 	addCleanup := func(fn func()) {
@@ -187,13 +229,68 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		return fail(err)
 	}
 	logf("Starting jail creation for %s", result.Name)
+	patchDecision := resolveFreeBSDPatchDecision(values.TemplateRelease, values.PatchBase)
+	if patchDecision.Err != nil {
+		return fail(patchDecision.Err)
+	}
 
+	phases := []struct {
+		title  string
+		detail string
+	}{
+		{"Prepare host requirements", "Validating host state and preparing networking."},
+		{"Prepare jail path", "Creating or validating the destination path."},
+		{"Provision jail root", "Extracting, cloning, or copying the FreeBSD base."},
+	}
+	if patchDecision.Effective {
+		phases = append(phases, struct {
+			title  string
+			detail string
+		}{"Patch FreeBSD base", "Running freebsd-update inside the new jail root."})
+	}
+	if normalizedJailType(values.JailType) == "linux" {
+		phases = append(phases, struct {
+			title  string
+			detail string
+		}{"Prepare Linux host support", "Ensuring Linux ABI and required host support are available."})
+	}
+	phases = append(phases,
+		struct {
+			title  string
+			detail string
+		}{"Write jail configuration", "Writing jail.conf, mount points, startup order, and limits."},
+		struct {
+			title  string
+			detail string
+		}{"Start jail", "Starting the jail and waiting for it to come up."},
+	)
+	if normalizedJailType(values.JailType) == "linux" {
+		phases = append(phases, struct {
+			title  string
+			detail string
+		}{"Bootstrap Linux userland", "Running preflight, pkg bootstrap, and debootstrap inside the jail."})
+	}
+	phases = append(phases, struct {
+		title  string
+		detail string
+	}{"Finalize limits", "Applying live rctl limits when configured."})
+	phaseIdx := 0
+	nextPhase := func() {
+		if phaseIdx >= len(phases) {
+			return
+		}
+		phaseIdx++
+		reportCreatePhase(ctx, phaseIdx, len(phases), phases[phaseIdx-1].title, phases[phaseIdx-1].detail)
+	}
+
+	nextPhase()
 	hostNetworkCleanup, err := ensureHostNetworkReady(ctx, values, &logs)
 	if err != nil {
 		return fail(err)
 	}
 	addCleanup(hostNetworkCleanup)
 
+	nextPhase()
 	jailPath, pathCleanup, err := prepareJailPath(ctx, values, destination, &logs)
 	if err != nil {
 		return fail(err)
@@ -201,21 +298,20 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 	addCleanup(pathCleanup)
 	result.JailPath = jailPath
 
+	nextPhase()
 	rootCleanup, err := provisionJailRoot(ctx, values, jailPath, &logs, progressChan)
 	if err != nil {
 		return fail(err)
 	}
 	addCleanup(rootCleanup)
-	patchDecision := resolveFreeBSDPatchDecision(values.TemplateRelease, values.PatchBase)
-	if patchDecision.Err != nil {
-		return fail(patchDecision.Err)
-	}
 	if patchDecision.Effective {
+		nextPhase()
 		if err := patchFreeBSDRoot(ctx, jailPath, &logs); err != nil {
 			return fail(err)
 		}
 	}
 	if normalizedJailType(values.JailType) == "linux" {
+		nextPhase()
 		linuxCleanup, err := ensureLinuxHostReady(ctx, &logs)
 		if err != nil {
 			return fail(err)
@@ -235,6 +331,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		}
 	})
 
+	nextPhase()
 	configLines := buildJailConfBlock(values, jailPath, fstabPath)
 	if err := writeJailConfigFile(result.ConfigPath, configLines, &logs); err != nil {
 		return fail(err)
@@ -255,6 +352,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 	}
 	addCleanup(persistentRctlCleanup)
 
+	nextPhase()
 	if _, err := runLoggedCommand(ctx, &logs, "service", "jail", "start", result.Name); err != nil {
 		return fail(err)
 	}
@@ -264,12 +362,14 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		}
 	})
 	if normalizedJailType(values.JailType) == "linux" {
+		nextPhase()
 		bootstrapWarnings, err := maybeBootstrapLinuxUserland(ctx, values, result.Name, &logs)
 		if err != nil {
 			return fail(err)
 		}
 		warnings = append(warnings, bootstrapWarnings...)
 	}
+	nextPhase()
 	if err := applyRctlLimits(ctx, values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
@@ -1791,44 +1891,48 @@ func runLoggedCommand(ctx context.Context, logs *[]string, name string, args ...
 	}
 	*logs = append(*logs, "$ "+command)
 	debugLog("Command", command)
+	reportCreateLog(ctx, "$ "+command)
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	tmp, err := os.CreateTemp("", "freebsd-jails-tui-cmd-*")
+	reader, writer, err := os.Pipe()
 	if err != nil {
-		return "", fmt.Errorf("temp file failed: %w", err)
+		return "", fmt.Errorf("pipe setup failed: %w", err)
 	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+
+	outputLines := make([]string, 0, 16)
+	scanDone := make(chan error, 1)
+	go func() {
+		defer reader.Close()
+		scanner := bufio.NewScanner(reader)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputLines = append(outputLines, line)
+			*logs = append(*logs, "  "+line)
+			debugLog("Command", "  "+line)
+			reportCreateLog(ctx, "  "+line)
 		}
+		scanDone <- scanner.Err()
 	}()
-	cmd.Stdout = tmp
-	cmd.Stderr = tmp
 
 	if err := cmd.Start(); err != nil {
-		_ = tmp.Close()
+		_ = writer.Close()
+		_ = reader.Close()
 		return "", fmt.Errorf("%s: %w", command, err)
 	}
 	waitErr := cmd.Wait()
-	closeErr := tmp.Close()
-	outputBytes, readErr := os.ReadFile(tmpPath)
-	if readErr != nil {
-		return "", fmt.Errorf("failed to read command output for %s: %w", command, readErr)
-	}
-	if closeErr != nil {
-		return "", fmt.Errorf("failed to close command output for %s: %w", command, closeErr)
-	}
-	text := strings.TrimSpace(string(outputBytes))
-	cleanup = false
-	_ = os.Remove(tmpPath)
+	closeErr := writer.Close()
+	scanErr := <-scanDone
+	text := strings.TrimSpace(strings.Join(outputLines, "\n"))
 
-	if text != "" {
-		for _, line := range strings.Split(text, "\n") {
-			*logs = append(*logs, "  "+line)
-			debugLog("Command", "  "+line)
-		}
+	if closeErr != nil {
+		return text, fmt.Errorf("failed to close command output for %s: %w", command, closeErr)
+	}
+	if scanErr != nil {
+		return text, fmt.Errorf("failed to read command output for %s: %w", command, scanErr)
 	}
 	if waitErr != nil {
 		return text, fmt.Errorf("%s: %w", command, waitErr)

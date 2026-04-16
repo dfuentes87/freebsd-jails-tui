@@ -58,6 +58,11 @@ func validateJailCreateHostPreflight(values jailWizardValues) (string, error) {
 	if err := validateLinuxBootstrapReleaseSupport(values); err != nil {
 		return "linux_release", err
 	}
+	if normalizedJailType(values.JailType) == "linux" {
+		if err := collectLinuxHostCapabilityStatus().blockingError(); err != nil {
+			return "linux_bootstrap", err
+		}
+	}
 	return "", nil
 }
 
@@ -96,7 +101,12 @@ func collectLinuxBootstrapReleaseSupport(values jailWizardValues) linuxBootstrap
 	if err != nil {
 		if os.IsNotExist(err) {
 			support.Status = "unknown"
-			support.Detail = "Host debootstrap scripts are not installed, so bootstrap release support cannot be verified early."
+			debootstrap := collectHostDebootstrapStatus()
+			if !debootstrap.Installed {
+				support.Detail = "Host debootstrap is not installed, so bootstrap release support cannot be verified early."
+			} else {
+				support.Detail = "Host debootstrap scripts are unavailable, so bootstrap release support cannot be verified early."
+			}
 			return support
 		}
 		support.Status = "unknown"

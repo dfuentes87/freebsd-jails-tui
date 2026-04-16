@@ -18,8 +18,26 @@ type LinuxHostStatus struct {
 	ServiceStatusErr string
 }
 
+type HostDebootstrapStatus struct {
+	Installed      bool
+	PackageVersion string
+	ScriptsPresent bool
+	CheckError     string
+}
+
+type LinuxHostCapabilityStatus struct {
+	Linux64Available   bool
+	FdescfsAvailable   bool
+	LinprocfsAvailable bool
+	LinsysfsAvailable  bool
+	TmpfsAvailable     bool
+	Errors             []string
+}
+
 type LinuxWizardPrereqs struct {
 	Host              LinuxHostStatus
+	Debootstrap       HostDebootstrapStatus
+	Capabilities      LinuxHostCapabilityStatus
 	MirrorURL         string
 	MirrorHost        string
 	PreflightURL      string
@@ -30,6 +48,8 @@ type LinuxWizardPrereqs struct {
 
 type LinuxReadiness struct {
 	Host                 LinuxHostStatus
+	Debootstrap          HostDebootstrapStatus
+	Capabilities         LinuxHostCapabilityStatus
 	BootstrapFamily      string
 	BootstrapRelease     string
 	CompatRoot           string
@@ -79,11 +99,78 @@ func collectLinuxHostStatus() LinuxHostStatus {
 	return status
 }
 
+func collectHostDebootstrapStatus() HostDebootstrapStatus {
+	status := HostDebootstrapStatus{}
+	if err := exec.Command("pkg", "info", "-e", "debootstrap").Run(); err == nil {
+		status.Installed = true
+		if out, err := exec.Command("pkg", "query", "%n-%v", "debootstrap").CombinedOutput(); err == nil {
+			status.PackageVersion = strings.TrimSpace(string(out))
+		}
+	} else {
+		if _, ok := err.(*exec.Error); ok {
+			status.CheckError = err.Error()
+		}
+	}
+	if info, err := os.Stat(debootstrapScriptsDir); err == nil && info.IsDir() {
+		status.ScriptsPresent = true
+	} else if err != nil && !os.IsNotExist(err) && status.CheckError == "" {
+		status.CheckError = err.Error()
+	}
+	return status
+}
+
+func collectLinuxHostCapabilityStatus() LinuxHostCapabilityStatus {
+	status := LinuxHostCapabilityStatus{
+		Linux64Available:   hostCapabilityAvailable([]string{"/etc/rc.d/linux", "/boot/kernel/linux64.ko"}, "linux64"),
+		FdescfsAvailable:   hostCapabilityAvailable([]string{"/sbin/mount_fdescfs", "/boot/kernel/fdescfs.ko"}, "fdescfs"),
+		LinprocfsAvailable: hostCapabilityAvailable([]string{"/sbin/mount_linprocfs", "/boot/kernel/linprocfs.ko"}, "linprocfs"),
+		LinsysfsAvailable:  hostCapabilityAvailable([]string{"/sbin/mount_linsysfs", "/boot/kernel/linsysfs.ko"}, "linsysfs"),
+		TmpfsAvailable:     hostCapabilityAvailable([]string{"/sbin/mount_tmpfs", "/boot/kernel/tmpfs.ko"}, "tmpfs"),
+	}
+	if !status.Linux64Available {
+		status.Errors = append(status.Errors, "linux64 support is not available on the host")
+	}
+	if !status.FdescfsAvailable {
+		status.Errors = append(status.Errors, "fdescfs support is not available on the host")
+	}
+	if !status.LinprocfsAvailable {
+		status.Errors = append(status.Errors, "linprocfs support is not available on the host")
+	}
+	if !status.LinsysfsAvailable {
+		status.Errors = append(status.Errors, "linsysfs support is not available on the host")
+	}
+	if !status.TmpfsAvailable {
+		status.Errors = append(status.Errors, "tmpfs support is not available on the host")
+	}
+	return status
+}
+
+func (status LinuxHostCapabilityStatus) blockingError() error {
+	if len(status.Errors) == 0 {
+		return nil
+	}
+	return fmt.Errorf("linux host prerequisites missing: %s", strings.Join(status.Errors, "; "))
+}
+
+func hostCapabilityAvailable(paths []string, module string) bool {
+	for _, path := range paths {
+		if fileExists(path) {
+			return true
+		}
+	}
+	if strings.TrimSpace(module) == "" {
+		return false
+	}
+	return exec.Command("kldstat", "-q", "-m", module).Run() == nil
+}
+
 func collectLinuxWizardPrereqs(values jailWizardValues) LinuxWizardPrereqs {
 	mirror, err := resolveLinuxMirror(values)
 	support := collectLinuxBootstrapReleaseSupport(values)
 	return LinuxWizardPrereqs{
 		Host:              collectLinuxHostStatus(),
+		Debootstrap:       collectHostDebootstrapStatus(),
+		Capabilities:      collectLinuxHostCapabilityStatus(),
 		MirrorURL:         mirror.BaseURL,
 		MirrorHost:        mirror.Host,
 		PreflightURL:      mirror.PreflightURL,
@@ -101,6 +188,8 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
 	readiness := &LinuxReadiness{
 		Host:             collectLinuxHostStatus(),
+		Debootstrap:      collectHostDebootstrapStatus(),
+		Capabilities:     collectLinuxHostCapabilityStatus(),
 		BootstrapFamily:  effectiveLinuxDistro(values),
 		BootstrapRelease: effectiveLinuxRelease(values),
 		BootstrapMode:    effectiveLinuxBootstrapMode(values),
