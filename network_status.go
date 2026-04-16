@@ -543,8 +543,14 @@ func networkWizardPrereqLines(prereqs NetworkWizardPrereqs) []string {
 	if prereqs.RouterStatus != "" {
 		lines = append(lines, "Default router: "+prereqs.RouterStatus)
 	}
+	if len(prereqs.Warnings) > 0 && len(lines) > 0 {
+		lines = append(lines, "")
+	}
 	for _, warning := range prereqs.Warnings {
 		lines = append(lines, "Warning: "+warning)
+	}
+	if len(prereqs.Errors) > 0 && len(lines) > 0 {
+		lines = append(lines, "")
 	}
 	for _, err := range prereqs.Errors {
 		lines = append(lines, "Error: "+err)
@@ -707,7 +713,7 @@ func collectPersistentVNETRCConfDrift(values jailWizardValues) ([]string, []stri
 		} else if strings.TrimSpace(uplinkValue) == "" {
 			warnings = append(warnings, fmt.Sprintf("rc.conf %s is missing; persistent setup will write %q", uplinkKey, "up"))
 		} else if strings.TrimSpace(uplinkValue) != "up" {
-			errors = append(errors, fmt.Sprintf("rc.conf %s is %q; persistent setup refuses to overwrite it with %q", uplinkKey, uplinkValue, "up"))
+			warnings = append(warnings, fmt.Sprintf("rc.conf %s is already set to %q; persistent setup will keep that value and only attach it to %q through %s", uplinkKey, uplinkValue, bridge, bridgeKey))
 		}
 	}
 
@@ -832,7 +838,7 @@ func ensurePersistentVNETHostConfig(ctx context.Context, values jailWizardValues
 			}
 			return nil, err
 		}
-		if strings.TrimSpace(uplinkOld) != "up" {
+		if strings.TrimSpace(uplinkOld) == "" {
 			if err := ensureBackups(); err != nil {
 				return nil, err
 			}

@@ -3772,6 +3772,9 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"bridge0",
 				"bridge1",
 			},
+			Notes: []string{
+				"Do not enable spanning tree by default for a simple jail bridge. It is only useful when the bridge participates in a Layer 2 loop or multiple redundant paths, and enabling it adds forwarding delay.",
+			},
 		}
 	case "bridge_policy":
 		return wizardFieldGuide{
@@ -3791,7 +3794,8 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"persistent to manage rc.conf bridge settings before jail creation",
 			},
 			Notes: []string{
-				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for the bridge or uplink.",
+				"Persistent mode manages cloned_interfaces and bridge settings in rc.conf.",
+				"Existing uplink interface settings are preserved instead of being overwritten.",
 			},
 		}
 	case "uplink":
