@@ -1,4 +1,5 @@
 package main
+
 import "context"
 
 import (
@@ -43,6 +44,7 @@ const (
 	initialPhaseLoading initialCheckPhase = iota
 	initialPhaseEnableRCConfirm
 	initialPhaseJailConfPrompt
+	initialPhaseRacctConfirm
 	initialPhaseDirsPrompt
 	initialPhaseDirsCustomInput
 	initialPhaseDatasetsPrompt
@@ -58,6 +60,9 @@ type initialConfigStatus struct {
 	JailEnableStatus   RCSettingStatus
 	ParallelStatus     RCSettingStatus
 	JailConfStatus     jailConfIncludeStatus
+
+	NeedsRacctEnable bool
+	RacctStatus      RacctStatus
 
 	ExistingJailPaths     []string
 	HasJailPath           bool
@@ -91,6 +96,7 @@ type initialCheckState struct {
 
 	skipRC       bool
 	skipJailConf bool
+	skipRacct    bool
 	skipDirs     bool
 	skipDatasets bool
 
@@ -124,6 +130,10 @@ func (state *initialCheckState) setPhaseFromStatus() {
 	}
 	if state.status.needsJailConfIncludeFix() && !state.skipJailConf {
 		state.phase = initialPhaseJailConfPrompt
+		return
+	}
+	if state.status.NeedsRacctEnable && !state.skipRacct {
+		state.phase = initialPhaseRacctConfirm
 		return
 	}
 	if (!state.status.HasJailPath || len(state.status.MissingDocJailSubdirs) > 0) && !state.skipDirs {
@@ -328,6 +338,7 @@ func (state *initialCheckState) beginCustomDatasetInput() {
 func (state *initialCheckState) resetSkips() {
 	state.skipRC = false
 	state.skipJailConf = false
+	state.skipRacct = false
 	state.skipDirs = false
 	state.skipDatasets = false
 }
@@ -399,6 +410,8 @@ func collectInitialConfigStatus(now time.Time) (initialConfigStatus, error) {
 	status.JailEnableStatus = collectRCSettingStatus("jail_enable", "YES")
 	status.ParallelStatus = collectRCSettingStatus("jail_parallel_start", "YES")
 	status.JailConfStatus = collectJailConfDIncludeStatus()
+	status.RacctStatus = collectRacctStatus()
+	status.NeedsRacctEnable = !status.RacctStatus.LoaderConfigured
 	if strings.TrimSpace(status.JailConfStatus.ReadError) != "" {
 		errs = append(errs, errors.New(status.JailConfStatus.ReadError))
 	}
@@ -645,6 +658,33 @@ func ensureJailConfIncludeCmd() tea.Cmd {
 	}
 }
 
+func enableRacctCmd() tea.Cmd {
+	return func() tea.Msg {
+		var logs []string
+		path := "/boot/loader.conf"
+		content := ""
+		if fileInfo, err := os.Stat(path); err == nil && !fileInfo.IsDir() {
+			existing, err := os.ReadFile(path)
+			if err != nil {
+				return initialActionMsg{err: err, message: "Failed reading loader.conf"}
+			}
+			content = string(existing)
+		}
+		if !strings.HasSuffix(content, "\n") && content != "" {
+			content += "\n"
+		}
+		content += `kern.racct.enable="1"` + "\n"
+		if _, err := backupFileForMutation(path, "initial-check-loader-conf", &logs); err != nil {
+			return initialActionMsg{err: err, message: "Failed preparing loader.conf backup"}
+		}
+		logs = append(logs, "$ write "+path)
+		if err := writeFileAtomicReplace(path, []byte(content), 0o644); err != nil {
+			return initialActionMsg{err: err, message: "Failed updating loader.conf"}
+		}
+		return initialActionMsg{logs: logs, message: "loader.conf updated (reboot required)", refresh: true}
+	}
+}
+
 func createDefaultDatasetLayoutCmd() tea.Cmd {
 	return createDatasetLayoutCmd(
 		docDatasetBase,
@@ -737,6 +777,23 @@ func (m model) updateInitialCheckKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "N", "s", "S":
 			m.initCheck.skipJailConf = true
 			m.initCheck.message = "Skipped /etc/jail.conf include update."
+			m.initCheck.setPhaseFromStatus()
+			return m, nil
+		case "r", "R":
+			m.initCheck.resetSkips()
+			m.initCheck.loading = true
+			return m, collectInitialConfigCmd()
+		}
+
+	case initialPhaseRacctConfirm:
+		switch key {
+		case "y", "Y", "enter":
+			m.initCheck.applying = true
+			m.initCheck.message = "Enabling kern.racct.enable..."
+			return m, enableRacctCmd()
+		case "n", "N", "s", "S":
+			m.initCheck.skipRacct = true
+			m.initCheck.message = "Skipped kern.racct.enable."
 			m.initCheck.setPhaseFromStatus()
 			return m, nil
 		case "r", "R":
@@ -939,13 +996,13 @@ func (m model) initialCheckLines(width int) []string {
 		[2]string{"jail_enable", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable))},
 	))
 	for _, line := range rcSettingDriftLines(m.initCheck.status.JailEnableStatus) {
-		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
+		lines = append(lines, wizardWarningStyle.Render(truncate("  "+line, width)))
 	}
 	lines = append(lines, renderKeyValueLines(width,
 		[2]string{"jail_parallel_start", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.ParallelStartValue), checkStatusText(!m.initCheck.status.NeedsParallelStart))},
 	)...)
 	for _, line := range rcSettingDriftLines(m.initCheck.status.ParallelStatus) {
-		lines = append(lines, wizardErrorStyle.Render(truncate("  "+line, width)))
+		lines = append(lines, wizardWarningStyle.Render(truncate("  "+line, width)))
 	}
 	appendSection(&lines, width, "jail.conf checks")
 	includeState := "missing"
@@ -961,6 +1018,19 @@ func (m model) initialCheckLines(width int) []string {
 	)...)
 	if strings.TrimSpace(m.initCheck.status.JailConfStatus.ReadError) != "" {
 		lines = append(lines, wizardErrorStyle.Render(truncate("  "+m.initCheck.status.JailConfStatus.ReadError, width)))
+	}
+
+	appendSection(&lines, width, "Resource limits (rctl)")
+	racctState := "disabled"
+	if m.initCheck.status.RacctStatus.Enabled {
+		racctState = "enabled"
+	}
+	lines = append(lines, renderKeyValueLines(width,
+		[2]string{"kern.racct.enable runtime", racctState},
+		[2]string{"loader.conf configured", yesNoText(m.initCheck.status.RacctStatus.LoaderConfigured)},
+	)...)
+	if strings.TrimSpace(m.initCheck.status.RacctStatus.ReadError) != "" {
+		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.RacctStatus.ReadError, width)))
 	}
 
 	appendSection(&lines, width, "Jail path checks")
@@ -986,7 +1056,7 @@ func (m model) initialCheckLines(width int) []string {
 	if len(m.initCheck.status.Errors) > 0 {
 		appendSection(&lines, width, "Check warnings")
 		for _, err := range m.initCheck.status.Errors {
-			lines = append(lines, wizardErrorStyle.Render(truncate("  - "+err, width)))
+			lines = append(lines, wizardWarningStyle.Render(truncate("  - "+err, width)))
 		}
 	}
 
@@ -1005,6 +1075,11 @@ func (m model) initialCheckLines(width int) []string {
 			lines = append(lines, truncate("Append it now?", width))
 		}
 		lines = append(lines, truncate("y: update /etc/jail.conf | n: skip", width))
+	case initialPhaseRacctConfirm:
+		lines = append(lines, truncate("kern.racct.enable is only needed if you want to use rctl limits.", width))
+		lines = append(lines, truncate("Enable it now by appending to /boot/loader.conf?", width))
+		lines = append(lines, wizardWarningStyle.Render(truncate("A manual system reboot will be required before rctl limits can be applied.", width)))
+		lines = append(lines, truncate("y: enable racct | n: skip", width))
 	case initialPhaseDirsPrompt:
 		if len(m.initCheck.status.MissingDocJailSubdirs) > 0 {
 			lines = append(lines, truncate("Standard jail subdirectories are missing under /usr/local/jails.", width))
@@ -1083,6 +1158,8 @@ func (m model) initialCheckFooterHint() string {
 		return "y: enable missing settings | n: skip | r: re-check | q: quit"
 	case initialPhaseJailConfPrompt:
 		return "y: update /etc/jail.conf | n: skip | r: re-check | q: quit"
+	case initialPhaseRacctConfirm:
+		return "y: enable racct | n: skip | r: re-check | q: quit"
 	case initialPhaseDirsPrompt:
 		return "d: docs default | c: custom path | n: skip | r: re-check | q: quit"
 	case initialPhaseDirsCustomInput:

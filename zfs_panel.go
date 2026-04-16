@@ -652,7 +652,7 @@ func (m model) renderZFSPanelView() string {
 		message = "error: " + m.zfsPanel.err.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
 	} else if looksLikeWarningText(m.zfsPanel.message) {
-		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
+		footerRenderer = wizardWarningStyle.Copy().Padding(0, 1)
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerRenderer)
 	bodyHeight := m.pageBodyHeight(header, footer, 0)

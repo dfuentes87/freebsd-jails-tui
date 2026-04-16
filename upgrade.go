@@ -1,4 +1,5 @@
 package main
+
 import "context"
 
 import (
@@ -91,7 +92,6 @@ func upgradeWorkflowDescriptionLines(w upgradeWorkflow, jail Jail) []string {
 			"      Re-clone them from the new snapshot to pick up base changes.",
 			"",
 			"Jail path: " + valueOrDash(jail.Path),
-
 		}
 	case upgradeWorkflowPkgReinstall:
 		return []string{

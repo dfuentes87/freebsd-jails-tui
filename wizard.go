@@ -147,6 +147,9 @@ type jailCreationWizard struct {
 	networkPrereqs       NetworkWizardPrereqs
 	networkPrereqKey     string
 	networkPrereqCached  bool
+	racctPrereqs         RacctWizardPrereqs
+	racctPrereqKey       string
+	racctPrereqCached    bool
 	templateMode         wizardTemplateMode
 	templateInput        string
 	templates            []wizardTemplate
@@ -489,6 +492,20 @@ func (w *jailCreationWizard) refreshLinuxPrereqs() {
 	w.linuxPrereqCached = true
 }
 
+func (w *jailCreationWizard) refreshRacctPrereqs() {
+	key := strings.Join([]string{
+		strings.TrimSpace(w.values.CPUPercent),
+		strings.TrimSpace(w.values.MemoryLimit),
+		strings.TrimSpace(w.values.ProcessLimit),
+	}, "|")
+	if w.racctPrereqCached && w.racctPrereqKey == key {
+		return
+	}
+	w.racctPrereqs = collectRacctWizardPrereqs(w.values)
+	w.racctPrereqKey = key
+	w.racctPrereqCached = true
+}
+
 func (w *jailCreationWizard) refreshNetworkPrereqs() {
 	key := strings.Join([]string{
 		normalizedJailType(w.values.JailType),
@@ -509,6 +526,7 @@ func (w *jailCreationWizard) refreshNetworkPrereqs() {
 }
 
 func (w *jailCreationWizard) normalizeStep() {
+	w.refreshRacctPrereqs()
 	steps := w.steps()
 	if len(steps) == 0 {
 		w.step = 0

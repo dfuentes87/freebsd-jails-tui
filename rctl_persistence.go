@@ -109,15 +109,16 @@ func readLoaderConfValue(key string) (string, error) {
 	return last, nil
 }
 
-func validateRacctPreflight(values jailWizardValues) error {
-	if !hasAnyRctlLimits(values) {
-		return nil
+type RacctWizardPrereqs struct {
+	Status    RacctStatus
+	HasLimits bool
+}
+
+func collectRacctWizardPrereqs(values jailWizardValues) RacctWizardPrereqs {
+	return RacctWizardPrereqs{
+		Status:    collectRacctStatus(),
+		HasLimits: hasAnyRctlLimits(values),
 	}
-	status := collectRacctStatus()
-	if !status.Enabled {
-		return fmt.Errorf("resource limits require kern.racct.enable=1 and a reboot before rctl limits can be applied")
-	}
-	return nil
 }
 
 func managedRctlRulesForJail(values jailWizardValues, jailName string) []string {

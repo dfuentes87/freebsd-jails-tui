@@ -71,6 +71,9 @@ var (
 	wizardErrorStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("196"))
+	wizardWarningStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("226"))
 )
 
 type snapshotMsg struct {
@@ -1154,7 +1157,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-switch msg.String() {
+	switch msg.String() {
 	case "space", " ":
 		if m.detailNoteMode {
 			m.appendDetailNoteInput(" ")
@@ -3488,6 +3491,13 @@ func (m model) wizardLines(width int) []string {
 				appendStyledWizardLine(&lines, line, width)
 			}
 		}
+		if shouldShowRacctPrereqs(m.wizard.racctPrereqs) {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Resource limit prerequisites"))
+			for _, line := range racctWizardPrereqLines(m.wizard.racctPrereqs) {
+				appendStyledWizardLine(&lines, line, width)
+			}
+		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("jail.conf preview"))
 		if m.wizard.showJailConfPreview {
@@ -3616,6 +3626,14 @@ func (m model) wizardFieldEntryLayout(width int, inlineHelp bool) ([]string, int
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Network prerequisites"))
 		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
+	}
+
+	if inlineHelp && shouldShowRacctPrereqs(m.wizard.racctPrereqs) && wizardShowsRacctPrereqs(m.wizard.currentStep()) {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Resource limit prerequisites"))
+		for _, line := range racctWizardPrereqLines(m.wizard.racctPrereqs) {
 			appendStyledWizardLine(&lines, line, width)
 		}
 	}
@@ -4020,6 +4038,45 @@ func wizardFieldUsesLinuxContext(id string) bool {
 	}
 }
 
+func wizardShowsRacctPrereqs(step wizardStep) bool {
+	for _, field := range step.Fields {
+		switch field.ID {
+		case "cpu_percent", "memory_limit", "process_limit":
+			return true
+		}
+	}
+	return false
+}
+
+func shouldShowRacctPrereqs(prereqs RacctWizardPrereqs) bool {
+	if !prereqs.HasLimits {
+		return false
+	}
+	if !prereqs.Status.Enabled || prereqs.Status.ReadError != "" {
+		return true
+	}
+	return false
+}
+
+func racctWizardPrereqLines(prereqs RacctWizardPrereqs) []string {
+	if !prereqs.HasLimits {
+		return []string{"No resource limits configured."}
+	}
+	lines := []string{}
+	if prereqs.Status.ReadError != "" {
+		lines = append(lines, "Warning: failed to inspect kern.racct.enable: "+prereqs.Status.ReadError)
+	} else if !prereqs.Status.Enabled {
+		if prereqs.Status.LoaderConfigured {
+			lines = append(lines, "Warning: kern.racct.enable is configured but the system requires a manual reboot before rctl limits can be applied.")
+		} else {
+			lines = append(lines, "Warning: resource limits require kern.racct.enable=1 and a manual reboot before rctl limits can be applied.")
+		}
+	} else {
+		lines = append(lines, "kern.racct.enable is active.")
+	}
+	return lines
+}
+
 func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
@@ -4055,6 +4112,9 @@ func shouldShowNetworkPrereqs(prereqs NetworkWizardPrereqs) bool {
 
 func appendStyledWizardLine(lines *[]string, text string, width int) {
 	if looksLikeWarningText(text) {
+		*lines = append(*lines, wizardWarningStyle.Render(truncate(text, width)))
+		return
+	} else if looksLikeErrorText(text) {
 		*lines = append(*lines, wizardErrorStyle.Render(truncate(text, width)))
 		return
 	}
@@ -4064,6 +4124,9 @@ func appendStyledWizardLine(lines *[]string, text string, width int) {
 func appendWrappedStyledWizardLine(lines *[]string, text string, width int) {
 	for _, line := range wrapText(text, max(8, width)) {
 		if looksLikeWarningText(text) {
+			*lines = append(*lines, wizardWarningStyle.Render(line))
+			continue
+		} else if looksLikeErrorText(text) {
 			*lines = append(*lines, wizardErrorStyle.Render(line))
 			continue
 		}
@@ -4259,6 +4322,9 @@ func (m model) detailLines(width int) []string {
 		if len(m.detail.NetworkSummary.Validation) > 0 {
 			for _, line := range m.detail.NetworkSummary.Validation {
 				if looksLikeWarningText(line) {
+					lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
+					continue
+				} else if looksLikeErrorText(line) {
 					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 					continue
 				}
@@ -4321,7 +4387,10 @@ func (m model) detailLines(width int) []string {
 	if m.detail.LinuxReadiness != nil {
 		appendSectionWithStyle(&lines, width, detailSectionStyle, "Linux readiness")
 		for _, line := range m.linuxReadinessLines() {
-			if looksLikeWarningText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
+			if looksLikeWarningText(line) {
+				lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
+				continue
+			} else if looksLikeErrorText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 				continue
 			}
@@ -5069,7 +5138,7 @@ func styleWizardMessage(message string) string {
 		return wizardActionStyle.Render(message)
 	}
 	if looksLikeWarningText(message) {
-		return wizardErrorStyle.Render(message)
+		return wizardWarningStyle.Render(message)
 	}
 	return summaryStyle.Render(message)
 }
@@ -5091,8 +5160,12 @@ func summarizeCreationWarning(message string) string {
 
 func looksLikeWarningText(message string) bool {
 	lower := strings.ToLower(message)
-	return strings.Contains(lower, "warning") ||
-		strings.Contains(lower, "failed") ||
+	return strings.Contains(lower, "warning")
+}
+
+func looksLikeErrorText(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "failed") ||
 		strings.Contains(lower, "required") ||
 		strings.Contains(lower, "invalid") ||
 		strings.Contains(lower, "must") ||

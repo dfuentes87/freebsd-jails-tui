@@ -1726,6 +1726,9 @@ func applyRctlLimits(ctx context.Context, values jailWizardValues, jailName stri
 	if !hasAnyRctlLimits(values) {
 		return nil
 	}
+	if !collectRacctStatus().Enabled {
+		return nil
+	}
 	if strings.TrimSpace(values.CPUPercent) != "" {
 		if _, err := runLoggedCommand(ctx, logs, "rctl", "-a", fmt.Sprintf("jail:%s:pcpu:deny=%s", jailName, strings.TrimSpace(values.CPUPercent))); err != nil {
 			return fmt.Errorf("failed to apply CPU rctl limit: %w", err)
