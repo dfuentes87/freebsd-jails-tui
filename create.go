@@ -668,6 +668,9 @@ func bootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailNa
 	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "install", "-y", "debootstrap"); err != nil {
 		return fmt.Errorf("failed to install debootstrap inside linux jail: %w", err)
 	}
+	if err := validateJailLinuxDebootstrapReleaseSupport(ctx, jailName, release, logs); err != nil {
+		return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
+	}
 	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "debootstrap", "--arch", hostArch(), release, target, mirror); err != nil {
 		return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
 	}
@@ -682,9 +685,33 @@ func maybeBootstrapLinuxUserland(ctx context.Context, values jailWizardValues, j
 		return []string{err.Error() + " Use detail view action 'b' to retry after fixing networking."}, nil
 	}
 	if err := bootstrapLinuxUserland(ctx, values, jailName, logs); err != nil {
-		return []string{err.Error() + " Use detail view action 'b' to retry after fixing networking or package access."}, nil
+		return []string{err.Error() + linuxBootstrapRetryGuidance(err)}, nil
 	}
 	return nil, nil
+}
+
+func linuxBootstrapRetryGuidance(err error) string {
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(lower, "does not support release"):
+		return ""
+	case strings.Contains(lower, "failed to install debootstrap") || strings.Contains(lower, "failed to bootstrap pkg"):
+		return " Use detail view action 'b' to retry after fixing package access."
+	default:
+		return " Use detail view action 'b' to retry after fixing networking or package access."
+	}
+}
+
+func validateJailLinuxDebootstrapReleaseSupport(ctx context.Context, jailName, release string, logs *[]string) error {
+	release = strings.TrimSpace(release)
+	if release == "" {
+		return fmt.Errorf("bootstrap release is required")
+	}
+	scriptPath := filepath.ToSlash(filepath.Join(debootstrapScriptsDir, release))
+	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "test", "-f", scriptPath); err != nil {
+		return fmt.Errorf("installed debootstrap does not support release %q on this host; choose a supported bootstrap release or update debootstrap", release)
+	}
+	return nil
 }
 
 func preflightLinuxBootstrap(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) error {

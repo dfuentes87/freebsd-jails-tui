@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	defaultJailConfPath = "/etc/jail.conf"
-	jailConfDInclude    = `.include "/etc/jail.conf.d/*.conf";`
+	defaultJailConfPath   = "/etc/jail.conf"
+	jailConfDInclude      = `.include "/etc/jail.conf.d/*.conf";`
+	debootstrapScriptsDir = "/usr/local/share/debootstrap/scripts"
 )
 
 var (
@@ -48,7 +49,52 @@ func validateJailCreateHostPreflight(values jailWizardValues) (string, error) {
 	if compatibility.Err != nil {
 		return "template_release", compatibility.Err
 	}
+	if err := validateLinuxBootstrapReleaseSupport(values); err != nil {
+		return "linux_release", err
+	}
 	return "", nil
+}
+
+func validateLinuxBootstrapReleaseValue(raw string) error {
+	release := strings.TrimSpace(raw)
+	if release == "" {
+		return fmt.Errorf("bootstrap release is required")
+	}
+	if !jailNamePattern.MatchString(release) {
+		return fmt.Errorf("bootstrap release must use letters, numbers, dot, underscore, or dash")
+	}
+	return nil
+}
+
+func validateLinuxBootstrapReleaseSupport(values jailWizardValues) error {
+	if normalizedJailType(values.JailType) != "linux" {
+		return nil
+	}
+	if effectiveLinuxBootstrapMode(values) == "skip" {
+		return nil
+	}
+	release := effectiveLinuxRelease(values)
+	if err := validateLinuxBootstrapReleaseValue(release); err != nil {
+		return err
+	}
+	info, err := os.Stat(debootstrapScriptsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to inspect host debootstrap scripts: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", debootstrapScriptsDir)
+	}
+	scriptPath := filepath.Join(debootstrapScriptsDir, release)
+	if _, err := os.Stat(scriptPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("host debootstrap does not support bootstrap release %q; choose a supported release or update debootstrap", release)
+		}
+		return fmt.Errorf("failed to inspect debootstrap support for release %q: %w", release, err)
+	}
+	return nil
 }
 
 func collectJailConfDIncludeStatus() jailConfIncludeStatus {

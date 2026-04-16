@@ -3980,9 +3980,12 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 		return wizardFieldGuide{
 			Purpose: "Free-form codename, suite, or release string passed directly to debootstrap.",
 			Examples: []string{
-				"noble",
+				"jammy",
 				"bookworm",
 				"trixie",
+			},
+			Notes: []string{
+				"Bootstrap mode auto only proceeds when the host can verify that debootstrap supports the selected release.",
 			},
 		}
 	case "linux_bootstrap":
@@ -4948,8 +4951,9 @@ func (m model) renderFooterWithMessage(hint, message string, footerRenderer lipg
 	message = strings.TrimSpace(message)
 	if message != "" {
 		prefixed := ">> " + message
+		renderLine := wizardMessageRenderer(message)
 		for _, line := range wrapText(prefixed, max(8, width-2)) {
-			lines = append(lines, styleWizardMessage(line))
+			lines = append(lines, renderLine(line))
 		}
 	}
 
@@ -5128,6 +5132,10 @@ func statusBadge(running bool) string {
 }
 
 func styleWizardMessage(message string) string {
+	return wizardMessageRenderer(message)(message)
+}
+
+func wizardMessageRenderer(message string) func(string) string {
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "applying") ||
 		strings.Contains(lower, "creating") ||
@@ -5135,12 +5143,12 @@ func styleWizardMessage(message string) string {
 		strings.Contains(lower, "retrying") ||
 		strings.Contains(lower, "rolling back") ||
 		strings.Contains(lower, "loading detail") {
-		return wizardActionStyle.Render(message)
+		return func(text string) string { return wizardActionStyle.Render(text) }
 	}
 	if looksLikeWarningText(message) {
-		return wizardWarningStyle.Render(message)
+		return func(text string) string { return wizardWarningStyle.Render(text) }
 	}
-	return summaryStyle.Render(message)
+	return func(text string) string { return summaryStyle.Render(text) }
 }
 
 func summarizeCreationWarning(message string) string {
@@ -5151,11 +5159,29 @@ func summarizeCreationWarning(message string) string {
 		return "linux bootstrap skipped; use detail view action 'b' after networking is ready"
 	case strings.Contains(lower, "linux bootstrap preflight failed"):
 		return "linux bootstrap preflight failed; use detail view action 'b' after fixing networking"
+	case strings.Contains(lower, "does not support release"):
+		if release := firstQuotedValue(trimmed); release != "" {
+			return fmt.Sprintf("linux bootstrap failed; debootstrap does not support release %q on this host", release)
+		}
+		return "linux bootstrap failed; debootstrap on this host does not support the selected release"
 	case strings.Contains(lower, "failed to bootstrap") || strings.Contains(lower, "failed to install debootstrap"):
 		return "linux bootstrap failed; use detail view action 'b' after fixing package access"
 	default:
 		return trimmed
 	}
+}
+
+func firstQuotedValue(text string) string {
+	start := strings.IndexByte(text, '"')
+	if start < 0 {
+		return ""
+	}
+	rest := text[start+1:]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
 }
 
 func looksLikeWarningText(message string) bool {

@@ -91,7 +91,7 @@ var wizardBaseSteps = []wizardStep{
 		Description: "Choose the bootstrap family, release, and mirror used to populate /compat inside a linux jail.",
 		Fields: []wizardField{
 			{ID: "linux_distro", Label: "Bootstrap family", Placeholder: "ubuntu", Help: "Free-form family name; Ubuntu and Debian have built-in default mirrors"},
-			{ID: "linux_release", Label: "Bootstrap release", Placeholder: "noble", Help: "Free-form codename, suite, or release string passed to debootstrap"},
+			{ID: "linux_release", Label: "Bootstrap release", Placeholder: "jammy", Help: "Codename, suite, or release string passed to debootstrap"},
 			{ID: "linux_bootstrap", Label: "Bootstrap mode", Placeholder: "auto", Help: "Options: auto or skip"},
 			{ID: "linux_mirror_mode", Label: "Mirror mode", Placeholder: "default", Help: "Options: default or custom"},
 			{ID: "linux_mirror_url", Label: "Mirror URL", Placeholder: "https://mirror.example.invalid/repo", Help: "Custom Linux package mirror base URL"},
@@ -878,6 +878,9 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		if strings.TrimSpace(w.values.LinuxRelease) == "" {
 			return "linux_release", fmt.Errorf("bootstrap release is required")
 		}
+		if err := validateLinuxBootstrapReleaseValue(w.values.LinuxRelease); err != nil {
+			return "linux_release", err
+		}
 		mode := effectiveLinuxBootstrapMode(w.values)
 		switch mode {
 		case "auto", "skip":
@@ -895,6 +898,9 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 				return "linux_mirror_url", err
 			}
 			return "linux_mirror_mode", err
+		}
+		if err := validateLinuxBootstrapReleaseSupport(w.values); err != nil {
+			return "linux_release", err
 		}
 	}
 	return "", nil
