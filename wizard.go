@@ -1092,22 +1092,28 @@ func (w *jailCreationWizard) applyValidationError(fieldID string, err error) {
 		w.message = err.Error()
 		return
 	}
+	focused := false
 	if fieldID != "" {
-		w.focusField(fieldID)
+		focused = w.focusField(fieldID)
 	}
 	w.validationField = fieldID
 	w.validationError = err.Error()
-	w.message = ""
+	if focused {
+		w.message = ""
+		return
+	}
+	w.message = err.Error()
 }
 
-func (w *jailCreationWizard) focusField(fieldID string) {
+func (w *jailCreationWizard) focusField(fieldID string) bool {
 	fields := w.visibleFields()
 	for idx, field := range fields {
 		if field.ID == fieldID {
 			w.field = idx
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func blockingPrereqFieldID(values jailWizardValues) string {
