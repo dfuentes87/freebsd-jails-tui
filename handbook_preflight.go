@@ -41,6 +41,12 @@ type jailBaseCompatibility struct {
 	Err           error
 }
 
+type linuxBootstrapReleaseSupport struct {
+	Release string
+	Status  string
+	Detail  string
+}
+
 func validateJailCreateHostPreflight(values jailWizardValues) (string, error) {
 	if err := jailConfDIncludePreflightError(); err != nil {
 		return "", err
@@ -67,34 +73,55 @@ func validateLinuxBootstrapReleaseValue(raw string) error {
 }
 
 func validateLinuxBootstrapReleaseSupport(values jailWizardValues) error {
+	support := collectLinuxBootstrapReleaseSupport(values)
+	if support.Status == "unsupported" {
+		return fmt.Errorf("%s", support.Detail)
+	}
+	return nil
+}
+
+func collectLinuxBootstrapReleaseSupport(values jailWizardValues) linuxBootstrapReleaseSupport {
+	support := linuxBootstrapReleaseSupport{
+		Release: strings.TrimSpace(effectiveLinuxRelease(values)),
+	}
 	if normalizedJailType(values.JailType) != "linux" {
-		return nil
+		return support
 	}
-	if effectiveLinuxBootstrapMode(values) == "skip" {
-		return nil
-	}
-	release := effectiveLinuxRelease(values)
-	if err := validateLinuxBootstrapReleaseValue(release); err != nil {
-		return err
+	if err := validateLinuxBootstrapReleaseValue(support.Release); err != nil {
+		support.Status = "unsupported"
+		support.Detail = err.Error()
+		return support
 	}
 	info, err := os.Stat(debootstrapScriptsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			support.Status = "unknown"
+			support.Detail = "Host debootstrap scripts are not installed, so bootstrap release support cannot be verified early."
+			return support
 		}
-		return fmt.Errorf("failed to inspect host debootstrap scripts: %w", err)
+		support.Status = "unknown"
+		support.Detail = fmt.Sprintf("Failed to inspect host debootstrap scripts: %v", err)
+		return support
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", debootstrapScriptsDir)
+		support.Status = "unknown"
+		support.Detail = fmt.Sprintf("%s is not a directory", debootstrapScriptsDir)
+		return support
 	}
-	scriptPath := filepath.Join(debootstrapScriptsDir, release)
+	scriptPath := filepath.Join(debootstrapScriptsDir, support.Release)
 	if _, err := os.Stat(scriptPath); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("host debootstrap does not support bootstrap release %q; choose a supported release or update debootstrap", release)
+			support.Status = "unsupported"
+			support.Detail = fmt.Sprintf("host debootstrap does not support bootstrap release %q; choose a supported release or update debootstrap", support.Release)
+			return support
 		}
-		return fmt.Errorf("failed to inspect debootstrap support for release %q: %w", release, err)
+		support.Status = "unknown"
+		support.Detail = fmt.Sprintf("Failed to inspect debootstrap support for release %q: %v", support.Release, err)
+		return support
 	}
-	return nil
+	support.Status = "supported"
+	support.Detail = fmt.Sprintf("Host debootstrap supports bootstrap release %q.", support.Release)
+	return support
 }
 
 func collectJailConfDIncludeStatus() jailConfIncludeStatus {

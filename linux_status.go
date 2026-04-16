@@ -19,22 +19,27 @@ type LinuxHostStatus struct {
 }
 
 type LinuxWizardPrereqs struct {
-	Host         LinuxHostStatus
-	MirrorURL    string
-	MirrorHost   string
-	PreflightURL string
-	ResolveError string
+	Host              LinuxHostStatus
+	MirrorURL         string
+	MirrorHost        string
+	PreflightURL      string
+	ResolveError      string
+	ReleaseSupport    string
+	ReleaseSupportMsg string
 }
 
 type LinuxReadiness struct {
 	Host                 LinuxHostStatus
 	BootstrapFamily      string
+	BootstrapRelease     string
 	CompatRoot           string
 	BootstrapMode        string
 	MirrorURL            string
 	MirrorHost           string
 	PreflightURL         string
 	MirrorResolveError   string
+	ReleaseSupport       string
+	ReleaseSupportDetail string
 	UserlandPresent      bool
 	RuntimeChecked       bool
 	IPv4Route            bool
@@ -76,12 +81,15 @@ func collectLinuxHostStatus() LinuxHostStatus {
 
 func collectLinuxWizardPrereqs(values jailWizardValues) LinuxWizardPrereqs {
 	mirror, err := resolveLinuxMirror(values)
+	support := collectLinuxBootstrapReleaseSupport(values)
 	return LinuxWizardPrereqs{
-		Host:         collectLinuxHostStatus(),
-		MirrorURL:    mirror.BaseURL,
-		MirrorHost:   mirror.Host,
-		PreflightURL: mirror.PreflightURL,
-		ResolveError: errorText(err),
+		Host:              collectLinuxHostStatus(),
+		MirrorURL:         mirror.BaseURL,
+		MirrorHost:        mirror.Host,
+		PreflightURL:      mirror.PreflightURL,
+		ResolveError:      errorText(err),
+		ReleaseSupport:    support.Status,
+		ReleaseSupportMsg: support.Detail,
 	}
 }
 
@@ -92,15 +100,19 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 
 	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
 	readiness := &LinuxReadiness{
-		Host:            collectLinuxHostStatus(),
-		BootstrapFamily: effectiveLinuxDistro(values),
-		BootstrapMode:   effectiveLinuxBootstrapMode(values),
+		Host:             collectLinuxHostStatus(),
+		BootstrapFamily:  effectiveLinuxDistro(values),
+		BootstrapRelease: effectiveLinuxRelease(values),
+		BootstrapMode:    effectiveLinuxBootstrapMode(values),
 	}
+	support := collectLinuxBootstrapReleaseSupport(values)
 	mirror, err := resolveLinuxMirror(values)
 	readiness.MirrorURL = mirror.BaseURL
 	readiness.MirrorHost = mirror.Host
 	readiness.PreflightURL = mirror.PreflightURL
 	readiness.MirrorResolveError = errorText(err)
+	readiness.ReleaseSupport = support.Status
+	readiness.ReleaseSupportDetail = support.Detail
 	if strings.TrimSpace(detail.Path) != "" {
 		readiness.CompatRoot = linuxCompatRoot(detail.Path, values)
 		readiness.UserlandPresent = linuxUserlandPresent(detail.Path, values)

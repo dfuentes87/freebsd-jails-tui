@@ -4169,6 +4169,17 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
 	}
+	switch prereqs.ReleaseSupport {
+	case "supported":
+		lines = append(lines, "Bootstrap release support: verified")
+	case "unsupported":
+		lines = append(lines, "Warning: bootstrap release support: unsupported")
+	case "unknown":
+		lines = append(lines, "Warning: bootstrap release support could not be verified early")
+	}
+	if prereqs.ReleaseSupportMsg != "" {
+		lines = append(lines, prereqs.ReleaseSupportMsg)
+	}
 	if prereqs.ResolveError != "" {
 		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
 	}
@@ -4192,6 +4203,17 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
 		"Auto bootstrap requires route, DNS, and fetch access inside the running jail.",
 		"Skip mode creates the jail first; use b in jail detail to retry bootstrap later.",
+	}
+	switch prereqs.ReleaseSupport {
+	case "supported":
+		lines = append(lines, "Bootstrap release support: verified")
+	case "unsupported":
+		lines = append(lines, "Warning: bootstrap release is not supported by host debootstrap")
+	case "unknown":
+		lines = append(lines, "Warning: bootstrap release support could not be verified early")
+	}
+	if prereqs.ReleaseSupportMsg != "" {
+		lines = append(lines, prereqs.ReleaseSupportMsg)
 	}
 	if prereqs.ResolveError != "" {
 		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
@@ -4463,12 +4485,24 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
 		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
+		fmt.Sprintf("Bootstrap release: %s", valueOrDash(readiness.BootstrapRelease)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
 		fmt.Sprintf("Mirror URL: %s", valueOrDash(readiness.MirrorURL)),
 		fmt.Sprintf("Mirror host: %s", valueOrDash(readiness.MirrorHost)),
 		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
+	}
+	switch readiness.ReleaseSupport {
+	case "supported":
+		lines = append(lines, "Bootstrap release support: verified")
+	case "unsupported":
+		lines = append(lines, "Warning: bootstrap release support: unsupported")
+	case "unknown":
+		lines = append(lines, "Warning: bootstrap release support could not be verified early")
+	}
+	if readiness.ReleaseSupportDetail != "" {
+		lines = append(lines, readiness.ReleaseSupportDetail)
 	}
 	if readiness.MirrorResolveError != "" {
 		lines = append(lines, "Warning: mirror resolution failed: "+readiness.MirrorResolveError)

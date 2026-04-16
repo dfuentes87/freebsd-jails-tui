@@ -150,6 +150,12 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 	if compatibility := collectJailBaseCompatibility(values); strings.TrimSpace(compatibility.Warning) != "" {
 		logf("warning: %s", compatibility.Warning)
 	}
+	if normalizedJailType(values.JailType) == "linux" {
+		releaseSupport := collectLinuxBootstrapReleaseSupport(values)
+		if releaseSupport.Status == "unknown" && strings.TrimSpace(releaseSupport.Detail) != "" && effectiveLinuxBootstrapMode(values) == "auto" {
+			logf("warning: %s", releaseSupport.Detail)
+		}
+	}
 	for _, existing := range discoverConfiguredJails() {
 		if existing == result.Name {
 			return fail(fmt.Errorf("jail %q already exists in discovered config", result.Name))
@@ -271,7 +277,11 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		removeJailRctlRules(ctx, result.Name, &logs)
 	})
 
-	logf("Jail %s created successfully.", result.Name)
+	if len(warnings) > 0 {
+		logf("Jail %s created and started with warnings.", result.Name)
+	} else {
+		logf("Jail %s created successfully.", result.Name)
+	}
 	result.Logs = logs
 	result.Warnings = warnings
 	return result
