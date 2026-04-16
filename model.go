@@ -630,6 +630,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 			return m, pollCmd()
 		}
+		m.wizardScroll = 1 << 30
+		m.boundWizardScroll()
 		return m, nil
 	case destroyApplyMsg:
 		m.destroy.applying = false
@@ -1152,7 +1154,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch msg.String() {
+switch msg.String() {
 	case "space", " ":
 		if m.detailNoteMode {
 			m.appendDetailNoteInput(" ")
@@ -1514,6 +1516,24 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "j":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll++
+			m.boundWizardScroll()
+			return m, nil
+		}
+	case "k":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll--
+			m.boundWizardScroll()
+			return m, nil
+		}
+	case "p", "P":
+		if m.wizard.isConfirmationStep() {
+			m.wizard.showJailConfPreview = !m.wizard.showJailConfPreview
+			m.boundWizardScroll()
+			return m, nil
+		}
 	case "space", " ":
 		if !m.wizardApplying && !m.wizard.isConfirmationStep() {
 			if field, ok := m.wizard.activeField(); ok && field.ID == "note" {
@@ -1558,6 +1578,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureWizardFieldVisible()
 		return m, nil
 	case "tab", "down":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll++
+			m.boundWizardScroll()
+			return m, nil
+		}
 		if m.wizardApplying {
 			return m, nil
 		}
@@ -1565,6 +1590,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureWizardFieldVisible()
 		return m, nil
 	case "shift+tab", "up":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll--
+			m.boundWizardScroll()
+			return m, nil
+		}
 		if m.wizardApplying {
 			return m, nil
 		}
@@ -1572,27 +1602,21 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureWizardFieldVisible()
 		return m, nil
 	case "pgdown":
-		if m.wizardApplying {
-			return m, nil
-		}
 		m.wizardScroll += m.wizardBodyHeight()
 		m.boundWizardScroll()
 		return m, nil
 	case "pgup":
-		if m.wizardApplying {
-			return m, nil
-		}
 		m.wizardScroll -= m.wizardBodyHeight()
 		m.boundWizardScroll()
 		return m, nil
 	case "home":
-		if m.wizardApplying {
+		if m.wizardApplying && !m.wizard.isConfirmationStep() {
 			return m, nil
 		}
 		m.wizardScroll = 0
 		return m, nil
 	case "end":
-		if m.wizardApplying {
+		if m.wizardApplying && !m.wizard.isConfirmationStep() {
 			return m, nil
 		}
 		m.wizardScroll = 1 << 30
@@ -1658,6 +1682,7 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
+			m.wizardScroll = 0
 			m.downloading = false
 			m.downloadRead = 0
 			m.downloadTotal = 0
@@ -2858,7 +2883,7 @@ func (m model) wizardFooterHint() string {
 		hint = "type to edit | tab/shift+tab/up/down: fields | pgup/pgdown: scroll | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	}
 	if m.wizard.isConfirmationStep() {
-		hint = "pgup/pgdown: scroll | enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
+		hint = "j/k or up/down: scroll | pgup/pgdown | p: jail.conf | enter: create | left: back | s/l: tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.templateMode == wizardTemplateModeSave {
 		hint = "Template save: type name | enter: save | backspace: edit | esc: cancel | ctrl+c: quit"
@@ -2876,7 +2901,7 @@ func (m model) wizardFooterHint() string {
 		hint = "Creating template dataset... please wait | ctrl+c: quit"
 	}
 	if m.wizardApplying {
-		hint = "Applying changes... please wait | c: cancel | ctrl+c: quit"
+		hint = "creating jail... j/k or pgup/pgdown: scroll | c: cancel | ctrl+c: quit"
 	}
 	return hint
 }
@@ -3450,6 +3475,12 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.summaryLines() {
 			lines = append(lines, truncate(line, width))
 		}
+		if m.wizardApplying {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Status"))
+			lines = append(lines, truncate("Creation in progress. Linux bootstrap and package installation can take a while.", width))
+			lines = append(lines, truncate("Scroll for the generated jail.conf preview and any execution output.", width))
+		}
 		if shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Network prerequisites"))
@@ -3459,8 +3490,15 @@ func (m model) wizardLines(width int) []string {
 		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("jail.conf preview"))
-		for _, line := range m.wizard.jailConfPreviewLines() {
-			appendWrappedLiteralLine(&lines, line, width)
+		if m.wizard.showJailConfPreview {
+			lines = append(lines, truncate("Press p to hide the generated jail.conf preview.", width))
+			lines = append(lines, "")
+			for _, line := range m.wizard.jailConfPreviewLines() {
+				appendWrappedLiteralLine(&lines, line, width)
+			}
+		} else {
+			lines = append(lines, truncate("Generated jail.conf is available for preview.", width))
+			lines = append(lines, truncate("Press p to show it.", width))
 		}
 		if m.wizardApplying {
 			if m.downloading && m.downloadTotal > 0 {

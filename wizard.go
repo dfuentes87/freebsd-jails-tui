@@ -158,6 +158,7 @@ type jailCreationWizard struct {
 	thinDatasetOpts      []templateDatasetOption
 	thinDatasetCursor    int
 	datasetCreateRunning bool
+	showJailConfPreview  bool
 	validationField      string
 	validationError      string
 	message              string
@@ -239,6 +240,7 @@ func (w *jailCreationWizard) nextStep() error {
 	if w.step < len(w.steps())-1 {
 		w.step++
 		w.field = 0
+		w.showJailConfPreview = false
 		w.clearValidationError()
 		w.message = ""
 		w.executionLogs = nil
@@ -253,6 +255,7 @@ func (w *jailCreationWizard) prevStep() {
 	if w.step > 0 {
 		w.step--
 		w.field = 0
+		w.showJailConfPreview = false
 		w.clearValidationError()
 		w.message = ""
 		w.executionLogs = nil
