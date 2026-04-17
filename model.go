@@ -4573,7 +4573,7 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
-		fmt.Sprintf("debootstrap scripts present: %s", yesNoText(readiness.Debootstrap.ScriptsPresent)),
+		fmt.Sprintf("debootstrap scripts: %s", presentMissingText(readiness.Debootstrap.ScriptsPresent)),
 		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
 		fmt.Sprintf("Bootstrap release: %s", valueOrDash(readiness.BootstrapRelease)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
@@ -5561,6 +5561,13 @@ func yesNoText(value bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func presentMissingText(value bool) string {
+	if value {
+		return "present"
+	}
+	return "missing"
 }
 
 func visibleRctlRules(jailName string, rules []string, config *JailRctlConfig) []string {

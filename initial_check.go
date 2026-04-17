@@ -1094,7 +1094,7 @@ func (m model) initialCheckLines(width int) []string {
 	}
 	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"Host debootstrap installed", yesNoText(m.initCheck.status.Debootstrap.Installed)},
-		[2]string{"debootstrap scripts present", yesNoText(m.initCheck.status.Debootstrap.ScriptsPresent)},
+		[2]string{"debootstrap scripts", presentMissingText(m.initCheck.status.Debootstrap.ScriptsPresent)},
 		[2]string{"Linux release validation", earlyValidation},
 	)...)
 	if strings.TrimSpace(m.initCheck.status.Debootstrap.PackageVersion) != "" {
