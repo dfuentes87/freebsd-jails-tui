@@ -1051,7 +1051,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor -= m.listHeight()
 	case "r":
 		return m, pollCmd()
-	case "c", "n":
+	case "c":
 		m.mode = screenCreateWizard
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.wizardScroll = 0

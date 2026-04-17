@@ -1052,7 +1052,8 @@ func (m model) initialCheckLines(width int) []string {
 		[2]string{"Overall", initialReadinessOverallText(m.initCheck.status)},
 		[2]string{"Required baseline", initialReadinessRequiredText(m.initCheck.status)},
 		[2]string{"Optional but recommended", initialReadinessOptionalText(m.initCheck.status)},
-		[2]string{"Feature-specific", initialReadinessFeatureText(m.initCheck.status)},
+		[2]string{"Resource limits", initialReadinessRctlText(m.initCheck.status)},
+		[2]string{"ZFS workflows", initialReadinessZFSWorkflowsText(m.initCheck.status)},
 	)...)
 	for _, item := range initialReadinessActionItems(m.initCheck.status) {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  - "+item, width)))
@@ -1114,7 +1115,7 @@ func (m model) initialCheckLines(width int) []string {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.Debootstrap.CheckError, width)))
 	}
 
-	appendSection(&lines, width, "Feature-specific")
+	appendSection(&lines, width, "Resource limits (rctl)")
 	racctState := "disabled"
 	if m.initCheck.status.RacctStatus.Enabled {
 		racctState = "enabled"
@@ -1127,6 +1128,10 @@ func (m model) initialCheckLines(width int) []string {
 	if strings.TrimSpace(m.initCheck.status.RacctStatus.ReadError) != "" {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.RacctStatus.ReadError, width)))
 	}
+	appendSection(&lines, width, "ZFS workflows")
+	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
+		[2]string{"jail datasets", initialDatasetSummary(m.initCheck.status)},
+	)...)
 	if m.initCheck.status.HasJailDataset {
 		for _, dataset := range m.initCheck.status.JailDatasets {
 			lines = append(lines, truncate("  - "+dataset, width))
@@ -1272,7 +1277,7 @@ func initialReadinessOverallText(status initialConfigStatus) string {
 	if !initialReadinessRequiredOK(status) {
 		return "needs attention"
 	}
-	if !initialReadinessOptionalOK(status) || !initialReadinessFeatureOK(status) {
+	if !initialReadinessOptionalOK(status) || !initialReadinessRctlOK(status) || !initialReadinessZFSWorkflowsOK(status) {
 		return "ready with optional setup remaining"
 	}
 	return "ready"
@@ -1292,8 +1297,8 @@ func initialReadinessOptionalText(status initialConfigStatus) string {
 	return "needs attention"
 }
 
-func initialReadinessFeatureText(status initialConfigStatus) string {
-	if initialReadinessFeatureOK(status) {
+func initialReadinessRctlText(status initialConfigStatus) string {
+	if initialReadinessRctlOK(status) {
 		return "ready"
 	}
 	return "partial"
@@ -1310,8 +1315,19 @@ func initialReadinessOptionalOK(status initialConfigStatus) bool {
 	return status.Debootstrap.Installed && status.Debootstrap.ScriptsPresent
 }
 
-func initialReadinessFeatureOK(status initialConfigStatus) bool {
-	return !status.NeedsRacctEnable && status.HasJailDataset
+func initialReadinessRctlOK(status initialConfigStatus) bool {
+	return !status.NeedsRacctEnable
+}
+
+func initialReadinessZFSWorkflowsText(status initialConfigStatus) string {
+	if initialReadinessZFSWorkflowsOK(status) {
+		return "ready"
+	}
+	return "partial"
+}
+
+func initialReadinessZFSWorkflowsOK(status initialConfigStatus) bool {
+	return status.HasJailDataset
 }
 
 func initialReadinessActionItems(status initialConfigStatus) []string {
