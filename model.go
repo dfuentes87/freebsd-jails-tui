@@ -4481,14 +4481,15 @@ func (m model) detailLines(width int) []string {
 			lines = append(lines, wizardErrorStyle.Render(truncate("racct check: "+m.detail.RacctStatus.ReadError, width)))
 		}
 	}
+	displayRules := visibleRctlRules(m.detail.Name, m.detail.RctlRules, m.detail.RctlConfig)
 	if len(m.detail.RctlRules) == 0 {
 		if m.detail.RctlConfig != nil && m.detail.RctlConfig.Mode == "runtime" {
 			lines = append(lines, truncate("No live rctl rules. Runtime-only limits apply only while the jail is running.", width))
 		} else {
 			lines = append(lines, truncate("No matching rctl rules.", width))
 		}
-	} else {
-		for idx, rule := range m.detail.RctlRules {
+	} else if len(displayRules) > 0 {
+		for idx, rule := range displayRules {
 			lines = append(lines, renderKeyValueLines(width, [2]string{fmt.Sprintf("Active rule %d", idx+1), rule})...)
 		}
 	}
@@ -4572,7 +4573,6 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
-		fmt.Sprintf("Host debootstrap installed: %s", yesNoText(readiness.Debootstrap.Installed)),
 		fmt.Sprintf("debootstrap scripts present: %s", yesNoText(readiness.Debootstrap.ScriptsPresent)),
 		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
 		fmt.Sprintf("Bootstrap release: %s", valueOrDash(readiness.BootstrapRelease)),
@@ -5561,6 +5561,86 @@ func yesNoText(value bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func visibleRctlRules(jailName string, rules []string, config *JailRctlConfig) []string {
+	if len(rules) == 0 {
+		return nil
+	}
+	if config == nil {
+		return append([]string(nil), rules...)
+	}
+	visible := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		if !rctlRuleMatchesConfiguredLimit(jailName, rule, config) {
+			visible = append(visible, rule)
+		}
+	}
+	return visible
+}
+
+func rctlRuleMatchesConfiguredLimit(jailName, rule string, config *JailRctlConfig) bool {
+	parts := strings.SplitN(strings.TrimSpace(rule), ":", 4)
+	if len(parts) != 4 || parts[0] != "jail" || parts[1] != strings.TrimSpace(jailName) {
+		return false
+	}
+	decision, value, ok := strings.Cut(parts[3], "=")
+	if !ok || strings.TrimSpace(decision) != "deny" {
+		return false
+	}
+	switch strings.TrimSpace(parts[2]) {
+	case "pcpu":
+		return strings.TrimSpace(config.CPUPercent) != "" && strings.TrimSpace(value) == strings.TrimSpace(config.CPUPercent)
+	case "maxproc":
+		return strings.TrimSpace(config.ProcessLimit) != "" && strings.TrimSpace(value) == strings.TrimSpace(config.ProcessLimit)
+	case "memoryuse":
+		if strings.TrimSpace(config.MemoryLimit) == "" {
+			return false
+		}
+		return rctlMemoryValuesEqual(value, config.MemoryLimit)
+	default:
+		return false
+	}
+}
+
+func rctlMemoryValuesEqual(a, b string) bool {
+	left, leftOK := normalizedRctlMemoryValue(a)
+	right, rightOK := normalizedRctlMemoryValue(b)
+	if leftOK && rightOK {
+		return left == right
+	}
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+func normalizedRctlMemoryValue(value string) (string, bool) {
+	trimmed := strings.ToUpper(strings.TrimSpace(value))
+	if trimmed == "" {
+		return "", false
+	}
+	if numeric, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return strconv.FormatInt(numeric, 10), true
+	}
+	multipliers := map[byte]int64{
+		'K': 1 << 10,
+		'M': 1 << 20,
+		'G': 1 << 30,
+		'T': 1 << 40,
+		'P': 1 << 50,
+	}
+	suffix := trimmed[len(trimmed)-1]
+	multiplier, ok := multipliers[suffix]
+	if !ok {
+		return "", false
+	}
+	base := strings.TrimSpace(trimmed[:len(trimmed)-1])
+	if base == "" {
+		return "", false
+	}
+	numeric, err := strconv.ParseInt(base, 10, 64)
+	if err != nil {
+		return "", false
+	}
+	return strconv.FormatInt(numeric*multiplier, 10), true
 }
 
 func min(a, b int) int {

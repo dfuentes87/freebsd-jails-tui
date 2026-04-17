@@ -706,7 +706,7 @@ func installHostDebootstrapCmd() tea.Cmd {
 		}
 		return initialActionMsg{
 			logs:    logs,
-			message: "Host debootstrap installed. Early Linux release validation is now available.",
+			message: "Host debootstrap installed. Linux release validation is now available.",
 			refresh: true,
 		}
 	}
@@ -1010,7 +1010,7 @@ func (m model) renderInitialCheckView() string {
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	footerRenderer := footerStyle
-	message := m.initCheck.message
+	message := ""
 	if m.initCheck.err != nil {
 		message = "error: " + m.initCheck.err.Error()
 		footerRenderer = wizardErrorStyle.Copy().Padding(0, 1)
@@ -1031,18 +1031,28 @@ func (m model) renderInitialCheckView() string {
 
 func (m model) initialCheckLines(width int) []string {
 	lines := make([]string, 0, 64)
+	labelWidth := 30
+	if width < 80 {
+		labelWidth = 26
+	}
 
 	if m.initCheck.loading {
 		lines = append(lines, truncate("Running initial checks...", width))
 		return lines
 	}
-	appendRenderedSection(&lines, "rc.conf checks", renderKeyValueLines(width,
+	if strings.TrimSpace(m.initCheck.message) != "" && m.initCheck.err == nil {
+		appendSection(&lines, width, "Last action")
+		for _, line := range wrapText(strings.TrimSpace(m.initCheck.message), max(12, width-2)) {
+			lines = append(lines, summaryStyle.Render(line))
+		}
+	}
+	appendRenderedSection(&lines, "rc.conf checks", renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"jail_enable", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable))},
 	))
 	for _, line := range rcSettingDriftLines(m.initCheck.status.JailEnableStatus) {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  "+line, width)))
 	}
-	lines = append(lines, renderKeyValueLines(width,
+	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"jail_parallel_start", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.ParallelStartValue), checkStatusText(!m.initCheck.status.NeedsParallelStart))},
 	)...)
 	for _, line := range rcSettingDriftLines(m.initCheck.status.ParallelStatus) {
@@ -1056,7 +1066,7 @@ func (m model) initialCheckLines(width int) []string {
 	if strings.TrimSpace(m.initCheck.status.JailConfStatus.ReadError) != "" {
 		includeState = "error"
 	}
-	lines = append(lines, renderKeyValueLines(width,
+	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"jail.conf path", valueOrDash(m.initCheck.status.JailConfStatus.ConfigPath)},
 		[2]string{"jail.conf.d include", includeState},
 	)...)
@@ -1069,7 +1079,7 @@ func (m model) initialCheckLines(width int) []string {
 	if m.initCheck.status.RacctStatus.Enabled {
 		racctState = "enabled"
 	}
-	lines = append(lines, renderKeyValueLines(width,
+	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"kern.racct.enable runtime", racctState},
 		[2]string{"loader.conf configured", yesNoText(m.initCheck.status.RacctStatus.LoaderConfigured)},
 	)...)
@@ -1082,13 +1092,13 @@ func (m model) initialCheckLines(width int) []string {
 	if m.initCheck.status.Debootstrap.Installed && m.initCheck.status.Debootstrap.ScriptsPresent {
 		earlyValidation = "available"
 	}
-	lines = append(lines, renderKeyValueLines(width,
+	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"Host debootstrap installed", yesNoText(m.initCheck.status.Debootstrap.Installed)},
 		[2]string{"debootstrap scripts present", yesNoText(m.initCheck.status.Debootstrap.ScriptsPresent)},
-		[2]string{"Early Linux release validation", earlyValidation},
+		[2]string{"Linux release validation", earlyValidation},
 	)...)
 	if strings.TrimSpace(m.initCheck.status.Debootstrap.PackageVersion) != "" {
-		lines = append(lines, renderKeyValueLines(width, [2]string{"Package version", m.initCheck.status.Debootstrap.PackageVersion})...)
+		lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth, [2]string{"Package version", m.initCheck.status.Debootstrap.PackageVersion})...)
 	}
 	if strings.TrimSpace(m.initCheck.status.Debootstrap.CheckError) != "" {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.Debootstrap.CheckError, width)))
@@ -1143,7 +1153,7 @@ func (m model) initialCheckLines(width int) []string {
 		lines = append(lines, truncate("y: enable racct | n: skip", width))
 	case initialPhaseDebootstrapConfirm:
 		lines = append(lines, truncate("Host debootstrap is optional, but it makes Linux jail bootstrap safer.", width))
-		lines = append(lines, truncate("Installing it allows early validation of supported Linux bootstrap releases before jail creation starts.", width))
+		lines = append(lines, truncate("Installing it allows Linux release validation before jail creation starts.", width))
 		lines = append(lines, truncate("y: install debootstrap | n: skip", width))
 	case initialPhaseDirsPrompt:
 		if len(m.initCheck.status.MissingDocJailSubdirs) > 0 {
@@ -1172,14 +1182,6 @@ func (m model) initialCheckLines(width int) []string {
 	case initialPhaseComplete:
 		lines = append(lines, truncate("Initial check complete.", width))
 		lines = append(lines, truncate("Press enter to continue to dashboard.", width))
-	}
-
-	if len(m.initCheck.logs) > 0 {
-		appendSection(&lines, width, "Last action logs")
-		maxLogs := min(6, len(m.initCheck.logs))
-		for _, line := range m.initCheck.logs[len(m.initCheck.logs)-maxLogs:] {
-			lines = append(lines, truncate(line, width))
-		}
 	}
 
 	return lines
