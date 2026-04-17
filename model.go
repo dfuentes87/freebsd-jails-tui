@@ -4463,10 +4463,10 @@ func (m model) detailLines(width int) []string {
 	if m.detail.RctlConfig != nil {
 		lines = append(lines, renderKeyValueLines(width,
 			[2]string{"Limit mode", valueOrDash(m.detail.RctlConfig.Mode)},
-			[2]string{"Configured CPU %", valueOrDash(m.detail.RctlConfig.CPUPercent)},
-			[2]string{"Configured memory", valueOrDash(m.detail.RctlConfig.MemoryLimit)},
-			[2]string{"Configured max processes", valueOrDash(m.detail.RctlConfig.ProcessLimit)},
-			[2]string{"Persistent block in /etc/rctl.conf", yesNoText(m.detail.RctlConfig.Persistent)},
+			[2]string{"Max CPU %", valueOrDash(m.detail.RctlConfig.CPUPercent)},
+			[2]string{"Max memory", valueOrDash(m.detail.RctlConfig.MemoryLimit)},
+			[2]string{"Max processes", valueOrDash(m.detail.RctlConfig.ProcessLimit)},
+			[2]string{"rctl.conf block", yesNoText(m.detail.RctlConfig.Persistent)},
 		)...)
 		if m.detail.RctlConfig.PersistentErr != "" {
 			lines = append(lines, wizardErrorStyle.Render(truncate("rctl.conf check: "+m.detail.RctlConfig.PersistentErr, width)))
@@ -4488,13 +4488,17 @@ func (m model) detailLines(width int) []string {
 			lines = append(lines, truncate("No matching rctl rules.", width))
 		}
 	} else {
-		for _, rule := range m.detail.RctlRules {
-			lines = append(lines, truncate(rule, width))
+		for idx, rule := range m.detail.RctlRules {
+			lines = append(lines, renderKeyValueLines(width, [2]string{fmt.Sprintf("Active rule %d", idx+1), rule})...)
 		}
 	}
 
 	if m.detail.LinuxReadiness != nil {
 		appendSectionWithStyle(&lines, width, detailSectionStyle, "Linux readiness")
+		linuxLabelWidth := 24
+		if width < 72 {
+			linuxLabelWidth = 20
+		}
 		for _, line := range m.linuxReadinessLines() {
 			if looksLikeWarningText(line) {
 				lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
@@ -4503,7 +4507,7 @@ func (m model) detailLines(width int) []string {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 				continue
 			}
-			lines = append(lines, truncate(line, width))
+			lines = append(lines, renderInformationalKeyValueWithLabelWidth(width, linuxLabelWidth, line)...)
 		}
 	}
 
@@ -4564,7 +4568,7 @@ func (m model) linuxReadinessLines() []string {
 	}
 	readiness := m.detail.LinuxReadiness
 	lines := []string{
-		fmt.Sprintf("Host linux_enable: %s", valueOrDash(readiness.Host.EnableValue)),
+		fmt.Sprintf("Host linux_enable: %s", normalizedBoolishValue(readiness.Host.EnableValue)),
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
@@ -5451,6 +5455,19 @@ func valueOrDash(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func normalizedBoolishValue(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "":
+		return "-"
+	case "YES", "TRUE", "ON", "1":
+		return "yes"
+	case "NO", "FALSE", "OFF", "0":
+		return "no"
+	default:
+		return strings.TrimSpace(value)
+	}
 }
 
 func sortedKeys(values map[string]string) []string {
