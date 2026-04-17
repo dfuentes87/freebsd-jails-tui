@@ -1046,7 +1046,19 @@ func (m model) initialCheckLines(width int) []string {
 			lines = append(lines, summaryStyle.Render(line))
 		}
 	}
-	appendRenderedSection(&lines, "rc.conf checks", renderKeyValueLinesWithLabelWidth(width, labelWidth,
+
+	appendSection(&lines, width, "Host readiness summary")
+	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
+		[2]string{"Overall", initialReadinessOverallText(m.initCheck.status)},
+		[2]string{"Required baseline", initialReadinessRequiredText(m.initCheck.status)},
+		[2]string{"Optional but recommended", initialReadinessOptionalText(m.initCheck.status)},
+		[2]string{"Feature-specific", initialReadinessFeatureText(m.initCheck.status)},
+	)...)
+	for _, item := range initialReadinessActionItems(m.initCheck.status) {
+		lines = append(lines, wizardWarningStyle.Render(truncate("  - "+item, width)))
+	}
+
+	appendRenderedSection(&lines, "Required baseline", renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"jail_enable", fmt.Sprintf("%s (%s)", displayRCValue(m.initCheck.status.JailEnableValue), checkStatusText(!m.initCheck.status.NeedsJailEnable))},
 	))
 	for _, line := range rcSettingDriftLines(m.initCheck.status.JailEnableStatus) {
@@ -1058,7 +1070,6 @@ func (m model) initialCheckLines(width int) []string {
 	for _, line := range rcSettingDriftLines(m.initCheck.status.ParallelStatus) {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  "+line, width)))
 	}
-	appendSection(&lines, width, "jail.conf checks")
 	includeState := "missing"
 	if m.initCheck.status.JailConfStatus.IncludePresent {
 		includeState = "present"
@@ -1069,25 +1080,24 @@ func (m model) initialCheckLines(width int) []string {
 	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
 		[2]string{"jail.conf path", valueOrDash(m.initCheck.status.JailConfStatus.ConfigPath)},
 		[2]string{"jail.conf.d include", includeState},
+		[2]string{"jail root path", initialJailPathSummary(m.initCheck.status)},
 	)...)
 	if strings.TrimSpace(m.initCheck.status.JailConfStatus.ReadError) != "" {
 		lines = append(lines, wizardErrorStyle.Render(truncate("  "+m.initCheck.status.JailConfStatus.ReadError, width)))
 	}
-
-	appendSection(&lines, width, "Resource limits (rctl)")
-	racctState := "disabled"
-	if m.initCheck.status.RacctStatus.Enabled {
-		racctState = "enabled"
+	if len(m.initCheck.status.MissingDocJailSubdirs) > 0 {
+		lines = append(lines, wizardWarningStyle.Render(truncate("  Missing standard subdirectories under /usr/local/jails:", width)))
+		for _, path := range m.initCheck.status.MissingDocJailSubdirs {
+			lines = append(lines, wizardWarningStyle.Render(truncate("    - "+path, width)))
+		}
 	}
-	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
-		[2]string{"kern.racct.enable runtime", racctState},
-		[2]string{"loader.conf configured", yesNoText(m.initCheck.status.RacctStatus.LoaderConfigured)},
-	)...)
-	if strings.TrimSpace(m.initCheck.status.RacctStatus.ReadError) != "" {
-		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.RacctStatus.ReadError, width)))
+	if m.initCheck.status.HasJailPath {
+		for _, path := range m.initCheck.status.ExistingJailPaths {
+			lines = append(lines, truncate("  - "+path, width))
+		}
 	}
 
-	appendSection(&lines, width, "Linux bootstrap tooling")
+	appendSection(&lines, width, "Optional but recommended")
 	earlyValidation := "unavailable"
 	if m.initCheck.status.Debootstrap.Installed && m.initCheck.status.Debootstrap.ScriptsPresent {
 		earlyValidation = "available"
@@ -1104,24 +1114,23 @@ func (m model) initialCheckLines(width int) []string {
 		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.Debootstrap.CheckError, width)))
 	}
 
-	appendSection(&lines, width, "Jail path checks")
-	if m.initCheck.status.HasJailPath {
-		lines = append(lines, truncate("Found jail paths:", width))
-		for _, path := range m.initCheck.status.ExistingJailPaths {
-			lines = append(lines, truncate("  - "+path, width))
-		}
-	} else {
-		lines = append(lines, truncate("No jail path found at /jail, /usr/jail, or /usr/local/jails.", width))
+	appendSection(&lines, width, "Feature-specific")
+	racctState := "disabled"
+	if m.initCheck.status.RacctStatus.Enabled {
+		racctState = "enabled"
 	}
-
-	appendSection(&lines, width, "ZFS dataset checks")
+	lines = append(lines, renderKeyValueLinesWithLabelWidth(width, labelWidth,
+		[2]string{"kern.racct.enable runtime", racctState},
+		[2]string{"loader.conf configured", yesNoText(m.initCheck.status.RacctStatus.LoaderConfigured)},
+		[2]string{"jail datasets", initialDatasetSummary(m.initCheck.status)},
+	)...)
+	if strings.TrimSpace(m.initCheck.status.RacctStatus.ReadError) != "" {
+		lines = append(lines, wizardWarningStyle.Render(truncate("  "+m.initCheck.status.RacctStatus.ReadError, width)))
+	}
 	if m.initCheck.status.HasJailDataset {
-		lines = append(lines, truncate("Datasets containing \"jail\":", width))
 		for _, dataset := range m.initCheck.status.JailDatasets {
 			lines = append(lines, truncate("  - "+dataset, width))
 		}
-	} else {
-		lines = append(lines, truncate("No ZFS dataset containing \"jail\" was found.", width))
 	}
 
 	if len(m.initCheck.status.Errors) > 0 {
@@ -1257,6 +1266,95 @@ func checkStatusText(ok bool) string {
 		return "OK"
 	}
 	return "MISSING"
+}
+
+func initialReadinessOverallText(status initialConfigStatus) string {
+	if !initialReadinessRequiredOK(status) {
+		return "needs attention"
+	}
+	if !initialReadinessOptionalOK(status) || !initialReadinessFeatureOK(status) {
+		return "ready with optional setup remaining"
+	}
+	return "ready"
+}
+
+func initialReadinessRequiredText(status initialConfigStatus) string {
+	if initialReadinessRequiredOK(status) {
+		return "ready"
+	}
+	return "needs attention"
+}
+
+func initialReadinessOptionalText(status initialConfigStatus) string {
+	if initialReadinessOptionalOK(status) {
+		return "ready"
+	}
+	return "needs attention"
+}
+
+func initialReadinessFeatureText(status initialConfigStatus) string {
+	if initialReadinessFeatureOK(status) {
+		return "ready"
+	}
+	return "partial"
+}
+
+func initialReadinessRequiredOK(status initialConfigStatus) bool {
+	return !status.needsRCFix() &&
+		!status.needsJailConfIncludeFix() &&
+		status.HasJailPath &&
+		len(status.MissingDocJailSubdirs) == 0
+}
+
+func initialReadinessOptionalOK(status initialConfigStatus) bool {
+	return status.Debootstrap.Installed && status.Debootstrap.ScriptsPresent
+}
+
+func initialReadinessFeatureOK(status initialConfigStatus) bool {
+	return !status.NeedsRacctEnable && status.HasJailDataset
+}
+
+func initialReadinessActionItems(status initialConfigStatus) []string {
+	items := make([]string, 0, 8)
+	if status.NeedsJailEnable {
+		items = append(items, "Enable jail_enable in rc.conf.")
+	}
+	if status.NeedsParallelStart {
+		items = append(items, "Enable jail_parallel_start in rc.conf.")
+	}
+	if status.needsJailConfIncludeFix() {
+		items = append(items, "Add the /etc/jail.conf.d include to /etc/jail.conf.")
+	}
+	if !status.HasJailPath || len(status.MissingDocJailSubdirs) > 0 {
+		items = append(items, "Create a handbook-style jail root under /usr/local/jails.")
+	}
+	if !status.Debootstrap.Installed || !status.Debootstrap.ScriptsPresent {
+		items = append(items, "Install host debootstrap for safer Linux jail creation and earlier Linux release validation.")
+	}
+	if status.NeedsRacctEnable {
+		items = append(items, "Enable kern.racct.enable if you want persistent rctl limits.")
+	}
+	if !status.HasJailDataset {
+		items = append(items, "Create ZFS jail datasets if you want thin jails, snapshots, and template workflows.")
+	}
+	return items
+}
+
+func initialJailPathSummary(status initialConfigStatus) string {
+	if !status.HasJailPath {
+		return "missing"
+	}
+	if len(status.MissingDocJailSubdirs) > 0 {
+		return "partial"
+	}
+	return "ready"
+}
+
+func initialDatasetSummary(status initialConfigStatus) string {
+	if status.HasJailDataset {
+		return "available"
+	}
+	return "not configured"
 }
 
 func rcSettingDriftLines(status RCSettingStatus) []string {
