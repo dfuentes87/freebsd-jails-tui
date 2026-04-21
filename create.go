@@ -1076,10 +1076,19 @@ func copyLinuxArchiveIntoCompat(ctx context.Context, sourcePath, targetPath stri
 	if sourcePath == "" || targetPath == "" {
 		return fmt.Errorf("source and target paths are required for archive install")
 	}
-	if _, err := runLoggedCommand(ctx, logs, "cp", "-aX", filepath.ToSlash(filepath.Join(sourcePath, ".")), filepath.ToSlash(targetPath)); err != nil {
+	args := linuxArchiveCopyArgs(sourcePath, targetPath)
+	if _, err := runLoggedCommand(ctx, logs, "cp", args...); err != nil {
 		return fmt.Errorf("failed to install extracted archive into %s: %w", targetPath, err)
 	}
 	return nil
+}
+
+func linuxArchiveCopyArgs(sourcePath, targetPath string) []string {
+	return []string{
+		"-a",
+		filepath.ToSlash(strings.TrimSpace(sourcePath)) + "/.",
+		filepath.ToSlash(strings.TrimSpace(targetPath)),
+	}
 }
 
 func linuxCompatReservedTopLevelNames() []string {

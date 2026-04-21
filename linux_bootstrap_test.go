@@ -376,6 +376,23 @@ func TestMountedDescendantsFromLinesIgnoresParentAndUnrelatedMounts(t *testing.T
 	}
 }
 
+func TestLinuxArchiveCopyArgsUseFreeBSDCompatibleCopyOfContents(t *testing.T) {
+	got := linuxArchiveCopyArgs("/usr/local/jails/containers/alpine/compat/alpine.bootstrap-stage", "/usr/local/jails/containers/alpine/compat/alpine")
+	want := []string{
+		"-a",
+		"/usr/local/jails/containers/alpine/compat/alpine.bootstrap-stage/.",
+		"/usr/local/jails/containers/alpine/compat/alpine",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestWizardShowsLinuxPrereqs(t *testing.T) {
 	step := wizardStep{
 		Fields: []wizardField{
