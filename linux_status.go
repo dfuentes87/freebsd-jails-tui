@@ -64,6 +64,7 @@ type LinuxReadiness struct {
 	MirrorResolveError   string
 	ReleaseSupport       string
 	ReleaseSupportDetail string
+	CompatMountedPaths   []string
 	UserlandPresent      bool
 	RuntimeChecked       bool
 	IPv4Route            bool
@@ -213,6 +214,12 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 	if strings.TrimSpace(detail.Path) != "" {
 		readiness.CompatRoot = linuxCompatRoot(detail.Path, values)
 		readiness.UserlandPresent = linuxUserlandPresent(detail.Path, values)
+		mountedPaths, mountErr := linuxMountedDescendants(readiness.CompatRoot)
+		if mountErr == nil {
+			readiness.CompatMountedPaths = mountedPaths
+		} else if readiness.MirrorResolveError == "" {
+			readiness.MirrorResolveError = "failed to inspect compat mounts: " + mountErr.Error()
+		}
 	}
 
 	if strings.TrimSpace(detail.Name) == "" || detail.JID <= 0 {

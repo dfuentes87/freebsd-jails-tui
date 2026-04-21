@@ -254,6 +254,12 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 			detail string
 		}{"Prepare Linux host support", "Ensuring Linux ABI and required host support are available."})
 	}
+	if normalizedJailType(values.JailType) == "linux" && effectiveLinuxBootstrapMethod(values) == "archive" {
+		phases = append(phases, struct {
+			title  string
+			detail string
+		}{"Bootstrap Linux userland", "Running host-side archive bootstrap before the jail starts."})
+	}
 	phases = append(phases,
 		struct {
 			title  string
@@ -264,7 +270,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 			detail string
 		}{"Start jail", "Starting the jail and waiting for it to come up."},
 	)
-	if normalizedJailType(values.JailType) == "linux" {
+	if normalizedJailType(values.JailType) == "linux" && effectiveLinuxBootstrapMethod(values) != "archive" {
 		phases = append(phases, struct {
 			title  string
 			detail string
@@ -318,6 +324,14 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		}
 		addCleanup(linuxCleanup)
 	}
+	if normalizedJailType(values.JailType) == "linux" && effectiveLinuxBootstrapMethod(values) == "archive" {
+		nextPhase()
+		bootstrapWarnings, err := maybeBootstrapLinuxUserland(ctx, values, result.Name, jailPath, &logs)
+		if err != nil {
+			return fail(err)
+		}
+		warnings = append(warnings, bootstrapWarnings...)
+	}
 
 	mountSpecs := parseMountPointSpecs(values.MountPoints)
 	fstabPath, err := configureMountPoints(ctx, result.Name, jailPath, mountSpecs, &logs)
@@ -361,7 +375,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 			logs = append(logs, fmt.Sprintf("rollback warning: failed to stop jail %q: %v", result.Name, err))
 		}
 	})
-	if normalizedJailType(values.JailType) == "linux" {
+	if normalizedJailType(values.JailType) == "linux" && effectiveLinuxBootstrapMethod(values) != "archive" {
 		nextPhase()
 		bootstrapWarnings, err := maybeBootstrapLinuxUserland(ctx, values, result.Name, jailPath, &logs)
 		if err != nil {
@@ -767,16 +781,24 @@ func bootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailNa
 		return err
 	}
 
-	if jailExecutableExists(jailName, filepath.ToSlash(filepath.Join(target, "bin", "sh"))) {
-		*logs = append(*logs, "Linux userland already present under "+target+"; skipping bootstrap.")
-		return nil
-	}
 	switch effectiveLinuxBootstrapMethod(values) {
 	case "archive":
+		if strings.TrimSpace(jailPath) == "" {
+			return fmt.Errorf("jail path is required for archive bootstrap")
+		}
+		targetHostPath := linuxCompatRoot(jailPath, values)
+		if fileExists(filepath.Join(targetHostPath, "bin", "sh")) {
+			*logs = append(*logs, "Linux userland already present under "+target+"; skipping bootstrap.")
+			return nil
+		}
 		if err := bootstrapLinuxArchiveUserland(ctx, values, jailName, jailPath, sourceInfo, logs); err != nil {
 			return fmt.Errorf("failed to bootstrap %s from %s inside linux jail: %w", distro, sourceInfo.URL, err)
 		}
 	case "debootstrap":
+		if jailExecutableExists(jailName, filepath.ToSlash(filepath.Join(target, "bin", "sh"))) {
+			*logs = append(*logs, "Linux userland already present under "+target+"; skipping bootstrap.")
+			return nil
+		}
 		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "bootstrap", "-f"); err != nil {
 			return fmt.Errorf("failed to bootstrap pkg inside linux jail: %w", err)
 		}
@@ -797,9 +819,15 @@ func bootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailNa
 
 func maybeBootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailName, jailPath string, logs *[]string) ([]string, error) {
 	if effectiveLinuxBootstrapMode(values) == "skip" {
+		if effectiveLinuxBootstrapMethod(values) == "archive" {
+			return []string{"Linux bootstrap skipped by wizard setting. Use detail view action 'b' while the jail is stopped."}, nil
+		}
 		return []string{"Linux bootstrap skipped by wizard setting. Use detail view action 'b' after networking is ready."}, nil
 	}
 	if err := preflightLinuxBootstrap(ctx, values, jailName, logs); err != nil {
+		if effectiveLinuxBootstrapMethod(values) == "archive" {
+			return []string{err.Error() + " Use detail view action 'b' while the jail is stopped after fixing archive access."}, nil
+		}
 		return []string{err.Error() + " Use detail view action 'b' to retry after fixing networking."}, nil
 	}
 	if err := bootstrapLinuxUserland(ctx, values, jailName, jailPath, logs); err != nil {
@@ -817,6 +845,8 @@ func linuxBootstrapRetryGuidance(err error) string {
 		return " Use detail view action 'b' to retry after fixing package access."
 	case strings.Contains(lower, "failed to fetch archive bootstrap") || strings.Contains(lower, "failed to extract archive bootstrap"):
 		return " Use detail view action 'b' to retry after fixing networking or archive access."
+	case strings.Contains(lower, "requires the jail to be stopped"):
+		return " Stop the jail and use detail view action 'b' again."
 	default:
 		return " Use detail view action 'b' to retry after fixing networking or bootstrap access."
 	}
@@ -838,6 +868,10 @@ func preflightLinuxBootstrap(ctx context.Context, values jailWizardValues, jailN
 	sourceInfo, err := resolveLinuxBootstrapSource(values)
 	if err != nil {
 		return err
+	}
+	if effectiveLinuxBootstrapMethod(values) == "archive" {
+		*logs = append(*logs, "Linux bootstrap preflight: archive bootstrap uses host-side source access; jail route, DNS, and fetch checks are skipped.")
+		return nil
 	}
 	if sourceInfo.IsLocal {
 		*logs = append(*logs, "Linux bootstrap preflight: local archive source selected; skipping route, DNS, and fetch checks.")
@@ -880,6 +914,11 @@ func bootstrapLinuxArchiveUserland(ctx context.Context, values jailWizardValues,
 		return fmt.Errorf("jail path is required for archive bootstrap")
 	}
 	targetHostPath := linuxCompatRoot(jailPath, values)
+	if mountedPaths, err := linuxMountedDescendants(targetHostPath); err != nil {
+		return fmt.Errorf("failed to inspect active mounts under %s: %w", targetHostPath, err)
+	} else if len(mountedPaths) > 0 {
+		return fmt.Errorf("archive bootstrap requires the jail to be stopped before modifying %s; active mounts: %s", targetHostPath, strings.Join(mountedPaths, ", "))
+	}
 	stagePath := targetHostPath + ".bootstrap-stage"
 	if err := removePathAllLogged(stagePath, logs); err != nil {
 		return err
@@ -933,11 +972,13 @@ func prepareLinuxArchiveSource(ctx context.Context, sourceInfo linuxBootstrapSou
 	if sourceInfo.IsLocal {
 		return sourceInfo.LocalPath, nil, nil
 	}
-	downloadPath := filepath.ToSlash(filepath.Join("/tmp", linuxArchiveDownloadName(values)))
-	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "fetch", "-o", downloadPath, sourceInfo.URL); err != nil {
+	hostPath := filepath.Join(jailPath, "tmp", linuxArchiveDownloadName(values))
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+		return "", nil, fmt.Errorf("failed to create archive download directory %q: %w", filepath.Dir(hostPath), err)
+	}
+	if _, err := runLoggedCommand(ctx, logs, "fetch", "-o", hostPath, sourceInfo.URL); err != nil {
 		return "", nil, fmt.Errorf("failed to fetch archive bootstrap from %s: %w", sourceInfo.URL, err)
 	}
-	hostPath := filepath.Join(jailPath, "tmp", linuxArchiveDownloadName(values))
 	cleanup := func() {
 		_ = removePathAllLogged(hostPath, logs)
 	}
@@ -1044,6 +1085,44 @@ func linuxCompatReservedTopLevelNameSet() map[string]struct{} {
 		values[name] = struct{}{}
 	}
 	return values
+}
+
+func linuxMountedDescendants(rootPath string) ([]string, error) {
+	rootPath = filepath.Clean(strings.TrimSpace(rootPath))
+	if rootPath == "" {
+		return nil, fmt.Errorf("root path is required")
+	}
+	out, err := exec.Command("mount", "-p").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("mount -p failed: %w", err)
+	}
+	return mountedDescendantsFromLines(strings.Split(strings.TrimSpace(string(out)), "\n"), rootPath), nil
+}
+
+func mountedDescendantsFromLines(lines []string, rootPath string) []string {
+	rootPath = filepath.Clean(strings.TrimSpace(rootPath))
+	if rootPath == "" {
+		return nil
+	}
+	prefix := rootPath + string(filepath.Separator)
+	var mounts []string
+	seen := map[string]struct{}{}
+	for _, line := range lines {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		mountpoint := filepath.Clean(fields[1])
+		if mountpoint == rootPath || strings.HasPrefix(mountpoint, prefix) {
+			if _, ok := seen[mountpoint]; ok {
+				continue
+			}
+			seen[mountpoint] = struct{}{}
+			mounts = append(mounts, mountpoint)
+		}
+	}
+	sort.Strings(mounts)
+	return mounts
 }
 
 func removePathAllLogged(path string, logs *[]string) error {

@@ -1356,26 +1356,28 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		addStep(fmt.Sprintf("Linux compatibility mounts are configured under %s", linuxCompatRoot(destination, w.values)))
 		if effectiveLinuxBootstrapMode(w.values) == "skip" {
 			addStep("Skip Linux bootstrap for now.")
-			addDetail("   # use detail view action 'b' later after networking is ready")
+			if effectiveLinuxBootstrapMethod(w.values) == "archive" {
+				addDetail("   # use detail view action 'b' later while the jail is stopped")
+			} else {
+				addDetail("   # use detail view action 'b' later after networking is ready")
+			}
 		} else {
-			if linuxBootstrapSourceIsLocal(w.values) {
-				addStep("Archive bootstrap uses a local source file; networking preflight is skipped.")
+			addStep("Bootstrap Linux userland inside the jail:")
+			if effectiveLinuxBootstrapMethod(w.values) == "archive" {
+				addDetail("   # archive bootstrap runs host-side before the jail starts")
+				if linuxBootstrapSourceIsLocal(w.values) {
+					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s -C %s.bootstrap-stage", linuxBootstrapSourceURL(w.values), linuxCompatRoot(destination, w.values)))
+				} else {
+					addDetail(fmt.Sprintf("   fetch -o %s/tmp/%s %s", destination, linuxArchiveDownloadName(w.values), linuxBootstrapSourceURL(w.values)))
+					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s/tmp/%s -C %s.bootstrap-stage", destination, linuxArchiveDownloadName(w.values), linuxCompatRoot(destination, w.values)))
+				}
+				addDetail(fmt.Sprintf("   # validate extracted layout, install under %s, and recreate mount paths", linuxCompatRoot(destination, w.values)))
 			} else {
 				addStep("Preflight Linux bootstrap networking inside the jail:")
 				addDetail("   jexec <jail> route -n get -inet default || route -n get -inet6 default")
 				addDetail(fmt.Sprintf("   jexec <jail> getent hosts %s  # confirm A/AAAA answers for usable route families", linuxBootstrapSourceHost(w.values)))
 				addDetail(fmt.Sprintf("   jexec <jail> fetch -4/-6 -qo /dev/null %s", linuxBootstrapPreflightURL(w.values)))
-			}
-			addStep("Bootstrap Linux userland inside the jail:")
-			if effectiveLinuxBootstrapMethod(w.values) == "archive" {
-				if linuxBootstrapSourceIsLocal(w.values) {
-					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s -C %s.bootstrap-stage", linuxBootstrapSourceURL(w.values), linuxCompatRoot(destination, w.values)))
-				} else {
-					addDetail(fmt.Sprintf("   jexec <jail> fetch -o /tmp/%s %s", linuxArchiveDownloadName(w.values), linuxBootstrapSourceURL(w.values)))
-					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s/tmp/%s -C %s.bootstrap-stage", destination, linuxArchiveDownloadName(w.values), linuxCompatRoot(destination, w.values)))
-				}
-				addDetail(fmt.Sprintf("   # validate extracted layout, install under %s, and recreate mount paths", linuxCompatRoot(destination, w.values)))
-			} else {
+				addStep("Run debootstrap inside the jail:")
 				addDetail("   jexec <jail> pkg bootstrap -f")
 				addDetail("   jexec <jail> pkg install -y debootstrap")
 				addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxBootstrapSourceURL(w.values)))

@@ -1300,10 +1300,23 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailErr = fmt.Errorf("linux bootstrap retry is only available for linux jails")
 			return m, nil
 		}
+		values := linuxBootstrapConfigFromRawLines(m.detail.JailConfRaw)
 		jail, ok := m.detailJail()
-		if !ok || jail.JID <= 0 {
-			m.detailErr = fmt.Errorf("linux bootstrap retry requires the jail to be running")
-			return m, nil
+		switch effectiveLinuxBootstrapMethod(values) {
+		case "archive":
+			if !ok || strings.TrimSpace(m.detail.Path) == "" {
+				m.detailErr = fmt.Errorf("archive bootstrap retry requires a known jail path")
+				return m, nil
+			}
+			if jail.JID > 0 {
+				m.detailErr = fmt.Errorf("archive bootstrap retry requires the jail to be stopped")
+				return m, nil
+			}
+		default:
+			if !ok || jail.JID <= 0 {
+				m.detailErr = fmt.Errorf("linux bootstrap retry requires the jail to be running")
+				return m, nil
+			}
 		}
 		m.detailErr = nil
 		m.detailNotice = "Retrying Linux bootstrap..."
@@ -2568,7 +2581,7 @@ func helpTabs() []helpTabContent {
 						{Keys: "r", Action: "refresh selected jail details"},
 						{Keys: "R", Action: "restart this jail"},
 						{Keys: "u", Action: "open the guided upgrade wizard for this jail"},
-						{Keys: "b", Action: "retry linux bootstrap for a running linux jail"},
+						{Keys: "b", Action: "retry linux bootstrap (running for debootstrap, stopped for archive)"},
 						{Keys: "z", Action: "open the ZFS integration panel"},
 						{Keys: "x", Action: "open destroy confirmation for this jail"},
 						{Keys: "esc", Action: "return to the dashboard"},
@@ -2607,7 +2620,7 @@ func helpTabs() []helpTabContent {
 					},
 					Notes: []string{
 						"Startup order updates rc.conf jail_list; dependency settings write depend in jail.conf.",
-						"Linux setup supports default or custom bootstrap mirrors, and retry reuses the saved mirror choice.",
+						"Linux setup supports debootstrap mirrors or archive sources, and retry reuses the saved bootstrap settings.",
 						"VNET preflight checks bridge and uplink state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create.",
 					},
 				},
@@ -4265,7 +4278,7 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(prereqs.MirrorHost)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
-		"Auto bootstrap requires a running jail plus source access inside the jail or on the host.",
+		"Auto bootstrap requires source access using the selected method.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
 	}
 	if linuxBootstrapUsesLocalSource(prereqs.BootstrapMethod, prereqs.MirrorHost, prereqs.PreflightURL) {
@@ -4324,7 +4337,7 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Bootstrap preset: %s", valueOrDash(prereqs.BootstrapPreset)),
 		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
-		"Auto bootstrap requires source access inside the running jail or on the host.",
+		"Auto bootstrap requires source access using the selected method.",
 		"Skip mode creates the jail first; use b in jail detail to retry bootstrap later.",
 	}
 	if linuxBootstrapUsesLocalSource(prereqs.BootstrapMethod, prereqs.MirrorHost, prereqs.PreflightURL) {
@@ -4633,6 +4646,9 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(readiness.MirrorHost)),
 		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
+	}
+	if len(readiness.CompatMountedPaths) > 0 {
+		lines = append(lines, "Warning: active compat mounts: "+strings.Join(readiness.CompatMountedPaths, ", "))
 	}
 	if linuxBootstrapUsesLocalSource(readiness.BootstrapMethod, readiness.MirrorHost, readiness.PreflightURL) {
 		lines = append(lines, "Local archive source: runtime route, DNS, and fetch checks are skipped.")
@@ -5353,9 +5369,14 @@ func summarizeCreationWarning(message string) string {
 	lower := strings.ToLower(trimmed)
 	switch {
 	case strings.HasPrefix(lower, "linux bootstrap skipped"):
+		if strings.Contains(lower, "while the jail is stopped") {
+			return "linux archive bootstrap skipped; stop the jail and use detail view action 'b' when ready"
+		}
 		return "linux bootstrap skipped; use detail view action 'b' after networking is ready"
 	case strings.Contains(lower, "linux bootstrap preflight failed"):
 		return "linux bootstrap preflight failed; use detail view action 'b' after fixing networking"
+	case strings.Contains(lower, "requires the jail to be stopped"):
+		return "linux archive bootstrap requires a stopped jail; stop the jail and retry with detail view action 'b'"
 	case strings.Contains(lower, "does not support release"):
 		if release := firstQuotedValue(trimmed); release != "" {
 			return fmt.Sprintf("linux bootstrap failed; debootstrap does not support release %q on this host", release)

@@ -303,6 +303,47 @@ func TestDetectLinuxArchiveRootRejectsUnsupportedLayout(t *testing.T) {
 	}
 }
 
+func TestMountedDescendantsFromLines(t *testing.T) {
+	root := "/usr/local/jails/containers/rocky/compat/rockylinux"
+	lines := []string{
+		"devfs " + root + "/dev devfs rw 0 0",
+		"tmpfs " + root + "/dev/shm tmpfs rw 0 0",
+		"/tmp " + root + "/tmp nullfs rw 0 0",
+		"/home " + root + "/home nullfs rw 0 0",
+		"zroot/home /home zfs rw 0 0",
+	}
+
+	got := mountedDescendantsFromLines(lines, root)
+	want := []string{
+		root + "/dev",
+		root + "/dev/shm",
+		root + "/home",
+		root + "/tmp",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestMountedDescendantsFromLinesIgnoresParentAndUnrelatedMounts(t *testing.T) {
+	root := "/usr/local/jails/containers/rocky/compat/rockylinux"
+	lines := []string{
+		"zroot/jails /usr/local/jails zfs rw 0 0",
+		"zroot/home /home zfs rw 0 0",
+		"zroot/other /usr/local/jails/containers/other zfs rw 0 0",
+	}
+
+	got := mountedDescendantsFromLines(lines, root)
+	if len(got) != 0 {
+		t.Fatalf("mountedDescendantsFromLines() = %v, want empty", got)
+	}
+}
+
 func visibleFieldIDs(fields []wizardField) []string {
 	ids := make([]string, 0, len(fields))
 	for _, field := range fields {

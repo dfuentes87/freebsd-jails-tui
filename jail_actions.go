@@ -90,12 +90,21 @@ func ExecuteLinuxBootstrapAction(detail JailDetail) linuxBootstrapResult {
 	if !detailLooksLikeLinuxJail(detail) {
 		return fail(fmt.Errorf("linux bootstrap retry is only available for linux jails"))
 	}
-	if detail.JID <= 0 {
-		return fail(fmt.Errorf("linux bootstrap retry requires the jail to be running"))
-	}
-
 	values := linuxBootstrapConfigFromRawLines(detail.JailConfRaw)
 	values.LinuxBootstrap = "auto"
+	switch effectiveLinuxBootstrapMethod(values) {
+	case "archive":
+		if detail.JID > 0 {
+			return fail(fmt.Errorf("archive bootstrap retry requires the jail to be stopped"))
+		}
+		if strings.TrimSpace(detail.Path) == "" {
+			return fail(fmt.Errorf("archive bootstrap retry requires a known jail path"))
+		}
+	default:
+		if detail.JID <= 0 {
+			return fail(fmt.Errorf("linux bootstrap retry requires the jail to be running"))
+		}
+	}
 	if err := preflightLinuxBootstrap(context.Background(), values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
