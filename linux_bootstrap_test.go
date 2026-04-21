@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestEffectiveLinuxBootstrapMethodDefaultsToDebootstrap(t *testing.T) {
 	if got := effectiveLinuxBootstrapMethod(jailWizardValues{}); got != "debootstrap" {
@@ -38,6 +42,35 @@ func TestResolveLinuxArchiveSourceRejectsUnsupportedExtension(t *testing.T) {
 	_, err := resolveLinuxArchiveSource("https://example.invalid/rootfs.zip")
 	if err == nil {
 		t.Fatal("resolveLinuxArchiveSource() error = nil, want non-nil")
+	}
+}
+
+func TestResolveLinuxBootstrapSourceLocalArchive(t *testing.T) {
+	tempDir := t.TempDir()
+	archivePath := filepath.Join(tempDir, "rocky rootfs.tar.xz")
+	if err := os.WriteFile(archivePath, []byte("test"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	values := jailWizardValues{
+		JailType:             "linux",
+		LinuxDistro:          "rockylinux",
+		LinuxBootstrapMethod: "archive",
+		LinuxArchiveURL:      archivePath,
+	}
+
+	info, err := resolveLinuxBootstrapSource(values)
+	if err != nil {
+		t.Fatalf("resolveLinuxBootstrapSource() error = %v", err)
+	}
+	if !info.IsLocal {
+		t.Fatal("info.IsLocal = false, want true")
+	}
+	if info.LocalPath != archivePath {
+		t.Fatalf("info.LocalPath = %q, want %q", info.LocalPath, archivePath)
+	}
+	if info.PreflightURL != "" {
+		t.Fatalf("info.PreflightURL = %q, want empty for local archive", info.PreflightURL)
 	}
 }
 
@@ -90,6 +123,30 @@ func TestLinuxBootstrapConfigRoundTripArchiveMetadata(t *testing.T) {
 	}
 }
 
+func TestLinuxBootstrapConfigRoundTripLocalArchiveMetadata(t *testing.T) {
+	values := jailWizardValues{
+		JailType:             "linux",
+		Name:                 "rocky01",
+		Hostname:             "rocky01.local",
+		Interface:            "em0",
+		LinuxPreset:          "rocky",
+		LinuxDistro:          "rockylinux",
+		LinuxBootstrapMethod: "archive",
+		LinuxBootstrap:       "auto",
+		LinuxArchiveURL:      "/usr/local/jails/media/rocky rootfs.tar.xz",
+	}
+
+	lines := buildJailConfBlock(values, "/usr/local/jails/containers/rocky01", "")
+	parsed := linuxBootstrapConfigFromRawLines(lines)
+
+	if parsed.LinuxPreset != values.LinuxPreset {
+		t.Fatalf("parsed.LinuxPreset = %q, want %q", parsed.LinuxPreset, values.LinuxPreset)
+	}
+	if parsed.LinuxArchiveURL != values.LinuxArchiveURL {
+		t.Fatalf("parsed.LinuxArchiveURL = %q, want %q", parsed.LinuxArchiveURL, values.LinuxArchiveURL)
+	}
+}
+
 func TestLinuxBootstrapConfigBackwardCompatibleWithoutMethod(t *testing.T) {
 	lines := []string{
 		`testlinux {`,
@@ -111,6 +168,9 @@ func TestLinuxBootstrapVisibleFieldsArchive(t *testing.T) {
 	w.step = 1
 
 	ids := visibleFieldIDs(w.visibleFields())
+	if !containsString(ids, "linux_preset") {
+		t.Fatalf("visible fields %v do not include linux_preset", ids)
+	}
 	if !containsString(ids, "linux_archive_url") {
 		t.Fatalf("visible fields %v do not include linux_archive_url", ids)
 	}
@@ -162,6 +222,72 @@ func TestSummarizeCreationWarningArchive(t *testing.T) {
 	want := "linux bootstrap failed; use detail view action 'b' after fixing networking or archive access"
 	if got != want {
 		t.Fatalf("summarizeCreationWarning() = %q, want %q", got, want)
+	}
+}
+
+func TestApplyLinuxBootstrapPresetAlpineFillsArchiveSource(t *testing.T) {
+	w := newJailCreationWizard("/usr/local/jails/containers")
+	w.values.JailType = "linux"
+	w.values.LinuxPreset = "alpine"
+
+	w.applyLinuxBootstrapPreset()
+
+	if w.values.LinuxDistro != "alpine" {
+		t.Fatalf("w.values.LinuxDistro = %q, want %q", w.values.LinuxDistro, "alpine")
+	}
+	if effectiveLinuxBootstrapMethod(w.values) != "archive" {
+		t.Fatalf("effectiveLinuxBootstrapMethod() = %q, want %q", effectiveLinuxBootstrapMethod(w.values), "archive")
+	}
+	if w.values.LinuxArchiveURL != linuxBootstrapPresetAlpineArchive {
+		t.Fatalf("w.values.LinuxArchiveURL = %q, want %q", w.values.LinuxArchiveURL, linuxBootstrapPresetAlpineArchive)
+	}
+}
+
+func TestApplyLinuxBootstrapPresetPreservesManualArchiveSource(t *testing.T) {
+	w := newJailCreationWizard("/usr/local/jails/containers")
+	w.values.JailType = "linux"
+	w.values.LinuxPreset = "rocky"
+	w.values.LinuxArchiveURL = "/srv/mirror/rocky-custom.tar.xz"
+
+	w.applyLinuxBootstrapPreset()
+
+	if w.values.LinuxDistro != "rockylinux" {
+		t.Fatalf("w.values.LinuxDistro = %q, want %q", w.values.LinuxDistro, "rockylinux")
+	}
+	if w.values.LinuxArchiveURL != "/srv/mirror/rocky-custom.tar.xz" {
+		t.Fatalf("w.values.LinuxArchiveURL = %q, want manual value preserved", w.values.LinuxArchiveURL)
+	}
+}
+
+func TestDetectLinuxArchiveRootSingleTopLevelDirectory(t *testing.T) {
+	stageDir := t.TempDir()
+	rootDir := filepath.Join(stageDir, "rootfs")
+	binDir := filepath.Join(rootDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	root, _, err := detectLinuxArchiveRoot(stageDir)
+	if err != nil {
+		t.Fatalf("detectLinuxArchiveRoot() error = %v", err)
+	}
+	if root != rootDir {
+		t.Fatalf("detectLinuxArchiveRoot() = %q, want %q", root, rootDir)
+	}
+}
+
+func TestDetectLinuxArchiveRootRejectsUnsupportedLayout(t *testing.T) {
+	stageDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stageDir, "README"), []byte("no rootfs here"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	_, _, err := detectLinuxArchiveRoot(stageDir)
+	if err == nil {
+		t.Fatal("detectLinuxArchiveRoot() error = nil, want non-nil")
 	}
 }
 

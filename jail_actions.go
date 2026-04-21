@@ -99,7 +99,7 @@ func ExecuteLinuxBootstrapAction(detail JailDetail) linuxBootstrapResult {
 	if err := preflightLinuxBootstrap(context.Background(), values, result.Name, &logs); err != nil {
 		return fail(err)
 	}
-	if err := bootstrapLinuxUserland(context.Background(), values, result.Name, &logs); err != nil {
+	if err := bootstrapLinuxUserland(context.Background(), values, result.Name, detail.Path, &logs); err != nil {
 		return fail(err)
 	}
 

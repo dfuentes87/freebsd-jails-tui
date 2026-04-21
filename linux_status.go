@@ -38,6 +38,7 @@ type LinuxWizardPrereqs struct {
 	Host              LinuxHostStatus
 	Debootstrap       HostDebootstrapStatus
 	Capabilities      LinuxHostCapabilityStatus
+	BootstrapPreset   string
 	BootstrapMethod   string
 	MirrorURL         string
 	MirrorHost        string
@@ -51,6 +52,7 @@ type LinuxReadiness struct {
 	Host                 LinuxHostStatus
 	Debootstrap          HostDebootstrapStatus
 	Capabilities         LinuxHostCapabilityStatus
+	BootstrapPreset      string
 	BootstrapFamily      string
 	BootstrapMethod      string
 	BootstrapRelease     string
@@ -173,6 +175,7 @@ func collectLinuxWizardPrereqs(values jailWizardValues) LinuxWizardPrereqs {
 		Host:              collectLinuxHostStatus(),
 		Debootstrap:       collectHostDebootstrapStatus(),
 		Capabilities:      collectLinuxHostCapabilityStatus(),
+		BootstrapPreset:   effectiveLinuxBootstrapPreset(values),
 		BootstrapMethod:   effectiveLinuxBootstrapMethod(values),
 		MirrorURL:         source.URL,
 		MirrorHost:        source.Host,
@@ -193,6 +196,7 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 		Host:             collectLinuxHostStatus(),
 		Debootstrap:      collectHostDebootstrapStatus(),
 		Capabilities:     collectLinuxHostCapabilityStatus(),
+		BootstrapPreset:  effectiveLinuxBootstrapPreset(values),
 		BootstrapFamily:  effectiveLinuxDistro(values),
 		BootstrapMethod:  effectiveLinuxBootstrapMethod(values),
 		BootstrapRelease: effectiveLinuxRelease(values),
@@ -212,6 +216,12 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 	}
 
 	if strings.TrimSpace(detail.Name) == "" || detail.JID <= 0 {
+		return readiness
+	}
+
+	if source.IsLocal {
+		readiness.RuntimeChecked = true
+		populateLinuxHealth(readiness, detail, values)
 		return readiness
 	}
 

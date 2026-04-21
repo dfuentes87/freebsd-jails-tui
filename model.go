@@ -4028,6 +4028,19 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"Each target path is cleaned before validation. After resolving . and .. segments, it still has to point somewhere under the jail root; paths that escape to locations like / or /etc are rejected.",
 			},
 		}
+	case "linux_preset":
+		return wizardFieldGuide{
+			Purpose: "Optional distro preset that pre-fills the Linux bootstrap family, method, and example archive source.",
+			Format:  "custom, alpine, or rocky.",
+			Examples: []string{
+				"custom",
+				"alpine",
+				"rocky",
+			},
+			Notes: []string{
+				"Preset values still allow manual archive source overrides.",
+			},
+		}
 	case "linux_distro":
 		return wizardFieldGuide{
 			Purpose: "Bootstrap family used for the compat root name under /compat.",
@@ -4093,11 +4106,12 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 		}
 	case "linux_archive_url":
 		return wizardFieldGuide{
-			Purpose: "Remote rootfs archive URL used for archive bootstrap, readiness checks, and retry.",
-			Format:  "http or https URL pointing to .tar, .tar.gz, .tgz, or .tar.xz.",
+			Purpose: "Rootfs archive source used for archive bootstrap, readiness checks, and retry.",
+			Format:  "http/https URL, file URL, or absolute local path pointing to .tar, .tar.gz, .tgz, or .tar.xz.",
 			Examples: []string{
 				"https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
 				"https://images.linuxcontainers.org/images/rockylinux/9/amd64/default/20260421_03%3A17/rootfs.tar.xz",
+				"/usr/local/jails/media/alpine-minirootfs-3.23.0-x86_64.tar.gz",
 			},
 			Notes: []string{
 				"Only used when bootstrap method is archive.",
@@ -4119,7 +4133,7 @@ func wizardFieldUsesNetworkContext(id string) bool {
 
 func wizardFieldUsesLinuxContext(id string) bool {
 	switch id {
-	case "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
+	case "linux_preset", "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
 		return true
 	default:
 		return false
@@ -4168,7 +4182,7 @@ func racctWizardPrereqLines(prereqs RacctWizardPrereqs) []string {
 func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
-		case "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
+		case "linux_preset", "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
 			return true
 		}
 	}
@@ -4249,11 +4263,15 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Linux service present: %s", yesNoText(prereqs.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
 		fmt.Sprintf("Bootstrap method: %s", valueOrDash(prereqs.BootstrapMethod)),
+		fmt.Sprintf("Bootstrap preset: %s", valueOrDash(prereqs.BootstrapPreset)),
 		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(prereqs.MirrorHost)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
-		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
+		"Auto bootstrap requires a running jail plus source access inside the jail or on the host.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
+	}
+	if linuxBootstrapUsesLocalSource(prereqs.BootstrapMethod, prereqs.MirrorHost, prereqs.PreflightURL) {
+		lines = append(lines, "Local archive sources skip route, DNS, and fetch preflight checks.")
 	}
 	if prereqs.BootstrapMethod == "debootstrap" {
 		lines = append(lines,
@@ -4305,10 +4323,14 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
 		fmt.Sprintf("Bootstrap method: %s", valueOrDash(prereqs.BootstrapMethod)),
+		fmt.Sprintf("Bootstrap preset: %s", valueOrDash(prereqs.BootstrapPreset)),
 		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
-		"Auto bootstrap requires route, DNS, and fetch access inside the running jail.",
+		"Auto bootstrap requires source access inside the running jail or on the host.",
 		"Skip mode creates the jail first; use b in jail detail to retry bootstrap later.",
+	}
+	if linuxBootstrapUsesLocalSource(prereqs.BootstrapMethod, prereqs.MirrorHost, prereqs.PreflightURL) {
+		lines = append(lines, "Local archive sources skip route, DNS, and fetch preflight checks.")
 	}
 	if prereqs.BootstrapMethod == "debootstrap" {
 		lines = append(lines, fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)))
@@ -4604,6 +4626,7 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
+		fmt.Sprintf("Bootstrap preset: %s", valueOrDash(readiness.BootstrapPreset)),
 		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
 		fmt.Sprintf("Bootstrap method: %s", valueOrDash(readiness.BootstrapMethod)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
@@ -4612,6 +4635,9 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(readiness.MirrorHost)),
 		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
+	}
+	if linuxBootstrapUsesLocalSource(readiness.BootstrapMethod, readiness.MirrorHost, readiness.PreflightURL) {
+		lines = append(lines, "Local archive source: runtime route, DNS, and fetch checks are skipped.")
 	}
 	if readiness.BootstrapMethod == "debootstrap" {
 		lines = append(lines,
