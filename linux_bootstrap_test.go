@@ -225,7 +225,7 @@ func TestSummarizeCreationWarningArchive(t *testing.T) {
 	}
 }
 
-func TestApplyLinuxBootstrapPresetAlpineFillsArchiveSource(t *testing.T) {
+func TestApplyLinuxBootstrapPresetAlpineLeavesArchiveSourceBlank(t *testing.T) {
 	w := newJailCreationWizard("/usr/local/jails/containers")
 	w.values.JailType = "linux"
 	w.values.LinuxPreset = "alpine"
@@ -238,8 +238,8 @@ func TestApplyLinuxBootstrapPresetAlpineFillsArchiveSource(t *testing.T) {
 	if effectiveLinuxBootstrapMethod(w.values) != "archive" {
 		t.Fatalf("effectiveLinuxBootstrapMethod() = %q, want %q", effectiveLinuxBootstrapMethod(w.values), "archive")
 	}
-	if w.values.LinuxArchiveURL != linuxBootstrapPresetAlpineArchive {
-		t.Fatalf("w.values.LinuxArchiveURL = %q, want %q", w.values.LinuxArchiveURL, linuxBootstrapPresetAlpineArchive)
+	if w.values.LinuxArchiveURL != "" {
+		t.Fatalf("w.values.LinuxArchiveURL = %q, want empty archive source", w.values.LinuxArchiveURL)
 	}
 }
 
@@ -256,6 +256,18 @@ func TestApplyLinuxBootstrapPresetPreservesManualArchiveSource(t *testing.T) {
 	}
 	if w.values.LinuxArchiveURL != "/srv/mirror/rocky-custom.tar.xz" {
 		t.Fatalf("w.values.LinuxArchiveURL = %q, want manual value preserved", w.values.LinuxArchiveURL)
+	}
+}
+
+func TestArchiveSourceFieldGuideHasSingleAlpineURLExample(t *testing.T) {
+	m := model{}
+	guide := m.wizardFieldGuide(wizardField{ID: "linux_archive_url"})
+	if len(guide.Examples) != 1 {
+		t.Fatalf("len(guide.Examples) = %d, want 1", len(guide.Examples))
+	}
+	want := "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz"
+	if guide.Examples[0] != want {
+		t.Fatalf("guide.Examples[0] = %q, want %q", guide.Examples[0], want)
 	}
 }
 

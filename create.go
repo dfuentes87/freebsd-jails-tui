@@ -959,7 +959,7 @@ func extractLinuxArchiveToStage(ctx context.Context, archivePath, stagePath stri
 	if err := os.MkdirAll(stagePath, 0o755); err != nil {
 		return fmt.Errorf("failed to create archive staging path %q: %w", stagePath, err)
 	}
-	if _, err := runLoggedCommand(ctx, logs, "tar", "-xf", archivePath, "-C", stagePath); err != nil {
+	if _, err := runLoggedCommand(ctx, logs, "tar", "--no-xattrs", "-xf", archivePath, "-C", stagePath); err != nil {
 		return fmt.Errorf("failed to extract archive bootstrap from %s: %w", archivePath, err)
 	}
 	return nil

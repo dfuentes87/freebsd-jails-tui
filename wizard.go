@@ -196,11 +196,6 @@ func newJailCreationWizard(defaultDestination string) jailCreationWizard {
 	return w
 }
 
-const (
-	linuxBootstrapPresetAlpineArchive = "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz"
-	linuxBootstrapPresetRockyArchive  = "https://images.linuxcontainers.org/images/rockylinux/9/amd64/default/20260421_03%3A17/rootfs.tar.xz"
-)
-
 func (w jailCreationWizard) steps() []wizardStep {
 	if normalizedJailType(w.values.JailType) == "linux" {
 		return wizardBaseSteps
@@ -1374,10 +1369,10 @@ func (w jailCreationWizard) commandPlanLines() []string {
 			addStep("Bootstrap Linux userland inside the jail:")
 			if effectiveLinuxBootstrapMethod(w.values) == "archive" {
 				if linuxBootstrapSourceIsLocal(w.values) {
-					addDetail(fmt.Sprintf("   tar -xf %s -C %s.bootstrap-stage", linuxBootstrapSourceURL(w.values), linuxCompatRoot(destination, w.values)))
+					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s -C %s.bootstrap-stage", linuxBootstrapSourceURL(w.values), linuxCompatRoot(destination, w.values)))
 				} else {
 					addDetail(fmt.Sprintf("   jexec <jail> fetch -o /tmp/%s %s", linuxArchiveDownloadName(w.values), linuxBootstrapSourceURL(w.values)))
-					addDetail(fmt.Sprintf("   tar -xf %s/tmp/%s -C %s.bootstrap-stage", destination, linuxArchiveDownloadName(w.values), linuxCompatRoot(destination, w.values)))
+					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s/tmp/%s -C %s.bootstrap-stage", destination, linuxArchiveDownloadName(w.values), linuxCompatRoot(destination, w.values)))
 				}
 				addDetail(fmt.Sprintf("   # validate extracted layout, install under %s, and recreate mount paths", linuxCompatRoot(destination, w.values)))
 			} else {
@@ -2202,28 +2197,9 @@ func (w *jailCreationWizard) applyLinuxBootstrapPreset() {
 	case "alpine":
 		w.values.LinuxDistro = "alpine"
 		w.values.LinuxBootstrapMethod = "archive"
-		if shouldApplyLinuxArchivePreset(w.values.LinuxArchiveURL) {
-			w.values.LinuxArchiveURL = linuxBootstrapPresetAlpineArchive
-		}
 	case "rocky":
 		w.values.LinuxDistro = "rockylinux"
 		w.values.LinuxBootstrapMethod = "archive"
-		if shouldApplyLinuxArchivePreset(w.values.LinuxArchiveURL) {
-			w.values.LinuxArchiveURL = linuxBootstrapPresetRockyArchive
-		}
-	}
-}
-
-func shouldApplyLinuxArchivePreset(current string) bool {
-	current = strings.TrimSpace(current)
-	if current == "" {
-		return true
-	}
-	switch current {
-	case linuxBootstrapPresetAlpineArchive, linuxBootstrapPresetRockyArchive:
-		return true
-	default:
-		return false
 	}
 }
 

@@ -4030,7 +4030,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 		}
 	case "linux_preset":
 		return wizardFieldGuide{
-			Purpose: "Optional distro preset that pre-fills the Linux bootstrap family, method, and example archive source.",
+			Purpose: "Optional distro preset that pre-fills the Linux bootstrap family and method.",
 			Format:  "custom, alpine, or rocky.",
 			Examples: []string{
 				"custom",
@@ -4110,8 +4110,6 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 			Format:  "http/https URL, file URL, or absolute local path pointing to .tar, .tar.gz, .tgz, or .tar.xz.",
 			Examples: []string{
 				"https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
-				"https://images.linuxcontainers.org/images/rockylinux/9/amd64/default/20260421_03%3A17/rootfs.tar.xz",
-				"/usr/local/jails/media/alpine-minirootfs-3.23.0-x86_64.tar.gz",
 			},
 			Notes: []string{
 				"Only used when bootstrap method is archive.",
