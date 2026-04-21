@@ -451,6 +451,15 @@ func TestLinuxReadinessLinesHidePreflightURLAndSplitCompatMounts(t *testing.T) {
 
 	lines := m.linuxReadinessLines()
 	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Bootstrap source: https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.4-x86_64.tar.gz") {
+		t.Fatalf("linuxReadinessLines() missing Bootstrap source label: %q", joined)
+	}
+	if strings.Contains(joined, "Bootstrap source URL:") {
+		t.Fatalf("linuxReadinessLines() unexpectedly includes Bootstrap source URL: %q", joined)
+	}
+	if strings.Contains(joined, "Bootstrap source host:") {
+		t.Fatalf("linuxReadinessLines() unexpectedly includes Bootstrap source host: %q", joined)
+	}
 	if strings.Contains(joined, "Preflight URL:") {
 		t.Fatalf("linuxReadinessLines() unexpectedly includes Preflight URL: %q", joined)
 	}

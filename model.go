@@ -4664,8 +4664,7 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Bootstrap method: %s", valueOrDash(readiness.BootstrapMethod)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
-		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(readiness.MirrorURL)),
-		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(readiness.MirrorHost)),
+		fmt.Sprintf("Bootstrap source: %s", valueOrDash(readiness.MirrorURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
 	}
 	if len(readiness.CompatMountedPaths) > 0 {
