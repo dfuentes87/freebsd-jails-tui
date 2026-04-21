@@ -4030,12 +4030,21 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 		}
 	case "linux_distro":
 		return wizardFieldGuide{
-			Purpose: "Bootstrap family passed to debootstrap and used for the compat root name.",
-			Format:  "Free-form family name. Ubuntu and Debian have built-in default mirrors; other families require a custom mirror.",
+			Purpose: "Bootstrap family used for the compat root name under /compat.",
+			Format:  "Free-form family name.",
 			Examples: []string{
 				"ubuntu",
 				"debian",
-				"devuan",
+				"alpine",
+			},
+		}
+	case "linux_bootstrap_method":
+		return wizardFieldGuide{
+			Purpose: "Choose how Linux userland is populated inside the jail.",
+			Format:  "debootstrap or archive.",
+			Examples: []string{
+				"debootstrap",
+				"archive",
 			},
 		}
 	case "linux_release":
@@ -4047,6 +4056,7 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"trixie",
 			},
 			Notes: []string{
+				"Only used when bootstrap method is debootstrap.",
 				"Bootstrap mode auto only proceeds when the host can verify that debootstrap supports the selected release.",
 			},
 		}
@@ -4055,13 +4065,13 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 			Purpose: "Choose whether Linux userland should be bootstrapped immediately after jail creation.",
 			Format:  "auto or skip.",
 			Examples: []string{
-				"auto to run networking preflight and debootstrap now",
+				"auto to run networking preflight and bootstrap now",
 				"skip to create the jail first and retry later from detail view",
 			},
 		}
 	case "linux_mirror_mode":
 		return wizardFieldGuide{
-			Purpose: "Choose whether bootstrap uses the built-in distro mirror or a custom base URL.",
+			Purpose: "Choose whether debootstrap uses the built-in distro mirror or a custom base URL.",
 			Format:  "default or custom. default only works for bootstrap families ubuntu and debian.",
 			Examples: []string{
 				"default",
@@ -4070,14 +4080,27 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 		}
 	case "linux_mirror_url":
 		return wizardFieldGuide{
-			Purpose: "Base repository URL used for Linux bootstrap, readiness checks, and retry.",
+			Purpose: "Base repository URL used for debootstrap, readiness checks, and retry.",
 			Format:  "http or https base URL with a host.",
 			Examples: []string{
 				"https://archive.ubuntu.com/ubuntu",
 				"https://deb.debian.org/debian",
 			},
 			Notes: []string{
+				"Only used when bootstrap method is debootstrap and mirror mode is custom.",
 				"Enter the repository base URL, not a full Release file URL.",
+			},
+		}
+	case "linux_archive_url":
+		return wizardFieldGuide{
+			Purpose: "Remote rootfs archive URL used for archive bootstrap, readiness checks, and retry.",
+			Format:  "http or https URL pointing to .tar, .tar.gz, .tgz, or .tar.xz.",
+			Examples: []string{
+				"https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
+				"https://images.linuxcontainers.org/images/rockylinux/9/amd64/default/20260421_03%3A17/rootfs.tar.xz",
+			},
+			Notes: []string{
+				"Only used when bootstrap method is archive.",
 			},
 		}
 	default:
@@ -4096,7 +4119,7 @@ func wizardFieldUsesNetworkContext(id string) bool {
 
 func wizardFieldUsesLinuxContext(id string) bool {
 	switch id {
-	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
+	case "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
 		return true
 	default:
 		return false
@@ -4145,7 +4168,7 @@ func racctWizardPrereqLines(prereqs RacctWizardPrereqs) []string {
 func wizardsShowsLinuxPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
-		case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
+		case "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
 			return true
 		}
 	}
@@ -4225,13 +4248,18 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(prereqs.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
-		fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)),
-		fmt.Sprintf("debootstrap scripts present: %s", yesNoText(prereqs.Debootstrap.ScriptsPresent)),
-		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
-		fmt.Sprintf("Bootstrap mirror host: %s", valueOrDash(prereqs.MirrorHost)),
+		fmt.Sprintf("Bootstrap method: %s", valueOrDash(prereqs.BootstrapMethod)),
+		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
+		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(prereqs.MirrorHost)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
 		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
+	}
+	if prereqs.BootstrapMethod == "debootstrap" {
+		lines = append(lines,
+			fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)),
+			fmt.Sprintf("debootstrap scripts present: %s", yesNoText(prereqs.Debootstrap.ScriptsPresent)),
+		)
 	}
 	switch prereqs.ReleaseSupport {
 	case "supported":
@@ -4241,11 +4269,11 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 	case "unknown":
 		lines = append(lines, "Warning: bootstrap release support could not be verified early")
 	}
-	if prereqs.ReleaseSupportMsg != "" {
+	if prereqs.ReleaseSupportMsg != "" && prereqs.ReleaseSupport != "not_applicable" {
 		lines = append(lines, prereqs.ReleaseSupportMsg)
 	}
 	if prereqs.ResolveError != "" {
-		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
+		lines = append(lines, "Bootstrap source resolution: "+prereqs.ResolveError)
 	}
 	if prereqs.Host.EnableReadError != "" {
 		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
@@ -4256,7 +4284,7 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
 		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
 	}
-	if strings.TrimSpace(prereqs.Debootstrap.CheckError) != "" {
+	if prereqs.BootstrapMethod == "debootstrap" && strings.TrimSpace(prereqs.Debootstrap.CheckError) != "" {
 		lines = append(lines, "Host debootstrap check: "+prereqs.Debootstrap.CheckError)
 	}
 	lines = append(lines,
@@ -4276,11 +4304,14 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 	lines := []string{
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
-		fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)),
-		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
+		fmt.Sprintf("Bootstrap method: %s", valueOrDash(prereqs.BootstrapMethod)),
+		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
 		"Auto bootstrap requires route, DNS, and fetch access inside the running jail.",
 		"Skip mode creates the jail first; use b in jail detail to retry bootstrap later.",
+	}
+	if prereqs.BootstrapMethod == "debootstrap" {
+		lines = append(lines, fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)))
 	}
 	switch prereqs.ReleaseSupport {
 	case "supported":
@@ -4290,11 +4321,11 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 	case "unknown":
 		lines = append(lines, "Warning: bootstrap release support could not be verified early")
 	}
-	if prereqs.ReleaseSupportMsg != "" {
+	if prereqs.ReleaseSupportMsg != "" && prereqs.ReleaseSupport != "not_applicable" {
 		lines = append(lines, prereqs.ReleaseSupportMsg)
 	}
 	if prereqs.ResolveError != "" {
-		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
+		lines = append(lines, "Bootstrap source resolution: "+prereqs.ResolveError)
 	}
 	if prereqs.Host.EnableReadError != "" {
 		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
@@ -4573,15 +4604,20 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
-		fmt.Sprintf("debootstrap scripts: %s", presentMissingText(readiness.Debootstrap.ScriptsPresent)),
 		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
-		fmt.Sprintf("Bootstrap release: %s", valueOrDash(readiness.BootstrapRelease)),
+		fmt.Sprintf("Bootstrap method: %s", valueOrDash(readiness.BootstrapMethod)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
-		fmt.Sprintf("Mirror URL: %s", valueOrDash(readiness.MirrorURL)),
-		fmt.Sprintf("Mirror host: %s", valueOrDash(readiness.MirrorHost)),
+		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(readiness.MirrorURL)),
+		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(readiness.MirrorHost)),
 		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
+	}
+	if readiness.BootstrapMethod == "debootstrap" {
+		lines = append(lines,
+			fmt.Sprintf("debootstrap scripts: %s", presentMissingText(readiness.Debootstrap.ScriptsPresent)),
+			fmt.Sprintf("Bootstrap release: %s", valueOrDash(readiness.BootstrapRelease)),
+		)
 	}
 	switch readiness.ReleaseSupport {
 	case "supported":
@@ -4591,16 +4627,16 @@ func (m model) linuxReadinessLines() []string {
 	case "unknown":
 		lines = append(lines, "Warning: bootstrap release support could not be verified early")
 	}
-	if readiness.ReleaseSupportDetail != "" {
+	if readiness.ReleaseSupportDetail != "" && readiness.ReleaseSupport != "not_applicable" {
 		lines = append(lines, readiness.ReleaseSupportDetail)
 	}
 	if readiness.MirrorResolveError != "" {
-		lines = append(lines, "Warning: mirror resolution failed: "+readiness.MirrorResolveError)
+		lines = append(lines, "Warning: bootstrap source resolution failed: "+readiness.MirrorResolveError)
 	}
 	if readiness.Host.EnableReadError != "" {
 		lines = append(lines, "Warning: host ABI check failed: "+readiness.Host.EnableReadError)
 	}
-	if strings.TrimSpace(readiness.Debootstrap.CheckError) != "" {
+	if readiness.BootstrapMethod == "debootstrap" && strings.TrimSpace(readiness.Debootstrap.CheckError) != "" {
 		lines = append(lines, "Warning: host debootstrap check failed: "+readiness.Debootstrap.CheckError)
 	}
 	for _, reason := range readiness.Host.EnableDrift {
@@ -5301,6 +5337,8 @@ func summarizeCreationWarning(message string) string {
 			return fmt.Sprintf("linux bootstrap failed; debootstrap does not support release %q on this host", release)
 		}
 		return "linux bootstrap failed; debootstrap on this host does not support the selected release"
+	case strings.Contains(lower, "failed to fetch archive bootstrap") || strings.Contains(lower, "failed to extract archive bootstrap"):
+		return "linux bootstrap failed; use detail view action 'b' after fixing networking or archive access"
 	case strings.Contains(lower, "failed to bootstrap") || strings.Contains(lower, "failed to install debootstrap"):
 		return "linux bootstrap failed; use detail view action 'b' after fixing package access"
 	default:

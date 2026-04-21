@@ -88,13 +88,15 @@ var wizardBaseSteps = []wizardStep{
 	},
 	{
 		Title:       "Linux Bootstrap",
-		Description: "Choose the bootstrap family, release, and mirror used to populate /compat inside a linux jail.",
+		Description: "Choose the bootstrap family, method, and source used to populate /compat inside a linux jail.",
 		Fields: []wizardField{
-			{ID: "linux_distro", Label: "Bootstrap family", Placeholder: "ubuntu", Help: "Free-form family name; Ubuntu and Debian have built-in default mirrors"},
+			{ID: "linux_distro", Label: "Bootstrap family", Placeholder: "ubuntu", Help: "Free-form family name used for the compat root name"},
+			{ID: "linux_bootstrap_method", Label: "Bootstrap method", Placeholder: "debootstrap", Help: "Options: debootstrap or archive"},
 			{ID: "linux_release", Label: "Bootstrap release", Placeholder: "jammy", Help: "Codename, suite, or release string passed to debootstrap"},
 			{ID: "linux_bootstrap", Label: "Bootstrap mode", Placeholder: "auto", Help: "Options: auto or skip"},
 			{ID: "linux_mirror_mode", Label: "Mirror mode", Placeholder: "default", Help: "Options: default or custom"},
 			{ID: "linux_mirror_url", Label: "Mirror URL", Placeholder: "https://mirror.example.invalid/repo", Help: "Custom Linux package mirror base URL"},
+			{ID: "linux_archive_url", Label: "Archive URL", Placeholder: "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz", Help: "Full URL to a rootfs tar archive"},
 		},
 	},
 	{
@@ -104,32 +106,34 @@ var wizardBaseSteps = []wizardStep{
 }
 
 type jailWizardValues struct {
-	JailType        string
-	Name            string
-	Dataset         string
-	TemplateRelease string
-	Interface       string
-	Bridge          string
-	BridgePolicy    string
-	VNETHostSetup   string
-	Uplink          string
-	IP4             string
-	IP6             string
-	DefaultRouter   string
-	Hostname        string
-	Note            string
-	PatchBase       string
-	StartupOrder    string
-	Dependencies    string
-	LinuxDistro     string
-	LinuxRelease    string
-	LinuxBootstrap  string
-	LinuxMirrorMode string
-	LinuxMirrorURL  string
-	CPUPercent      string
-	MemoryLimit     string
-	ProcessLimit    string
-	MountPoints     string
+	JailType             string
+	Name                 string
+	Dataset              string
+	TemplateRelease      string
+	Interface            string
+	Bridge               string
+	BridgePolicy         string
+	VNETHostSetup        string
+	Uplink               string
+	IP4                  string
+	IP6                  string
+	DefaultRouter        string
+	Hostname             string
+	Note                 string
+	PatchBase            string
+	StartupOrder         string
+	Dependencies         string
+	LinuxDistro          string
+	LinuxBootstrapMethod string
+	LinuxRelease         string
+	LinuxBootstrap       string
+	LinuxMirrorMode      string
+	LinuxMirrorURL       string
+	LinuxArchiveURL      string
+	CPUPercent           string
+	MemoryLimit          string
+	ProcessLimit         string
+	MountPoints          string
 }
 
 type mountPointSpec struct {
@@ -479,10 +483,12 @@ func (w *jailCreationWizard) refreshLinuxPrereqs() {
 	key := strings.Join([]string{
 		normalizedJailType(w.values.JailType),
 		effectiveLinuxDistro(w.values),
+		effectiveLinuxBootstrapMethod(w.values),
 		effectiveLinuxRelease(w.values),
 		effectiveLinuxBootstrapMode(w.values),
 		effectiveLinuxMirrorMode(w.values),
 		strings.TrimSpace(w.values.LinuxMirrorURL),
+		strings.TrimSpace(w.values.LinuxArchiveURL),
 	}, "|")
 	if w.linuxPrereqCached && w.linuxPrereqKey == key {
 		return
@@ -560,19 +566,32 @@ func (w jailCreationWizard) visibleFields() []wizardField {
 			if jailType != "vnet" {
 				continue
 			}
-		case "linux_distro", "linux_release", "linux_mirror_mode":
+		case "linux_distro", "linux_bootstrap_method", "linux_bootstrap":
 			if jailType != "linux" {
 				continue
 			}
-		case "linux_bootstrap":
+		case "linux_release", "linux_mirror_mode":
 			if jailType != "linux" {
+				continue
+			}
+			if effectiveLinuxBootstrapMethod(w.values) != "debootstrap" {
 				continue
 			}
 		case "linux_mirror_url":
 			if jailType != "linux" {
 				continue
 			}
+			if effectiveLinuxBootstrapMethod(w.values) != "debootstrap" {
+				continue
+			}
 			if effectiveLinuxMirrorMode(w.values) != "custom" {
+				continue
+			}
+		case "linux_archive_url":
+			if jailType != "linux" {
+				continue
+			}
+			if effectiveLinuxBootstrapMethod(w.values) != "archive" {
 				continue
 			}
 		}
@@ -619,6 +638,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.Dependencies
 	case "linux_distro":
 		return &w.values.LinuxDistro
+	case "linux_bootstrap_method":
+		return &w.values.LinuxBootstrapMethod
 	case "linux_release":
 		return &w.values.LinuxRelease
 	case "linux_bootstrap":
@@ -627,6 +648,8 @@ func (w *jailCreationWizard) valueRef(id string) *string {
 		return &w.values.LinuxMirrorMode
 	case "linux_mirror_url":
 		return &w.values.LinuxMirrorURL
+	case "linux_archive_url":
+		return &w.values.LinuxArchiveURL
 	case "cpu_percent":
 		return &w.values.CPUPercent
 	case "memory_limit":
@@ -678,6 +701,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.Dependencies
 	case "linux_distro":
 		return w.values.LinuxDistro
+	case "linux_bootstrap_method":
+		return w.values.LinuxBootstrapMethod
 	case "linux_release":
 		return w.values.LinuxRelease
 	case "linux_bootstrap":
@@ -686,6 +711,8 @@ func (w jailCreationWizard) valueByID(id string) string {
 		return w.values.LinuxMirrorMode
 	case "linux_mirror_url":
 		return w.values.LinuxMirrorURL
+	case "linux_archive_url":
+		return w.values.LinuxArchiveURL
 	case "cpu_percent":
 		return w.values.CPUPercent
 	case "memory_limit":
@@ -866,7 +893,7 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 			return blockingPrereqFieldID(w.values), err
 		}
 	}
-	if (w.currentStepHasField("linux_distro") || w.currentStepHasField("linux_release") || w.currentStepHasField("linux_bootstrap") || w.currentStepHasField("linux_mirror_mode") || w.currentStepHasField("linux_mirror_url")) && jailType == "linux" {
+	if (w.currentStepHasField("linux_distro") || w.currentStepHasField("linux_bootstrap_method") || w.currentStepHasField("linux_release") || w.currentStepHasField("linux_bootstrap") || w.currentStepHasField("linux_mirror_mode") || w.currentStepHasField("linux_mirror_url") || w.currentStepHasField("linux_archive_url")) && jailType == "linux" {
 		family := strings.ToLower(strings.TrimSpace(w.values.LinuxDistro))
 		if family == "" {
 			return "linux_distro", fmt.Errorf("bootstrap family is required")
@@ -875,11 +902,11 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 			return "linux_distro", fmt.Errorf("bootstrap family must use letters, numbers, dot, underscore, or dash")
 		}
 		w.values.LinuxDistro = family
-		if strings.TrimSpace(w.values.LinuxRelease) == "" {
-			return "linux_release", fmt.Errorf("bootstrap release is required")
-		}
-		if err := validateLinuxBootstrapReleaseValue(w.values.LinuxRelease); err != nil {
-			return "linux_release", err
+		method := effectiveLinuxBootstrapMethod(w.values)
+		switch method {
+		case "debootstrap", "archive":
+		default:
+			return "linux_bootstrap_method", fmt.Errorf("bootstrap method must be debootstrap or archive")
 		}
 		mode := effectiveLinuxBootstrapMode(w.values)
 		switch mode {
@@ -887,20 +914,33 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		default:
 			return "linux_bootstrap", fmt.Errorf("bootstrap mode must be auto or skip")
 		}
-		mirrorMode := effectiveLinuxMirrorMode(w.values)
-		switch mirrorMode {
-		case "default", "custom":
-		default:
-			return "linux_mirror_mode", fmt.Errorf("mirror mode must be default or custom")
-		}
-		if _, err := resolveLinuxMirror(w.values); err != nil {
-			if mirrorMode == "custom" {
-				return "linux_mirror_url", err
+		switch method {
+		case "debootstrap":
+			if strings.TrimSpace(w.values.LinuxRelease) == "" {
+				return "linux_release", fmt.Errorf("bootstrap release is required")
 			}
-			return "linux_mirror_mode", err
-		}
-		if err := validateLinuxBootstrapReleaseSupport(w.values); err != nil {
-			return "linux_release", err
+			if err := validateLinuxBootstrapReleaseValue(w.values.LinuxRelease); err != nil {
+				return "linux_release", err
+			}
+			mirrorMode := effectiveLinuxMirrorMode(w.values)
+			switch mirrorMode {
+			case "default", "custom":
+			default:
+				return "linux_mirror_mode", fmt.Errorf("mirror mode must be default or custom")
+			}
+			if _, err := resolveLinuxBootstrapSource(w.values); err != nil {
+				if mirrorMode == "custom" {
+					return "linux_mirror_url", err
+				}
+				return "linux_mirror_mode", err
+			}
+			if err := validateLinuxBootstrapReleaseSupport(w.values); err != nil {
+				return "linux_release", err
+			}
+		case "archive":
+			if _, err := resolveLinuxBootstrapSource(w.values); err != nil {
+				return "linux_archive_url", err
+			}
 		}
 	}
 	return "", nil
@@ -1187,10 +1227,17 @@ func (w jailCreationWizard) summaryLines() []string {
 	if normalizedJailType(w.values.JailType) == "linux" {
 		lines = append(lines,
 			fmt.Sprintf("Bootstrap family: %s", effectiveLinuxDistro(w.values)),
-			fmt.Sprintf("Bootstrap release: %s", effectiveLinuxRelease(w.values)),
+			fmt.Sprintf("Bootstrap method: %s", effectiveLinuxBootstrapMethod(w.values)),
 			fmt.Sprintf("Bootstrap mode: %s", effectiveLinuxBootstrapMode(w.values)),
-			fmt.Sprintf("Mirror mode: %s", effectiveLinuxMirrorMode(w.values)),
-			fmt.Sprintf("Mirror URL: %s", effectiveLinuxMirrorSummary(w.values)),
+		)
+		if effectiveLinuxBootstrapMethod(w.values) == "debootstrap" {
+			lines = append(lines,
+				fmt.Sprintf("Bootstrap release: %s", effectiveLinuxRelease(w.values)),
+				fmt.Sprintf("Mirror mode: %s", effectiveLinuxMirrorMode(w.values)),
+			)
+		}
+		lines = append(lines,
+			fmt.Sprintf("Bootstrap source: %s", effectiveLinuxSourceSummary(w.values)),
 		)
 	}
 	mounts := w.mountPointList()
@@ -1296,12 +1343,18 @@ func (w jailCreationWizard) commandPlanLines() []string {
 		} else {
 			addStep("Preflight Linux bootstrap networking inside the jail:")
 			addDetail("   jexec <jail> route -n get -inet default || route -n get -inet6 default")
-			addDetail(fmt.Sprintf("   jexec <jail> getent hosts %s  # confirm A/AAAA answers for usable route families", linuxMirrorHost(w.values)))
-			addDetail(fmt.Sprintf("   jexec <jail> fetch -4/-6 -qo /dev/null %s", linuxPreflightURL(w.values)))
+			addDetail(fmt.Sprintf("   jexec <jail> getent hosts %s  # confirm A/AAAA answers for usable route families", linuxBootstrapSourceHost(w.values)))
+			addDetail(fmt.Sprintf("   jexec <jail> fetch -4/-6 -qo /dev/null %s", linuxBootstrapPreflightURL(w.values)))
 			addStep("Bootstrap Linux userland inside the jail:")
-			addDetail("   jexec <jail> pkg bootstrap -f")
-			addDetail("   jexec <jail> pkg install -y debootstrap")
-			addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxMirrorURL(w.values)))
+			if effectiveLinuxBootstrapMethod(w.values) == "archive" {
+				addDetail(fmt.Sprintf("   jexec <jail> fetch -o /tmp/%s %s", linuxArchiveDownloadName(w.values), linuxBootstrapSourceURL(w.values)))
+				addDetail(fmt.Sprintf("   jexec <jail> tar -xf /tmp/%s -C /compat/%s", linuxArchiveDownloadName(w.values), effectiveLinuxDistro(w.values)))
+				addDetail(fmt.Sprintf("   jexec <jail> rm -f /tmp/%s", linuxArchiveDownloadName(w.values)))
+			} else {
+				addDetail("   jexec <jail> pkg bootstrap -f")
+				addDetail("   jexec <jail> pkg install -y debootstrap")
+				addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxBootstrapSourceURL(w.values)))
+			}
 		}
 	}
 
@@ -1496,7 +1549,7 @@ func buildJailConfBlock(values jailWizardValues, jailPath, fstabPath string) []s
 		lines = append(lines, buildVNETJailConfig(values)...)
 	case "linux":
 		lines = append(lines,
-			fmt.Sprintf("  # freebsd-jails-tui: linux_distro=%s linux_release=%s linux_bootstrap=%s linux_mirror_mode=%s linux_mirror_url=%s;", effectiveLinuxDistro(values), effectiveLinuxRelease(values), effectiveLinuxBootstrapMode(values), effectiveLinuxMirrorMode(values), linuxMirrorMetadataValue(values)),
+			fmt.Sprintf("  # freebsd-jails-tui: linux_distro=%s linux_bootstrap_method=%s linux_release=%s linux_bootstrap=%s linux_mirror_mode=%s linux_mirror_url=%s linux_archive_url=%s;", effectiveLinuxDistro(values), effectiveLinuxBootstrapMethod(values), effectiveLinuxRelease(values), effectiveLinuxBootstrapMode(values), effectiveLinuxMirrorMode(values), linuxMirrorMetadataValue(values), linuxArchiveMetadataValue(values)),
 		)
 		lines = append(lines, buildLinuxJailConfig(values, jailPath)...)
 	default:
@@ -1752,6 +1805,14 @@ func effectiveLinuxRelease(values jailWizardValues) string {
 	}
 }
 
+func effectiveLinuxBootstrapMethod(values jailWizardValues) string {
+	method := strings.ToLower(strings.TrimSpace(values.LinuxBootstrapMethod))
+	if method == "" {
+		return "debootstrap"
+	}
+	return method
+}
+
 func effectiveLinuxBootstrapMode(values jailWizardValues) string {
 	mode := strings.ToLower(strings.TrimSpace(values.LinuxBootstrap))
 	if mode == "" {
@@ -1772,6 +1833,24 @@ type linuxMirrorInfo struct {
 	BaseURL      string
 	Host         string
 	PreflightURL string
+}
+
+type linuxBootstrapSourceInfo struct {
+	Method       string
+	URL          string
+	Host         string
+	PreflightURL string
+}
+
+func validateLinuxArchiveURL(raw string) error {
+	info, err := resolveLinuxArchiveSource(raw)
+	if err != nil {
+		return err
+	}
+	if info.URL == "" {
+		return fmt.Errorf("archive URL is required")
+	}
+	return nil
 }
 
 func resolveLinuxMirror(values jailWizardValues) (linuxMirrorInfo, error) {
@@ -1819,7 +1898,62 @@ func resolveLinuxMirror(values jailWizardValues) (linuxMirrorInfo, error) {
 	return info, nil
 }
 
+func resolveLinuxArchiveSource(raw string) (linuxBootstrapSourceInfo, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return linuxBootstrapSourceInfo{}, fmt.Errorf("archive URL is required")
+	}
+	parsed, err := neturl.ParseRequestURI(raw)
+	if err != nil {
+		return linuxBootstrapSourceInfo{}, fmt.Errorf("archive URL must be a valid http or https URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return linuxBootstrapSourceInfo{}, fmt.Errorf("archive URL must use http or https")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return linuxBootstrapSourceInfo{}, fmt.Errorf("archive URL must include a host")
+	}
+	path := strings.ToLower(strings.TrimSpace(parsed.Path))
+	switch {
+	case strings.HasSuffix(path, ".tar"),
+		strings.HasSuffix(path, ".tar.gz"),
+		strings.HasSuffix(path, ".tgz"),
+		strings.HasSuffix(path, ".tar.xz"):
+	default:
+		return linuxBootstrapSourceInfo{}, fmt.Errorf("archive URL must point to a supported tar archive (.tar, .tar.gz, .tgz, .tar.xz)")
+	}
+	return linuxBootstrapSourceInfo{
+		Method:       "archive",
+		URL:          parsed.String(),
+		Host:         parsed.Hostname(),
+		PreflightURL: parsed.String(),
+	}, nil
+}
+
+func resolveLinuxBootstrapSource(values jailWizardValues) (linuxBootstrapSourceInfo, error) {
+	switch effectiveLinuxBootstrapMethod(values) {
+	case "archive":
+		return resolveLinuxArchiveSource(values.LinuxArchiveURL)
+	case "debootstrap":
+		mirror, err := resolveLinuxMirror(values)
+		if err != nil {
+			return linuxBootstrapSourceInfo{}, err
+		}
+		return linuxBootstrapSourceInfo{
+			Method:       "debootstrap",
+			URL:          mirror.BaseURL,
+			Host:         mirror.Host,
+			PreflightURL: mirror.PreflightURL,
+		}, nil
+	default:
+		return linuxBootstrapSourceInfo{}, fmt.Errorf("bootstrap method must be debootstrap or archive")
+	}
+}
+
 func linuxMirrorMetadataValue(values jailWizardValues) string {
+	if effectiveLinuxBootstrapMethod(values) != "debootstrap" {
+		return "-"
+	}
 	if effectiveLinuxMirrorMode(values) != "custom" {
 		return "-"
 	}
@@ -1828,6 +1962,17 @@ func linuxMirrorMetadataValue(values jailWizardValues) string {
 		return strings.TrimSpace(values.LinuxMirrorURL)
 	}
 	return info.BaseURL
+}
+
+func linuxArchiveMetadataValue(values jailWizardValues) string {
+	if effectiveLinuxBootstrapMethod(values) != "archive" {
+		return "-"
+	}
+	info, err := resolveLinuxArchiveSource(values.LinuxArchiveURL)
+	if err != nil {
+		return strings.TrimSpace(values.LinuxArchiveURL)
+	}
+	return info.URL
 }
 
 func metadataDashValue(value string) string {
@@ -1895,23 +2040,61 @@ func effectiveLinuxMirrorSummary(values jailWizardValues) string {
 	return info.BaseURL
 }
 
-func linuxMirrorURL(values jailWizardValues) string {
-	mirror, _ := resolveLinuxMirror(values)
-	return mirror.BaseURL
+func effectiveLinuxSourceSummary(values jailWizardValues) string {
+	info, err := resolveLinuxBootstrapSource(values)
+	if err != nil {
+		switch effectiveLinuxBootstrapMethod(values) {
+		case "archive":
+			return valueOrDash(strings.TrimSpace(values.LinuxArchiveURL))
+		case "debootstrap":
+			return effectiveLinuxMirrorSummary(values)
+		default:
+			return "-"
+		}
+	}
+	return info.URL
 }
 
-func linuxMirrorHost(values jailWizardValues) string {
-	mirror, _ := resolveLinuxMirror(values)
-	return mirror.Host
+func linuxBootstrapSourceURL(values jailWizardValues) string {
+	source, _ := resolveLinuxBootstrapSource(values)
+	return source.URL
 }
 
-func linuxPreflightURL(values jailWizardValues) string {
-	mirror, _ := resolveLinuxMirror(values)
-	return mirror.PreflightURL
+func linuxBootstrapSourceHost(values jailWizardValues) string {
+	source, _ := resolveLinuxBootstrapSource(values)
+	return source.Host
+}
+
+func linuxBootstrapPreflightURL(values jailWizardValues) string {
+	source, _ := resolveLinuxBootstrapSource(values)
+	return source.PreflightURL
+}
+
+func linuxArchiveDownloadName(values jailWizardValues) string {
+	raw := strings.TrimSpace(values.LinuxArchiveURL)
+	if raw == "" {
+		return effectiveLinuxDistro(values) + "-rootfs.tar"
+	}
+	parsed, err := neturl.Parse(raw)
+	if err == nil {
+		if base := pathBase(parsed.Path); base != "" && base != "." && base != "/" {
+			return base
+		}
+	}
+	return effectiveLinuxDistro(values) + "-rootfs.tar"
 }
 
 func linuxCompatRoot(jailPath string, values jailWizardValues) string {
 	return filepath.Join(jailPath, "compat", effectiveLinuxDistro(values))
+}
+
+func pathBase(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, "/")
+	return parts[len(parts)-1]
 }
 
 func effectiveVNETHostSetup(values jailWizardValues) string {
@@ -1947,7 +2130,7 @@ func wizardSectionForField(id string) string {
 		return "Resource limits"
 	case "mount_points":
 		return "Mount points"
-	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
+	case "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
 		return "Linux bootstrap"
 	default:
 		return ""

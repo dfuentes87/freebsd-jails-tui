@@ -38,6 +38,7 @@ type LinuxWizardPrereqs struct {
 	Host              LinuxHostStatus
 	Debootstrap       HostDebootstrapStatus
 	Capabilities      LinuxHostCapabilityStatus
+	BootstrapMethod   string
 	MirrorURL         string
 	MirrorHost        string
 	PreflightURL      string
@@ -51,6 +52,7 @@ type LinuxReadiness struct {
 	Debootstrap          HostDebootstrapStatus
 	Capabilities         LinuxHostCapabilityStatus
 	BootstrapFamily      string
+	BootstrapMethod      string
 	BootstrapRelease     string
 	CompatRoot           string
 	BootstrapMode        string
@@ -165,15 +167,16 @@ func hostCapabilityAvailable(paths []string, module string) bool {
 }
 
 func collectLinuxWizardPrereqs(values jailWizardValues) LinuxWizardPrereqs {
-	mirror, err := resolveLinuxMirror(values)
+	source, err := resolveLinuxBootstrapSource(values)
 	support := collectLinuxBootstrapReleaseSupport(values)
 	return LinuxWizardPrereqs{
 		Host:              collectLinuxHostStatus(),
 		Debootstrap:       collectHostDebootstrapStatus(),
 		Capabilities:      collectLinuxHostCapabilityStatus(),
-		MirrorURL:         mirror.BaseURL,
-		MirrorHost:        mirror.Host,
-		PreflightURL:      mirror.PreflightURL,
+		BootstrapMethod:   effectiveLinuxBootstrapMethod(values),
+		MirrorURL:         source.URL,
+		MirrorHost:        source.Host,
+		PreflightURL:      source.PreflightURL,
 		ResolveError:      errorText(err),
 		ReleaseSupport:    support.Status,
 		ReleaseSupportMsg: support.Detail,
@@ -191,14 +194,15 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 		Debootstrap:      collectHostDebootstrapStatus(),
 		Capabilities:     collectLinuxHostCapabilityStatus(),
 		BootstrapFamily:  effectiveLinuxDistro(values),
+		BootstrapMethod:  effectiveLinuxBootstrapMethod(values),
 		BootstrapRelease: effectiveLinuxRelease(values),
 		BootstrapMode:    effectiveLinuxBootstrapMode(values),
 	}
 	support := collectLinuxBootstrapReleaseSupport(values)
-	mirror, err := resolveLinuxMirror(values)
-	readiness.MirrorURL = mirror.BaseURL
-	readiness.MirrorHost = mirror.Host
-	readiness.PreflightURL = mirror.PreflightURL
+	source, err := resolveLinuxBootstrapSource(values)
+	readiness.MirrorURL = source.URL
+	readiness.MirrorHost = source.Host
+	readiness.PreflightURL = source.PreflightURL
 	readiness.MirrorResolveError = errorText(err)
 	readiness.ReleaseSupport = support.Status
 	readiness.ReleaseSupportDetail = support.Detail
@@ -226,7 +230,7 @@ func collectLinuxReadiness(detail JailDetail) *LinuxReadiness {
 		if readiness.MirrorResolveError != "" {
 			readiness.RuntimeError = readiness.MirrorResolveError
 		} else {
-			readiness.RuntimeError = "Could not determine Linux bootstrap mirror host."
+			readiness.RuntimeError = "Could not determine Linux bootstrap source host."
 		}
 		return readiness
 	}
@@ -352,6 +356,46 @@ func populateLinuxHealth(readiness *LinuxReadiness, detail JailDetail, values ja
 		if err == nil {
 			readiness.PackageManagerOK = true
 			readiness.PackageManagerStatus = firstOutputLine(output, "dpkg-query is available.")
+		} else {
+			readiness.PackageManagerStatus = trimmedErrorOutput(output, err)
+		}
+	case fileExists(filepath.Join(hostCompatRoot, "sbin", "apk")):
+		output, err := runLinuxChrootCommand(detail.Name, distro, "/sbin/apk", "--version")
+		if err == nil {
+			readiness.PackageManagerOK = true
+			readiness.PackageManagerStatus = firstOutputLine(output, "apk is available.")
+		} else {
+			readiness.PackageManagerStatus = trimmedErrorOutput(output, err)
+		}
+	case fileExists(filepath.Join(hostCompatRoot, "usr", "bin", "apk")):
+		output, err := runLinuxChrootCommand(detail.Name, distro, "/usr/bin/apk", "--version")
+		if err == nil {
+			readiness.PackageManagerOK = true
+			readiness.PackageManagerStatus = firstOutputLine(output, "apk is available.")
+		} else {
+			readiness.PackageManagerStatus = trimmedErrorOutput(output, err)
+		}
+	case fileExists(filepath.Join(hostCompatRoot, "usr", "bin", "dnf")):
+		output, err := runLinuxChrootCommand(detail.Name, distro, "/usr/bin/dnf", "--version")
+		if err == nil {
+			readiness.PackageManagerOK = true
+			readiness.PackageManagerStatus = firstOutputLine(output, "dnf is available.")
+		} else {
+			readiness.PackageManagerStatus = trimmedErrorOutput(output, err)
+		}
+	case fileExists(filepath.Join(hostCompatRoot, "usr", "bin", "yum")):
+		output, err := runLinuxChrootCommand(detail.Name, distro, "/usr/bin/yum", "--version")
+		if err == nil {
+			readiness.PackageManagerOK = true
+			readiness.PackageManagerStatus = firstOutputLine(output, "yum is available.")
+		} else {
+			readiness.PackageManagerStatus = trimmedErrorOutput(output, err)
+		}
+	case fileExists(filepath.Join(hostCompatRoot, "usr", "bin", "rpm")):
+		output, err := runLinuxChrootCommand(detail.Name, distro, "/usr/bin/rpm", "--version")
+		if err == nil {
+			readiness.PackageManagerOK = true
+			readiness.PackageManagerStatus = firstOutputLine(output, "rpm is available.")
 		} else {
 			readiness.PackageManagerStatus = trimmedErrorOutput(output, err)
 		}

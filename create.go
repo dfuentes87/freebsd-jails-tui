@@ -194,7 +194,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 	}
 	if normalizedJailType(values.JailType) == "linux" {
 		releaseSupport := collectLinuxBootstrapReleaseSupport(values)
-		if releaseSupport.Status == "unknown" && strings.TrimSpace(releaseSupport.Detail) != "" && effectiveLinuxBootstrapMode(values) == "auto" {
+		if effectiveLinuxBootstrapMethod(values) == "debootstrap" && releaseSupport.Status == "unknown" && strings.TrimSpace(releaseSupport.Detail) != "" && effectiveLinuxBootstrapMode(values) == "auto" {
 			logf("warning: %s", releaseSupport.Detail)
 		}
 	}
@@ -268,7 +268,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		phases = append(phases, struct {
 			title  string
 			detail string
-		}{"Bootstrap Linux userland", "Running preflight, pkg bootstrap, and debootstrap inside the jail."})
+		}{"Bootstrap Linux userland", "Running preflight and the selected Linux bootstrap method inside the jail."})
 	}
 	phases = append(phases, struct {
 		title  string
@@ -762,27 +762,45 @@ func bootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailNa
 	distro := effectiveLinuxDistro(values)
 	release := effectiveLinuxRelease(values)
 	target := filepath.ToSlash(filepath.Join("/compat", distro))
-	mirrorInfo, err := resolveLinuxMirror(values)
+	sourceInfo, err := resolveLinuxBootstrapSource(values)
 	if err != nil {
 		return err
 	}
-	mirror := mirrorInfo.BaseURL
 
 	if jailExecutableExists(jailName, filepath.ToSlash(filepath.Join(target, "bin", "sh"))) {
-		*logs = append(*logs, "Linux userland already present under "+target+"; skipping debootstrap.")
+		*logs = append(*logs, "Linux userland already present under "+target+"; skipping bootstrap.")
 		return nil
 	}
-	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "bootstrap", "-f"); err != nil {
-		return fmt.Errorf("failed to bootstrap pkg inside linux jail: %w", err)
-	}
-	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "install", "-y", "debootstrap"); err != nil {
-		return fmt.Errorf("failed to install debootstrap inside linux jail: %w", err)
-	}
-	if err := validateJailLinuxDebootstrapReleaseSupport(ctx, jailName, release, logs); err != nil {
-		return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
-	}
-	if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "debootstrap", "--arch", hostArch(), release, target, mirror); err != nil {
-		return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
+	switch effectiveLinuxBootstrapMethod(values) {
+	case "archive":
+		downloadPath := filepath.ToSlash(filepath.Join("/tmp", linuxArchiveDownloadName(values)))
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "fetch", "-o", downloadPath, sourceInfo.URL); err != nil {
+			return fmt.Errorf("failed to fetch archive bootstrap for %s from %s: %w", distro, sourceInfo.URL, err)
+		}
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "tar", "-xf", downloadPath, "-C", target); err != nil {
+			return fmt.Errorf("failed to extract archive bootstrap for %s from %s: %w", distro, sourceInfo.URL, err)
+		}
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "rm", "-f", downloadPath); err != nil {
+			*logs = append(*logs, "  warning: failed to remove archive bootstrap download "+downloadPath+": "+err.Error())
+		}
+		if !jailExecutableExists(jailName, filepath.ToSlash(filepath.Join(target, "bin", "sh"))) {
+			return fmt.Errorf("failed to bootstrap %s from %s inside linux jail: extracted archive did not provide %s", distro, sourceInfo.URL, filepath.ToSlash(filepath.Join(target, "bin", "sh")))
+		}
+	case "debootstrap":
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "bootstrap", "-f"); err != nil {
+			return fmt.Errorf("failed to bootstrap pkg inside linux jail: %w", err)
+		}
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "env", "ASSUME_ALWAYS_YES=yes", "pkg", "install", "-y", "debootstrap"); err != nil {
+			return fmt.Errorf("failed to install debootstrap inside linux jail: %w", err)
+		}
+		if err := validateJailLinuxDebootstrapReleaseSupport(ctx, jailName, release, logs); err != nil {
+			return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
+		}
+		if _, err := runLoggedCommand(ctx, logs, "jexec", jailName, "debootstrap", "--arch", hostArch(), release, target, sourceInfo.URL); err != nil {
+			return fmt.Errorf("failed to bootstrap %s %s inside linux jail: %w", distro, release, err)
+		}
+	default:
+		return fmt.Errorf("unsupported linux bootstrap method %q", effectiveLinuxBootstrapMethod(values))
 	}
 	return nil
 }
@@ -807,8 +825,10 @@ func linuxBootstrapRetryGuidance(err error) string {
 		return ""
 	case strings.Contains(lower, "failed to install debootstrap") || strings.Contains(lower, "failed to bootstrap pkg"):
 		return " Use detail view action 'b' to retry after fixing package access."
+	case strings.Contains(lower, "failed to fetch archive bootstrap") || strings.Contains(lower, "failed to extract archive bootstrap"):
+		return " Use detail view action 'b' to retry after fixing networking or archive access."
 	default:
-		return " Use detail view action 'b' to retry after fixing networking or package access."
+		return " Use detail view action 'b' to retry after fixing networking or bootstrap access."
 	}
 }
 
@@ -825,22 +845,22 @@ func validateJailLinuxDebootstrapReleaseSupport(ctx context.Context, jailName, r
 }
 
 func preflightLinuxBootstrap(ctx context.Context, values jailWizardValues, jailName string, logs *[]string) error {
-	mirrorInfo, err := resolveLinuxMirror(values)
+	sourceInfo, err := resolveLinuxBootstrapSource(values)
 	if err != nil {
 		return err
 	}
 	hasIPv4Route := checkLinuxRouteFamily(ctx, jailName, "inet", logs)
 	hasIPv6Route := checkLinuxRouteFamily(ctx, jailName, "inet6", logs)
 	if !hasIPv4Route && !hasIPv6Route {
-		if err := checkLinuxGenericFetchReachability(ctx, mirrorInfo.PreflightURL, jailName, logs); err == nil {
+		if err := checkLinuxGenericFetchReachability(ctx, sourceInfo.PreflightURL, jailName, logs); err == nil {
 			*logs = append(*logs, "Linux bootstrap preflight: shared-stack fetch succeeded without an explicit default route probe.")
 			return nil
 		}
 		return fmt.Errorf("linux bootstrap preflight failed: no IPv4 or IPv6 default route inside the jail")
 	}
-	host := mirrorInfo.Host
+	host := sourceInfo.Host
 	if host == "" {
-		return fmt.Errorf("linux bootstrap preflight failed: could not determine mirror host")
+		return fmt.Errorf("linux bootstrap preflight failed: could not determine bootstrap source host")
 	}
 	hasIPv4DNS, hasIPv6DNS, err := checkLinuxDNSFamilies(ctx, jailName, host, logs)
 	if err != nil {
@@ -855,7 +875,7 @@ func preflightLinuxBootstrap(ctx context.Context, values jailWizardValues, jailN
 	if hasIPv6Route && !hasIPv6DNS && !hasIPv4Route {
 		return fmt.Errorf("linux bootstrap preflight failed: DNS returned no IPv6 answers for %s", host)
 	}
-	if err := checkLinuxFetchReachability(ctx, mirrorInfo.PreflightURL, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
+	if err := checkLinuxFetchReachability(ctx, sourceInfo.PreflightURL, jailName, hasIPv4Route && hasIPv4DNS, hasIPv6Route && hasIPv6DNS, logs); err != nil {
 		return err
 	}
 	return nil
@@ -1183,6 +1203,8 @@ func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
 			switch strings.TrimSpace(key) {
 			case "linux_distro":
 				values.LinuxDistro = strings.TrimSpace(value)
+			case "linux_bootstrap_method":
+				values.LinuxBootstrapMethod = strings.TrimSpace(value)
 			case "linux_release":
 				values.LinuxRelease = strings.TrimSpace(value)
 			case "linux_bootstrap":
@@ -1192,6 +1214,10 @@ func linuxBootstrapConfigFromRawLines(lines []string) jailWizardValues {
 			case "linux_mirror_url":
 				if strings.TrimSpace(value) != "-" {
 					values.LinuxMirrorURL = strings.TrimSpace(value)
+				}
+			case "linux_archive_url":
+				if strings.TrimSpace(value) != "-" {
+					values.LinuxArchiveURL = strings.TrimSpace(value)
 				}
 			}
 		}

@@ -92,6 +92,11 @@ func collectLinuxBootstrapReleaseSupport(values jailWizardValues) linuxBootstrap
 	if normalizedJailType(values.JailType) != "linux" {
 		return support
 	}
+	if effectiveLinuxBootstrapMethod(values) != "debootstrap" {
+		support.Status = "not_applicable"
+		support.Detail = "Bootstrap release validation is not used for archive bootstrap."
+		return support
+	}
 	if err := validateLinuxBootstrapReleaseValue(support.Release); err != nil {
 		support.Status = "unsupported"
 		support.Detail = err.Error()
