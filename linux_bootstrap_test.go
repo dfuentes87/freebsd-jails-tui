@@ -304,6 +304,25 @@ func TestDetectLinuxArchiveRootSingleTopLevelDirectory(t *testing.T) {
 	}
 }
 
+func TestDetectLinuxArchiveRootAcceptsShellSymlink(t *testing.T) {
+	stageDir := t.TempDir()
+	binDir := filepath.Join(stageDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.Symlink("/bin/busybox", filepath.Join(binDir, "sh")); err != nil {
+		t.Fatalf("os.Symlink() error = %v", err)
+	}
+
+	root, _, err := detectLinuxArchiveRoot(stageDir)
+	if err != nil {
+		t.Fatalf("detectLinuxArchiveRoot() error = %v", err)
+	}
+	if root != stageDir {
+		t.Fatalf("detectLinuxArchiveRoot() = %q, want %q", root, stageDir)
+	}
+}
+
 func TestDetectLinuxArchiveRootRejectsUnsupportedLayout(t *testing.T) {
 	stageDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(stageDir, "README"), []byte("no rootfs here"), 0o644); err != nil {
@@ -386,6 +405,46 @@ func TestWizardFieldContextLinesIncludeLinuxHostChecks(t *testing.T) {
 	}
 	if !strings.Contains(joined, "Bootstrap method: archive") {
 		t.Fatalf("wizardFieldContextLines() missing linux context: %q", joined)
+	}
+}
+
+func TestLinuxReadinessLinesHidePreflightURLAndSplitCompatMounts(t *testing.T) {
+	m := model{
+		detail: JailDetail{
+			LinuxReadiness: &LinuxReadiness{
+				Host: LinuxHostStatus{
+					EnableValue:      "YES",
+					EnableConfigured: true,
+					ServicePresent:   true,
+					ServiceRunning:   true,
+				},
+				BootstrapPreset:    "alpine",
+				BootstrapFamily:    "alpine",
+				BootstrapMethod:    "archive",
+				CompatRoot:         "/usr/local/jails/containers/alpine/compat/alpine",
+				BootstrapMode:      "auto",
+				MirrorURL:          "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.4-x86_64.tar.gz",
+				MirrorHost:         "dl-cdn.alpinelinux.org",
+				PreflightURL:       "https://unused.example.test/rootfs.tar.gz",
+				UserlandPresent:    true,
+				CompatMountedPaths: []string{"/usr/local/jails/containers/alpine/compat/alpine/dev", "/usr/local/jails/containers/alpine/compat/alpine/tmp"},
+			},
+		},
+	}
+
+	lines := m.linuxReadinessLines()
+	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "Preflight URL:") {
+		t.Fatalf("linuxReadinessLines() unexpectedly includes Preflight URL: %q", joined)
+	}
+	if !strings.Contains(joined, "Warning: active compat mounts are present.") {
+		t.Fatalf("linuxReadinessLines() missing compat mount warning: %q", joined)
+	}
+	if !strings.Contains(joined, "Active compat mount 1: /usr/local/jails/containers/alpine/compat/alpine/dev") {
+		t.Fatalf("linuxReadinessLines() missing compat mount 1: %q", joined)
+	}
+	if !strings.Contains(joined, "Active compat mount 2: /usr/local/jails/containers/alpine/compat/alpine/tmp") {
+		t.Fatalf("linuxReadinessLines() missing compat mount 2: %q", joined)
 	}
 }
 

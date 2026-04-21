@@ -279,7 +279,15 @@ func linuxUserlandPresent(jailPath string, values jailWizardValues) bool {
 		return false
 	}
 	compatRoot := linuxCompatRoot(jailPath, values)
-	_, err := os.Stat(filepath.Join(compatRoot, "bin", "sh"))
+	return linuxShellPathPresent(compatRoot)
+}
+
+func linuxShellPathPresent(rootPath string) bool {
+	rootPath = strings.TrimSpace(rootPath)
+	if rootPath == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(rootPath, "bin", "sh"))
 	return err == nil
 }
 

@@ -4666,11 +4666,13 @@ func (m model) linuxReadinessLines() []string {
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
 		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(readiness.MirrorURL)),
 		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(readiness.MirrorHost)),
-		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
 	}
 	if len(readiness.CompatMountedPaths) > 0 {
-		lines = append(lines, "Warning: active compat mounts: "+strings.Join(readiness.CompatMountedPaths, ", "))
+		lines = append(lines, "Warning: active compat mounts are present.")
+		for idx, path := range readiness.CompatMountedPaths {
+			lines = append(lines, fmt.Sprintf("Active compat mount %d: %s", idx+1, path))
+		}
 	}
 	if linuxBootstrapUsesLocalSource(readiness.BootstrapMethod, readiness.MirrorHost, readiness.PreflightURL) {
 		lines = append(lines, "Local archive source: runtime route, DNS, and fetch checks are skipped.")

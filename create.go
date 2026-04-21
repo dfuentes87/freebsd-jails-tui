@@ -795,7 +795,7 @@ func bootstrapLinuxUserland(ctx context.Context, values jailWizardValues, jailNa
 			return fmt.Errorf("jail path is required for archive bootstrap")
 		}
 		targetHostPath := linuxCompatRoot(jailPath, values)
-		if fileExists(filepath.Join(targetHostPath, "bin", "sh")) {
+		if linuxShellPathPresent(targetHostPath) {
 			*logs = append(*logs, "Linux userland already present under "+target+"; skipping bootstrap.")
 			return nil
 		}
@@ -966,7 +966,7 @@ func bootstrapLinuxArchiveUserland(ctx context.Context, values jailWizardValues,
 		_ = clearLinuxCompatInstallTarget(targetHostPath, logs)
 		return fmt.Errorf("failed to prepare compatibility mount paths after archive bootstrap: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(targetHostPath, "bin", "sh")); err != nil {
+	if !linuxShellPathPresent(targetHostPath) {
 		_ = clearLinuxCompatInstallTarget(targetHostPath, logs)
 		return fmt.Errorf("extracted archive did not provide %s", filepath.ToSlash(filepath.Join(targetHostPath, "bin", "sh")))
 	}
@@ -1009,7 +1009,7 @@ func detectLinuxArchiveRoot(stagePath string) (string, func(), error) {
 	if stagePath == "" {
 		return "", nil, fmt.Errorf("archive staging path is required")
 	}
-	if fileExists(filepath.Join(stagePath, "bin", "sh")) {
+	if linuxShellPathPresent(stagePath) {
 		return stagePath, nil, nil
 	}
 	entries, err := os.ReadDir(stagePath)
@@ -1024,7 +1024,7 @@ func detectLinuxArchiveRoot(stagePath string) (string, func(), error) {
 	}
 	if len(dirs) == 1 {
 		nestedRoot := filepath.Join(stagePath, dirs[0])
-		if fileExists(filepath.Join(nestedRoot, "bin", "sh")) {
+		if linuxShellPathPresent(nestedRoot) {
 			return nestedRoot, func() {}, nil
 		}
 		return "", nil, fmt.Errorf("archive extracted into a top-level subdirectory %q, but %s was not found there", dirs[0], filepath.ToSlash(filepath.Join(dirs[0], "bin", "sh")))
