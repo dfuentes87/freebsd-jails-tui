@@ -4122,7 +4122,8 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 			Purpose: "Rootfs archive source used for archive bootstrap, readiness checks, and retry.",
 			Format:  "http/https URL, file URL, or absolute local path pointing to .tar, .tar.gz, .tgz, or .tar.xz.",
 			Examples: []string{
-				"https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
+				"https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.4-x86_64.tar.gz",
+				"/usr/local/jails/media/alpine-minirootfs-3.23.4-x86_64.tar.gz",
 			},
 			Notes: []string{
 				"Only used when bootstrap method is archive.",
@@ -5384,6 +5385,8 @@ func summarizeCreationWarning(message string) string {
 		return "linux bootstrap failed; debootstrap on this host does not support the selected release"
 	case strings.Contains(lower, "failed to fetch archive bootstrap") || strings.Contains(lower, "failed to extract archive bootstrap"):
 		return "linux bootstrap failed; use detail view action 'b' after fixing networking or archive access"
+	case strings.Contains(lower, "failed to bootstrap") && strings.Contains(lower, " from ") && strings.Contains(lower, "inside linux jail"):
+		return "linux archive bootstrap failed; check debug log and use detail view action 'b' after fixing archive access or filesystem state"
 	case strings.Contains(lower, "failed to bootstrap") || strings.Contains(lower, "failed to install debootstrap"):
 		return "linux bootstrap failed; use detail view action 'b' after fixing package access"
 	default:

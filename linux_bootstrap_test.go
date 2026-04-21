@@ -225,6 +225,14 @@ func TestSummarizeCreationWarningArchive(t *testing.T) {
 	}
 }
 
+func TestSummarizeCreationWarningArchiveWrappedFailure(t *testing.T) {
+	got := summarizeCreationWarning("failed to bootstrap alpine from https://example.invalid/rootfs.tar.gz inside linux jail: unsupported archive layout")
+	want := "linux archive bootstrap failed; check debug log and use detail view action 'b' after fixing archive access or filesystem state"
+	if got != want {
+		t.Fatalf("summarizeCreationWarning() = %q, want %q", got, want)
+	}
+}
+
 func TestApplyLinuxBootstrapPresetAlpineLeavesArchiveSourceBlank(t *testing.T) {
 	w := newJailCreationWizard("/usr/local/jails/containers")
 	w.values.JailType = "linux"
@@ -259,15 +267,19 @@ func TestApplyLinuxBootstrapPresetPreservesManualArchiveSource(t *testing.T) {
 	}
 }
 
-func TestArchiveSourceFieldGuideHasSingleAlpineURLExample(t *testing.T) {
+func TestArchiveSourceFieldGuideHasURLAndLocalExamples(t *testing.T) {
 	m := model{}
 	guide := m.wizardFieldGuide(wizardField{ID: "linux_archive_url"})
-	if len(guide.Examples) != 1 {
-		t.Fatalf("len(guide.Examples) = %d, want 1", len(guide.Examples))
+	if len(guide.Examples) != 2 {
+		t.Fatalf("len(guide.Examples) = %d, want 2", len(guide.Examples))
 	}
-	want := "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz"
-	if guide.Examples[0] != want {
-		t.Fatalf("guide.Examples[0] = %q, want %q", guide.Examples[0], want)
+	wantURL := "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.4-x86_64.tar.gz"
+	if guide.Examples[0] != wantURL {
+		t.Fatalf("guide.Examples[0] = %q, want %q", guide.Examples[0], wantURL)
+	}
+	wantPath := "/usr/local/jails/media/alpine-minirootfs-3.23.4-x86_64.tar.gz"
+	if guide.Examples[1] != wantPath {
+		t.Fatalf("guide.Examples[1] = %q, want %q", guide.Examples[1], wantPath)
 	}
 }
 

@@ -164,6 +164,11 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 	warnings := make([]string, 0, 4)
 	fail := func(err error) JailCreationResult {
 		debugLog("JailCreation", fmt.Sprintf("Failed: %v. Rolling back...", err))
+		if len(warnings) > 0 {
+			for idx, warning := range warnings {
+				debugLog("JailCreation", fmt.Sprintf("Warning[%d]: %s", idx, warning))
+			}
+		}
 		for idx := len(cleanups) - 1; idx >= 0; idx-- {
 			cleanups[idx]()
 		}
@@ -392,6 +397,9 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 	})
 
 	if len(warnings) > 0 {
+		for idx, warning := range warnings {
+			debugLog("JailCreation", fmt.Sprintf("Warning[%d]: %s", idx, warning))
+		}
 		logf("Jail %s created and started with warnings.", result.Name)
 	} else {
 		logf("Jail %s created successfully.", result.Name)
