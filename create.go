@@ -881,11 +881,7 @@ func bootstrapLinuxArchiveUserland(ctx context.Context, values jailWizardValues,
 	}
 	targetHostPath := linuxCompatRoot(jailPath, values)
 	stagePath := targetHostPath + ".bootstrap-stage"
-	backupPath := targetHostPath + ".bootstrap-backup"
 	if err := removePathAllLogged(stagePath, logs); err != nil {
-		return err
-	}
-	if err := removePathAllLogged(backupPath, logs); err != nil {
 		return err
 	}
 	archiveHostPath, archiveCleanup, err := prepareLinuxArchiveSource(ctx, sourceInfo, jailName, jailPath, values, logs)
@@ -906,34 +902,28 @@ func bootstrapLinuxArchiveUserland(ctx context.Context, values jailWizardValues,
 	if cleanupStage != nil {
 		defer cleanupStage()
 	}
-	if err := renamePathLogged(targetHostPath, backupPath, logs); err != nil {
+	if err := pruneLinuxArchiveStage(extractedRoot, logs); err != nil {
 		_ = removePathAllLogged(stagePath, logs)
 		return err
 	}
-	restoreBackup := func() {
-		if err := removePathAllLogged(targetHostPath, logs); err != nil {
-			return
-		}
-		_ = renamePathLogged(backupPath, targetHostPath, logs)
-	}
-	if err := renamePathLogged(extractedRoot, targetHostPath, logs); err != nil {
-		restoreBackup()
+	if err := clearLinuxCompatInstallTarget(targetHostPath, logs); err != nil {
 		_ = removePathAllLogged(stagePath, logs)
 		return err
 	}
-	if err := removePathAllLogged(stagePath, logs); err != nil {
-		restoreBackup()
+	if err := copyLinuxArchiveIntoCompat(ctx, extractedRoot, targetHostPath, logs); err != nil {
+		_ = clearLinuxCompatInstallTarget(targetHostPath, logs)
+		_ = removePathAllLogged(stagePath, logs)
 		return err
 	}
 	if err := ensureLinuxCompatPaths(ctx, jailPath, values, logs); err != nil {
-		restoreBackup()
+		_ = clearLinuxCompatInstallTarget(targetHostPath, logs)
 		return fmt.Errorf("failed to prepare compatibility mount paths after archive bootstrap: %w", err)
 	}
 	if _, err := os.Stat(filepath.Join(targetHostPath, "bin", "sh")); err != nil {
-		restoreBackup()
+		_ = clearLinuxCompatInstallTarget(targetHostPath, logs)
 		return fmt.Errorf("extracted archive did not provide %s", filepath.ToSlash(filepath.Join(targetHostPath, "bin", "sh")))
 	}
-	if err := removePathAllLogged(backupPath, logs); err != nil {
+	if err := removePathAllLogged(stagePath, logs); err != nil {
 		return err
 	}
 	return nil
@@ -991,6 +981,69 @@ func detectLinuxArchiveRoot(stagePath string) (string, func(), error) {
 		return "", nil, fmt.Errorf("archive extracted into a top-level subdirectory %q, but %s was not found there", dirs[0], filepath.ToSlash(filepath.Join(dirs[0], "bin", "sh")))
 	}
 	return "", nil, fmt.Errorf("archive bootstrap layout is unsupported: expected bin/sh at the archive root or under a single top-level directory")
+}
+
+func pruneLinuxArchiveStage(rootPath string, logs *[]string) error {
+	for _, name := range linuxCompatReservedTopLevelNames() {
+		path := filepath.Join(rootPath, name)
+		if err := removePathAllLogged(path, logs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func clearLinuxCompatInstallTarget(targetPath string, logs *[]string) error {
+	targetPath = strings.TrimSpace(targetPath)
+	if targetPath == "" {
+		return fmt.Errorf("target path is required")
+	}
+	if _, err := os.Stat(targetPath); err != nil {
+		if os.IsNotExist(err) {
+			*logs = append(*logs, "$ mkdir -p "+targetPath)
+			return os.MkdirAll(targetPath, 0o755)
+		}
+		return fmt.Errorf("failed to inspect install target %q: %w", targetPath, err)
+	}
+	entries, err := os.ReadDir(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to read install target %q: %w", targetPath, err)
+	}
+	reserved := linuxCompatReservedTopLevelNameSet()
+	for _, entry := range entries {
+		if _, ok := reserved[entry.Name()]; ok {
+			continue
+		}
+		if err := removePathAllLogged(filepath.Join(targetPath, entry.Name()), logs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyLinuxArchiveIntoCompat(ctx context.Context, sourcePath, targetPath string, logs *[]string) error {
+	sourcePath = strings.TrimSpace(sourcePath)
+	targetPath = strings.TrimSpace(targetPath)
+	if sourcePath == "" || targetPath == "" {
+		return fmt.Errorf("source and target paths are required for archive install")
+	}
+	if _, err := runLoggedCommand(ctx, logs, "cp", "-aX", filepath.ToSlash(filepath.Join(sourcePath, ".")), filepath.ToSlash(targetPath)); err != nil {
+		return fmt.Errorf("failed to install extracted archive into %s: %w", targetPath, err)
+	}
+	return nil
+}
+
+func linuxCompatReservedTopLevelNames() []string {
+	return []string{"dev", "proc", "sys", "tmp", "home"}
+}
+
+func linuxCompatReservedTopLevelNameSet() map[string]struct{} {
+	names := linuxCompatReservedTopLevelNames()
+	values := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		values[name] = struct{}{}
+	}
+	return values
 }
 
 func removePathAllLogged(path string, logs *[]string) error {
