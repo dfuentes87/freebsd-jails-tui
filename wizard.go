@@ -96,7 +96,7 @@ var wizardBaseSteps = []wizardStep{
 			{ID: "linux_release", Label: "Bootstrap release", Placeholder: "jammy", Help: "Codename, suite, or release string passed to debootstrap"},
 			{ID: "linux_bootstrap", Label: "Bootstrap mode", Placeholder: "auto", Help: "Options: auto or skip"},
 			{ID: "linux_mirror_mode", Label: "Mirror mode", Placeholder: "default", Help: "Options: default or custom"},
-			{ID: "linux_mirror_url", Label: "Mirror URL", Placeholder: "https://mirror.example.invalid/repo", Help: "Custom Linux package mirror base URL"},
+			{ID: "linux_mirror_url", Label: "Mirror URL", Placeholder: "https://mirror.example.com/repo", Help: "Custom Linux package mirror base URL"},
 			{ID: "linux_archive_url", Label: "Archive source", Placeholder: "URL or local file", Help: "Full URL or absolute local path to a rootfs tar archive"},
 		},
 	},
