@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -353,6 +354,38 @@ func TestMountedDescendantsFromLinesIgnoresParentAndUnrelatedMounts(t *testing.T
 	got := mountedDescendantsFromLines(lines, root)
 	if len(got) != 0 {
 		t.Fatalf("mountedDescendantsFromLines() = %v, want empty", got)
+	}
+}
+
+func TestWizardShowsLinuxPrereqs(t *testing.T) {
+	step := wizardStep{
+		Fields: []wizardField{
+			{ID: "name"},
+			{ID: "linux_archive_url"},
+		},
+	}
+
+	if !wizardShowsLinuxPrereqs(step) {
+		t.Fatal("wizardShowsLinuxPrereqs() = false, want true")
+	}
+}
+
+func TestWizardFieldContextLinesIncludeLinuxHostChecks(t *testing.T) {
+	w := newJailCreationWizard("/usr/local/jails/containers")
+	w.values.JailType = "linux"
+	w.values.LinuxBootstrapMethod = "archive"
+	w.step = 1
+	w.field = 7
+	w.refreshLinuxPrereqs()
+
+	m := model{wizard: w}
+	lines := m.wizardFieldContextLines(100)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Host checks") {
+		t.Fatalf("wizardFieldContextLines() missing Host checks section: %q", joined)
+	}
+	if !strings.Contains(joined, "Bootstrap method: archive") {
+		t.Fatalf("wizardFieldContextLines() missing linux context: %q", joined)
 	}
 }
 

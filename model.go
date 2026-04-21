@@ -3566,6 +3566,13 @@ func (m model) wizardLines(width int) []string {
 				appendStyledWizardLine(&lines, line, width)
 			}
 		}
+		if normalizedJailType(m.wizard.values.JailType) == "linux" {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Linux prerequisites"))
+			for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
+				appendStyledWizardLine(&lines, line, width)
+			}
+		}
 		if shouldShowRacctPrereqs(m.wizard.racctPrereqs) {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Resource limit prerequisites"))
@@ -3705,6 +3712,14 @@ func (m model) wizardFieldEntryLayout(width int, inlineHelp bool) ([]string, int
 		}
 	}
 
+	if inlineHelp && wizardShowsLinuxPrereqs(m.wizard.currentStep()) {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
+		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
+	}
+
 	if inlineHelp && shouldShowRacctPrereqs(m.wizard.racctPrereqs) && wizardShowsRacctPrereqs(m.wizard.currentStep()) {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("Resource limit prerequisites"))
@@ -3773,6 +3788,12 @@ func (m model) wizardFieldContextLines(width int) []string {
 	if wizardFieldUsesNetworkContext(field.ID) && shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
 		appendSection(&lines, width, "Host checks")
 		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+			appendWrappedStyledWizardLine(&lines, line, width)
+		}
+	}
+	if wizardFieldUsesLinuxContext(field.ID) {
+		appendSection(&lines, width, "Host checks")
+		for _, line := range linuxWizardContextLines(m.wizard.linuxPrereqs) {
 			appendWrappedStyledWizardLine(&lines, line, width)
 		}
 	}
@@ -4191,7 +4212,7 @@ func racctWizardPrereqLines(prereqs RacctWizardPrereqs) []string {
 	return lines
 }
 
-func wizardsShowsLinuxPrereqs(step wizardStep) bool {
+func wizardShowsLinuxPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
 		case "linux_preset", "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
