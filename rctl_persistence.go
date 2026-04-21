@@ -51,10 +51,6 @@ func hasAnyRctlLimits(values jailWizardValues) bool {
 		strings.TrimSpace(values.ProcessLimit) != ""
 }
 
-func effectiveRctlLimitMode(values jailWizardValues) string {
-	return "persistent"
-}
-
 func collectRacctStatus() RacctStatus {
 	status := RacctStatus{}
 	out, err := exec.Command("sysctl", "-n", "kern.racct.enable").CombinedOutput()
@@ -109,15 +105,16 @@ func readLoaderConfValue(key string) (string, error) {
 	return last, nil
 }
 
-func validateRacctPreflight(values jailWizardValues) error {
-	if !hasAnyRctlLimits(values) {
-		return nil
+type RacctWizardPrereqs struct {
+	Status    RacctStatus
+	HasLimits bool
+}
+
+func collectRacctWizardPrereqs(values jailWizardValues) RacctWizardPrereqs {
+	return RacctWizardPrereqs{
+		Status:    collectRacctStatus(),
+		HasLimits: hasAnyRctlLimits(values),
 	}
-	status := collectRacctStatus()
-	if !status.Enabled {
-		return fmt.Errorf("resource limits require kern.racct.enable=1 and a reboot before rctl limits can be applied")
-	}
-	return nil
 }
 
 func managedRctlRulesForJail(values jailWizardValues, jailName string) []string {

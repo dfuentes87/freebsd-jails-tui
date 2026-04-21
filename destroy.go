@@ -1,4 +1,5 @@
 package main
+
 import "context"
 
 import (
@@ -424,16 +425,6 @@ func destroyResultMessage(result JailDestroyResult) string {
 		return "Destroy failed. Review execution output before retrying."
 	}
 	return fmt.Sprintf("Jail %s destroyed successfully.", result.Name)
-}
-
-func destroyTargetFromDetail(detail JailDetail) Jail {
-	return Jail{
-		Name:     detail.Name,
-		JID:      detail.JID,
-		Path:     detail.Path,
-		Hostname: detail.Hostname,
-		Running:  detail.JID > 0,
-	}
 }
 
 func buildDestroyTarget(target Jail) Jail {

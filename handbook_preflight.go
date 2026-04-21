@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	defaultJailConfPath = "/etc/jail.conf"
-	jailConfDInclude    = `.include "/etc/jail.conf.d/*.conf";`
+	defaultJailConfPath   = "/etc/jail.conf"
+	jailConfDInclude      = `.include "/etc/jail.conf.d/*.conf";`
+	debootstrapScriptsDir = "/usr/local/share/debootstrap/scripts"
 )
 
 var (
@@ -40,6 +41,12 @@ type jailBaseCompatibility struct {
 	Err           error
 }
 
+type linuxBootstrapReleaseSupport struct {
+	Release string
+	Status  string
+	Detail  string
+}
+
 func validateJailCreateHostPreflight(values jailWizardValues) (string, error) {
 	if err := jailConfDIncludePreflightError(); err != nil {
 		return "", err
@@ -48,10 +55,88 @@ func validateJailCreateHostPreflight(values jailWizardValues) (string, error) {
 	if compatibility.Err != nil {
 		return "template_release", compatibility.Err
 	}
-	if err := validateRacctPreflight(values); err != nil {
-		return "cpu_percent", err
+	if err := validateLinuxBootstrapReleaseSupport(values); err != nil {
+		return "linux_release", err
+	}
+	if normalizedJailType(values.JailType) == "linux" {
+		if err := collectLinuxHostCapabilityStatus().blockingError(); err != nil {
+			return "linux_bootstrap", err
+		}
 	}
 	return "", nil
+}
+
+func validateLinuxBootstrapReleaseValue(raw string) error {
+	release := strings.TrimSpace(raw)
+	if release == "" {
+		return fmt.Errorf("bootstrap release is required")
+	}
+	if !jailNamePattern.MatchString(release) {
+		return fmt.Errorf("bootstrap release must use letters, numbers, dot, underscore, or dash")
+	}
+	return nil
+}
+
+func validateLinuxBootstrapReleaseSupport(values jailWizardValues) error {
+	support := collectLinuxBootstrapReleaseSupport(values)
+	if support.Status == "unsupported" {
+		return fmt.Errorf("%s", support.Detail)
+	}
+	return nil
+}
+
+func collectLinuxBootstrapReleaseSupport(values jailWizardValues) linuxBootstrapReleaseSupport {
+	support := linuxBootstrapReleaseSupport{
+		Release: strings.TrimSpace(effectiveLinuxRelease(values)),
+	}
+	if normalizedJailType(values.JailType) != "linux" {
+		return support
+	}
+	if effectiveLinuxBootstrapMethod(values) != "debootstrap" {
+		support.Status = "not_applicable"
+		support.Detail = "Bootstrap release validation is not used for archive bootstrap."
+		return support
+	}
+	if err := validateLinuxBootstrapReleaseValue(support.Release); err != nil {
+		support.Status = "unsupported"
+		support.Detail = err.Error()
+		return support
+	}
+	info, err := os.Stat(debootstrapScriptsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			support.Status = "unknown"
+			debootstrap := collectHostDebootstrapStatus()
+			if !debootstrap.Installed {
+				support.Detail = "Host debootstrap is not installed, so bootstrap release support cannot be verified early."
+			} else {
+				support.Detail = "Host debootstrap scripts are unavailable, so bootstrap release support cannot be verified early."
+			}
+			return support
+		}
+		support.Status = "unknown"
+		support.Detail = fmt.Sprintf("Failed to inspect host debootstrap scripts: %v", err)
+		return support
+	}
+	if !info.IsDir() {
+		support.Status = "unknown"
+		support.Detail = fmt.Sprintf("%s is not a directory", debootstrapScriptsDir)
+		return support
+	}
+	scriptPath := filepath.Join(debootstrapScriptsDir, support.Release)
+	if _, err := os.Stat(scriptPath); err != nil {
+		if os.IsNotExist(err) {
+			support.Status = "unsupported"
+			support.Detail = fmt.Sprintf("host debootstrap does not support bootstrap release %q; choose a supported release or update debootstrap", support.Release)
+			return support
+		}
+		support.Status = "unknown"
+		support.Detail = fmt.Sprintf("Failed to inspect debootstrap support for release %q: %v", support.Release, err)
+		return support
+	}
+	support.Status = "supported"
+	support.Detail = fmt.Sprintf("Host debootstrap supports bootstrap release %q.", support.Release)
+	return support
 }
 
 func collectJailConfDIncludeStatus() jailConfIncludeStatus {

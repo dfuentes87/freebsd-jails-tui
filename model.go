@@ -71,6 +71,9 @@ var (
 	wizardErrorStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("196"))
+	wizardWarningStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("226"))
 )
 
 type snapshotMsg struct {
@@ -166,9 +169,14 @@ type zfsPropertyApplyMsg struct {
 type tickMsg time.Time
 
 type downloadProgressMsg struct {
-	Read  int64
-	Total int64
-	Done  bool
+	Read      int64
+	Total     int64
+	Done      bool
+	Step      int
+	StepTotal int
+	Phase     string
+	Detail    string
+	LogLine   string
 }
 
 type screenMode int
@@ -291,6 +299,11 @@ type model struct {
 	wizard             jailCreationWizard
 	wizardApplying     bool
 	wizardCancel       context.CancelFunc
+	wizardApplyStarted time.Time
+	wizardPhaseStep    int
+	wizardPhaseTotal   int
+	wizardPhaseLabel   string
+	wizardPhaseDetail  string
 	downloading        bool
 	downloadRead       int64
 	downloadTotal      int64
@@ -612,12 +625,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.downloading = false
 			return m, nil
 		}
-		m.downloading = true
-		m.downloadRead = msg.Read
-		m.downloadTotal = msg.Total
+		if msg.Step > 0 {
+			m.wizardPhaseStep = msg.Step
+		}
+		if msg.StepTotal > 0 {
+			m.wizardPhaseTotal = msg.StepTotal
+		}
+		if strings.TrimSpace(msg.Phase) != "" {
+			m.wizardPhaseLabel = strings.TrimSpace(msg.Phase)
+		}
+		if strings.TrimSpace(msg.Detail) != "" {
+			m.wizardPhaseDetail = strings.TrimSpace(msg.Detail)
+		}
+		if strings.TrimSpace(msg.LogLine) != "" {
+			m.wizard.executionLogs = append(m.wizard.executionLogs, strings.TrimRight(msg.LogLine, "\n"))
+		}
+		if msg.Read > 0 || msg.Total > 0 {
+			m.downloading = true
+			m.downloadRead = msg.Read
+			m.downloadTotal = msg.Total
+		}
 		return m, waitForProgress(m.progressChan)
 	case wizardApplyMsg:
 		m.wizardApplying = false
+		m.wizardApplyStarted = time.Time{}
+		m.wizardPhaseStep = 0
+		m.wizardPhaseTotal = 0
+		m.wizardPhaseLabel = ""
+		m.wizardPhaseDetail = ""
 		m.downloading = false
 		m.wizard.setExecutionResult(msg.result)
 		if msg.result.Err == nil {
@@ -630,6 +665,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 			return m, pollCmd()
 		}
+		m.wizardScroll = 1 << 30
+		m.boundWizardScroll()
 		return m, nil
 	case destroyApplyMsg:
 		m.destroy.applying = false
@@ -1014,7 +1051,7 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor -= m.listHeight()
 	case "r":
 		return m, pollCmd()
-	case "c", "n":
+	case "c":
 		m.mode = screenCreateWizard
 		m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 		m.wizardScroll = 0
@@ -1263,10 +1300,23 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailErr = fmt.Errorf("linux bootstrap retry is only available for linux jails")
 			return m, nil
 		}
+		values := linuxBootstrapConfigFromRawLines(m.detail.JailConfRaw)
 		jail, ok := m.detailJail()
-		if !ok || jail.JID <= 0 {
-			m.detailErr = fmt.Errorf("linux bootstrap retry requires the jail to be running")
-			return m, nil
+		switch effectiveLinuxBootstrapMethod(values) {
+		case "archive":
+			if !ok || strings.TrimSpace(m.detail.Path) == "" {
+				m.detailErr = fmt.Errorf("archive bootstrap retry requires a known jail path")
+				return m, nil
+			}
+			if jail.JID > 0 {
+				m.detailErr = fmt.Errorf("archive bootstrap retry requires the jail to be stopped")
+				return m, nil
+			}
+		default:
+			if !ok || jail.JID <= 0 {
+				m.detailErr = fmt.Errorf("linux bootstrap retry requires the jail to be running")
+				return m, nil
+			}
 		}
 		m.detailErr = nil
 		m.detailNotice = "Retrying Linux bootstrap..."
@@ -1514,6 +1564,24 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "j":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll++
+			m.boundWizardScroll()
+			return m, nil
+		}
+	case "k":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll--
+			m.boundWizardScroll()
+			return m, nil
+		}
+	case "p", "P":
+		if m.wizard.isConfirmationStep() {
+			m.wizard.showJailConfPreview = !m.wizard.showJailConfPreview
+			m.boundWizardScroll()
+			return m, nil
+		}
 	case "space", " ":
 		if !m.wizardApplying && !m.wizard.isConfirmationStep() {
 			if field, ok := m.wizard.activeField(); ok && field.ID == "note" {
@@ -1558,6 +1626,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureWizardFieldVisible()
 		return m, nil
 	case "tab", "down":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll++
+			m.boundWizardScroll()
+			return m, nil
+		}
 		if m.wizardApplying {
 			return m, nil
 		}
@@ -1565,6 +1638,11 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureWizardFieldVisible()
 		return m, nil
 	case "shift+tab", "up":
+		if m.wizard.isConfirmationStep() || m.wizardApplying {
+			m.wizardScroll--
+			m.boundWizardScroll()
+			return m, nil
+		}
 		if m.wizardApplying {
 			return m, nil
 		}
@@ -1572,27 +1650,21 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureWizardFieldVisible()
 		return m, nil
 	case "pgdown":
-		if m.wizardApplying {
-			return m, nil
-		}
 		m.wizardScroll += m.wizardBodyHeight()
 		m.boundWizardScroll()
 		return m, nil
 	case "pgup":
-		if m.wizardApplying {
-			return m, nil
-		}
 		m.wizardScroll -= m.wizardBodyHeight()
 		m.boundWizardScroll()
 		return m, nil
 	case "home":
-		if m.wizardApplying {
+		if m.wizardApplying && !m.wizard.isConfirmationStep() {
 			return m, nil
 		}
 		m.wizardScroll = 0
 		return m, nil
 	case "end":
-		if m.wizardApplying {
+		if m.wizardApplying && !m.wizard.isConfirmationStep() {
 			return m, nil
 		}
 		m.wizardScroll = 1 << 30
@@ -1658,6 +1730,12 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wizard.clearValidationError()
 			m.wizard.message = "Applying creation plan..."
 			m.wizardApplying = true
+			m.wizardApplyStarted = time.Now()
+			m.wizardPhaseStep = 0
+			m.wizardPhaseTotal = 0
+			m.wizardPhaseLabel = "Preparing jail creation"
+			m.wizardPhaseDetail = "Running final validations and starting background work."
+			m.wizardScroll = 0
 			m.downloading = false
 			m.downloadRead = 0
 			m.downloadTotal = 0
@@ -2503,7 +2581,7 @@ func helpTabs() []helpTabContent {
 						{Keys: "r", Action: "refresh selected jail details"},
 						{Keys: "R", Action: "restart this jail"},
 						{Keys: "u", Action: "open the guided upgrade wizard for this jail"},
-						{Keys: "b", Action: "retry linux bootstrap for a running linux jail"},
+						{Keys: "b", Action: "retry linux bootstrap (running for debootstrap, stopped for archive)"},
 						{Keys: "z", Action: "open the ZFS integration panel"},
 						{Keys: "x", Action: "open destroy confirmation for this jail"},
 						{Keys: "esc", Action: "return to the dashboard"},
@@ -2542,7 +2620,7 @@ func helpTabs() []helpTabContent {
 					},
 					Notes: []string{
 						"Startup order updates rc.conf jail_list; dependency settings write depend in jail.conf.",
-						"Linux setup supports default or custom bootstrap mirrors, and retry reuses the saved mirror choice.",
+						"Linux setup supports debootstrap mirrors or archive sources, and retry reuses the saved bootstrap settings.",
 						"VNET preflight checks bridge and uplink state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create.",
 					},
 				},
@@ -2858,7 +2936,7 @@ func (m model) wizardFooterHint() string {
 		hint = "type to edit | tab/shift+tab/up/down: fields | pgup/pgdown: scroll | ctrl+u: userland select | ctrl+t: template manager | enter/right: next | left: back | ?: help | esc: cancel | ctrl+c: quit"
 	}
 	if m.wizard.isConfirmationStep() {
-		hint = "pgup/pgdown: scroll | enter: create jail now | left: back | s: save tmpl | l: load tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
+		hint = "j/k or up/down: scroll | pgup/pgdown | p: jail.conf | enter: create | left: back | s/l: tmpl | ?: help | esc: cancel | q: quit | ctrl+c: quit"
 	}
 	if m.wizard.templateMode == wizardTemplateModeSave {
 		hint = "Template save: type name | enter: save | backspace: edit | esc: cancel | ctrl+c: quit"
@@ -2876,7 +2954,7 @@ func (m model) wizardFooterHint() string {
 		hint = "Creating template dataset... please wait | ctrl+c: quit"
 	}
 	if m.wizardApplying {
-		hint = "Applying changes... please wait | c: cancel | ctrl+c: quit"
+		hint = "creating jail... j/k or pgup/pgdown: scroll | c: cancel | ctrl+c: quit"
 	}
 	return hint
 }
@@ -3371,6 +3449,21 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSeconds := int(d.Round(time.Second) / time.Second)
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	if minutes >= 60 {
+		hours := minutes / 60
+		minutes = minutes % 60
+		return fmt.Sprintf("%dh%02dm%02ds", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
+}
+
 // ... skipping to wizardLines
 func (m model) wizardLines(width int) []string {
 	step := m.wizard.currentStep()
@@ -3450,6 +3543,22 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.summaryLines() {
 			lines = append(lines, truncate(line, width))
 		}
+		if m.wizardApplying {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Status"))
+			if m.wizardPhaseTotal > 0 && m.wizardPhaseStep > 0 {
+				lines = append(lines, truncate(fmt.Sprintf("[%d/%d] %s", m.wizardPhaseStep, m.wizardPhaseTotal, valueOrDash(m.wizardPhaseLabel)), width))
+			} else {
+				lines = append(lines, truncate(valueOrDash(m.wizardPhaseLabel), width))
+			}
+			if strings.TrimSpace(m.wizardPhaseDetail) != "" {
+				lines = append(lines, truncate(m.wizardPhaseDetail, width))
+			}
+			if !m.wizardApplyStarted.IsZero() {
+				lines = append(lines, truncate("Elapsed: "+formatElapsed(time.Since(m.wizardApplyStarted)), width))
+			}
+			lines = append(lines, truncate("Creation is running in the background. Linux bootstrap and package installation can take a while.", width))
+		}
 		if shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Network prerequisites"))
@@ -3457,10 +3566,31 @@ func (m model) wizardLines(width int) []string {
 				appendStyledWizardLine(&lines, line, width)
 			}
 		}
+		if normalizedJailType(m.wizard.values.JailType) == "linux" {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Linux prerequisites"))
+			for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
+				appendStyledWizardLine(&lines, line, width)
+			}
+		}
+		if shouldShowRacctPrereqs(m.wizard.racctPrereqs) {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Resource limit prerequisites"))
+			for _, line := range racctWizardPrereqLines(m.wizard.racctPrereqs) {
+				appendStyledWizardLine(&lines, line, width)
+			}
+		}
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("jail.conf preview"))
-		for _, line := range m.wizard.jailConfPreviewLines() {
-			appendWrappedLiteralLine(&lines, line, width)
+		if m.wizard.showJailConfPreview {
+			lines = append(lines, truncate("Press p to hide the generated jail.conf preview.", width))
+			lines = append(lines, "")
+			for _, line := range m.wizard.jailConfPreviewLines() {
+				appendWrappedLiteralLine(&lines, line, width)
+			}
+		} else {
+			lines = append(lines, truncate("Generated jail.conf is available for preview.", width))
+			lines = append(lines, truncate("Press p to show it.", width))
 		}
 		if m.wizardApplying {
 			if m.downloading && m.downloadTotal > 0 {
@@ -3582,6 +3712,22 @@ func (m model) wizardFieldEntryLayout(width int, inlineHelp bool) ([]string, int
 		}
 	}
 
+	if inlineHelp && wizardShowsLinuxPrereqs(m.wizard.currentStep()) {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Linux prerequisites"))
+		for _, line := range linuxWizardPrereqLines(m.wizard.linuxPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
+	}
+
+	if inlineHelp && shouldShowRacctPrereqs(m.wizard.racctPrereqs) && wizardShowsRacctPrereqs(m.wizard.currentStep()) {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Resource limit prerequisites"))
+		for _, line := range racctWizardPrereqLines(m.wizard.racctPrereqs) {
+			appendStyledWizardLine(&lines, line, width)
+		}
+	}
+
 	return lines, activeLine
 }
 
@@ -3642,6 +3788,12 @@ func (m model) wizardFieldContextLines(width int) []string {
 	if wizardFieldUsesNetworkContext(field.ID) && shouldShowNetworkPrereqs(m.wizard.networkPrereqs) {
 		appendSection(&lines, width, "Host checks")
 		for _, line := range networkWizardPrereqLines(m.wizard.networkPrereqs) {
+			appendWrappedStyledWizardLine(&lines, line, width)
+		}
+	}
+	if wizardFieldUsesLinuxContext(field.ID) {
+		appendSection(&lines, width, "Host checks")
+		for _, line := range linuxWizardContextLines(m.wizard.linuxPrereqs) {
 			appendWrappedStyledWizardLine(&lines, line, width)
 		}
 	}
@@ -3772,6 +3924,9 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"bridge0",
 				"bridge1",
 			},
+			Notes: []string{
+				"Do not enable spanning tree by default for a simple jail bridge. It is only useful when the bridge participates in a Layer 2 loop or multiple redundant paths, and enabling it adds forwarding delay.",
+			},
 		}
 	case "bridge_policy":
 		return wizardFieldGuide{
@@ -3791,7 +3946,8 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"persistent to manage rc.conf bridge settings before jail creation",
 			},
 			Notes: []string{
-				"Persistent mode is safety-biased. It refuses to overwrite conflicting rc.conf values for the bridge or uplink.",
+				"Persistent mode manages cloned_interfaces and bridge settings in rc.conf.",
+				"Existing uplink interface settings are preserved instead of being overwritten.",
 			},
 		}
 	case "uplink":
@@ -3906,23 +4062,49 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 				"Each target path is cleaned before validation. After resolving . and .. segments, it still has to point somewhere under the jail root; paths that escape to locations like / or /etc are rejected.",
 			},
 		}
+	case "linux_preset":
+		return wizardFieldGuide{
+			Purpose: "Optional distro preset that pre-fills the Linux bootstrap family and method.",
+			Format:  "custom, alpine, or rocky.",
+			Examples: []string{
+				"custom",
+				"alpine",
+				"rocky",
+			},
+			Notes: []string{
+				"Preset values still allow manual archive source overrides.",
+			},
+		}
 	case "linux_distro":
 		return wizardFieldGuide{
-			Purpose: "Bootstrap family passed to debootstrap and used for the compat root name.",
-			Format:  "Free-form family name. Ubuntu and Debian have built-in default mirrors; other families require a custom mirror.",
+			Purpose: "Bootstrap family used for the compat root name under /compat.",
+			Format:  "Free-form family name.",
 			Examples: []string{
 				"ubuntu",
 				"debian",
-				"devuan",
+				"alpine",
+			},
+		}
+	case "linux_bootstrap_method":
+		return wizardFieldGuide{
+			Purpose: "Choose how Linux userland is populated inside the jail.",
+			Format:  "debootstrap or archive.",
+			Examples: []string{
+				"debootstrap",
+				"archive",
 			},
 		}
 	case "linux_release":
 		return wizardFieldGuide{
 			Purpose: "Free-form codename, suite, or release string passed directly to debootstrap.",
 			Examples: []string{
-				"noble",
+				"jammy",
 				"bookworm",
 				"trixie",
+			},
+			Notes: []string{
+				"Only used when bootstrap method is debootstrap.",
+				"Bootstrap mode auto only proceeds when the host can verify that debootstrap supports the selected release.",
 			},
 		}
 	case "linux_bootstrap":
@@ -3930,13 +4112,13 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 			Purpose: "Choose whether Linux userland should be bootstrapped immediately after jail creation.",
 			Format:  "auto or skip.",
 			Examples: []string{
-				"auto to run networking preflight and debootstrap now",
+				"auto to run networking preflight and bootstrap now",
 				"skip to create the jail first and retry later from detail view",
 			},
 		}
 	case "linux_mirror_mode":
 		return wizardFieldGuide{
-			Purpose: "Choose whether bootstrap uses the built-in distro mirror or a custom base URL.",
+			Purpose: "Choose whether debootstrap uses the built-in distro mirror or a custom base URL.",
 			Format:  "default or custom. default only works for bootstrap families ubuntu and debian.",
 			Examples: []string{
 				"default",
@@ -3945,14 +4127,27 @@ func (m model) wizardFieldGuide(field wizardField) wizardFieldGuide {
 		}
 	case "linux_mirror_url":
 		return wizardFieldGuide{
-			Purpose: "Base repository URL used for Linux bootstrap, readiness checks, and retry.",
+			Purpose: "Base repository URL used for debootstrap, readiness checks, and retry.",
 			Format:  "http or https base URL with a host.",
 			Examples: []string{
 				"https://archive.ubuntu.com/ubuntu",
 				"https://deb.debian.org/debian",
 			},
 			Notes: []string{
+				"Only used when bootstrap method is debootstrap and mirror mode is custom.",
 				"Enter the repository base URL, not a full Release file URL.",
+			},
+		}
+	case "linux_archive_url":
+		return wizardFieldGuide{
+			Purpose: "Rootfs archive source used for archive bootstrap, readiness checks, and retry.",
+			Format:  "http/https URL, file URL, or absolute local path pointing to .tar, .tar.gz, .tgz, or .tar.xz.",
+			Examples: []string{
+				"https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.4-x86_64.tar.gz",
+				"/usr/local/jails/media/alpine-minirootfs-3.23.4-x86_64.tar.gz",
+			},
+			Notes: []string{
+				"Only used when bootstrap method is archive.",
 			},
 		}
 	default:
@@ -3971,17 +4166,56 @@ func wizardFieldUsesNetworkContext(id string) bool {
 
 func wizardFieldUsesLinuxContext(id string) bool {
 	switch id {
-	case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
+	case "linux_preset", "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
 		return true
 	default:
 		return false
 	}
 }
 
-func wizardsShowsLinuxPrereqs(step wizardStep) bool {
+func wizardShowsRacctPrereqs(step wizardStep) bool {
 	for _, field := range step.Fields {
 		switch field.ID {
-		case "linux_distro", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url":
+		case "cpu_percent", "memory_limit", "process_limit":
+			return true
+		}
+	}
+	return false
+}
+
+func shouldShowRacctPrereqs(prereqs RacctWizardPrereqs) bool {
+	if !prereqs.HasLimits {
+		return false
+	}
+	if !prereqs.Status.Enabled || prereqs.Status.ReadError != "" {
+		return true
+	}
+	return false
+}
+
+func racctWizardPrereqLines(prereqs RacctWizardPrereqs) []string {
+	if !prereqs.HasLimits {
+		return []string{"No resource limits configured."}
+	}
+	lines := []string{}
+	if prereqs.Status.ReadError != "" {
+		lines = append(lines, "Warning: failed to inspect kern.racct.enable: "+prereqs.Status.ReadError)
+	} else if !prereqs.Status.Enabled {
+		if prereqs.Status.LoaderConfigured {
+			lines = append(lines, "Warning: kern.racct.enable is configured but the system requires a manual reboot before rctl limits can be applied.")
+		} else {
+			lines = append(lines, "Warning: resource limits require kern.racct.enable=1 and a manual reboot before rctl limits can be applied.")
+		}
+	} else {
+		lines = append(lines, "kern.racct.enable is active.")
+	}
+	return lines
+}
+
+func wizardShowsLinuxPrereqs(step wizardStep) bool {
+	for _, field := range step.Fields {
+		switch field.ID {
+		case "linux_preset", "linux_distro", "linux_bootstrap_method", "linux_release", "linux_bootstrap", "linux_mirror_mode", "linux_mirror_url", "linux_archive_url":
 			return true
 		}
 	}
@@ -4013,6 +4247,9 @@ func shouldShowNetworkPrereqs(prereqs NetworkWizardPrereqs) bool {
 
 func appendStyledWizardLine(lines *[]string, text string, width int) {
 	if looksLikeWarningText(text) {
+		*lines = append(*lines, wizardWarningStyle.Render(truncate(text, width)))
+		return
+	} else if looksLikeErrorText(text) {
 		*lines = append(*lines, wizardErrorStyle.Render(truncate(text, width)))
 		return
 	}
@@ -4022,6 +4259,9 @@ func appendStyledWizardLine(lines *[]string, text string, width int) {
 func appendWrappedStyledWizardLine(lines *[]string, text string, width int) {
 	for _, line := range wrapText(text, max(8, width)) {
 		if looksLikeWarningText(text) {
+			*lines = append(*lines, wizardWarningStyle.Render(line))
+			continue
+		} else if looksLikeErrorText(text) {
 			*lines = append(*lines, wizardErrorStyle.Render(line))
 			continue
 		}
@@ -4055,14 +4295,36 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(prereqs.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
-		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
-		fmt.Sprintf("Bootstrap mirror host: %s", valueOrDash(prereqs.MirrorHost)),
+		fmt.Sprintf("Bootstrap method: %s", valueOrDash(prereqs.BootstrapMethod)),
+		fmt.Sprintf("Bootstrap preset: %s", valueOrDash(prereqs.BootstrapPreset)),
+		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
+		fmt.Sprintf("Bootstrap source host: %s", valueOrDash(prereqs.MirrorHost)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
-		"Auto bootstrap requires a running jail plus working route, DNS, and fetch access inside the jail.",
+		"Auto bootstrap requires source access using the selected method.",
 		"Skip mode creates the jail without bootstrapping; use b in jail detail to retry later.",
 	}
+	if linuxBootstrapUsesLocalSource(prereqs.BootstrapMethod, prereqs.MirrorHost, prereqs.PreflightURL) {
+		lines = append(lines, "Local archive sources skip route, DNS, and fetch preflight checks.")
+	}
+	if prereqs.BootstrapMethod == "debootstrap" {
+		lines = append(lines,
+			fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)),
+			fmt.Sprintf("debootstrap scripts present: %s", yesNoText(prereqs.Debootstrap.ScriptsPresent)),
+		)
+	}
+	switch prereqs.ReleaseSupport {
+	case "supported":
+		lines = append(lines, "Bootstrap release support: verified")
+	case "unsupported":
+		lines = append(lines, "Warning: bootstrap release support: unsupported")
+	case "unknown":
+		lines = append(lines, "Warning: bootstrap release support could not be verified early")
+	}
+	if prereqs.ReleaseSupportMsg != "" && prereqs.ReleaseSupport != "not_applicable" {
+		lines = append(lines, prereqs.ReleaseSupportMsg)
+	}
 	if prereqs.ResolveError != "" {
-		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
+		lines = append(lines, "Bootstrap source resolution: "+prereqs.ResolveError)
 	}
 	if prereqs.Host.EnableReadError != "" {
 		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
@@ -4072,6 +4334,19 @@ func linuxWizardPrereqLines(prereqs LinuxWizardPrereqs) []string {
 	}
 	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
 		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
+	}
+	if prereqs.BootstrapMethod == "debootstrap" && strings.TrimSpace(prereqs.Debootstrap.CheckError) != "" {
+		lines = append(lines, "Host debootstrap check: "+prereqs.Debootstrap.CheckError)
+	}
+	lines = append(lines,
+		fmt.Sprintf("linux64 support: %s", yesNoText(prereqs.Capabilities.Linux64Available)),
+		fmt.Sprintf("fdescfs support: %s", yesNoText(prereqs.Capabilities.FdescfsAvailable)),
+		fmt.Sprintf("linprocfs support: %s", yesNoText(prereqs.Capabilities.LinprocfsAvailable)),
+		fmt.Sprintf("linsysfs support: %s", yesNoText(prereqs.Capabilities.LinsysfsAvailable)),
+		fmt.Sprintf("tmpfs support: %s", yesNoText(prereqs.Capabilities.TmpfsAvailable)),
+	)
+	for _, err := range prereqs.Capabilities.Errors {
+		lines = append(lines, "Warning: "+err)
 	}
 	return lines
 }
@@ -4080,13 +4355,32 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 	lines := []string{
 		fmt.Sprintf("Host linux_enable configured: %s (%s)", yesNoText(prereqs.Host.EnableConfigured), valueOrDash(prereqs.Host.EnableValue)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(prereqs.Host.ServiceRunning)),
-		fmt.Sprintf("Effective mirror URL: %s", valueOrDash(prereqs.MirrorURL)),
+		fmt.Sprintf("Bootstrap method: %s", valueOrDash(prereqs.BootstrapMethod)),
+		fmt.Sprintf("Bootstrap preset: %s", valueOrDash(prereqs.BootstrapPreset)),
+		fmt.Sprintf("Bootstrap source URL: %s", valueOrDash(prereqs.MirrorURL)),
 		fmt.Sprintf("Bootstrap preflight URL: %s", valueOrDash(prereqs.PreflightURL)),
-		"Auto bootstrap requires route, DNS, and fetch access inside the running jail.",
+		"Auto bootstrap requires source access using the selected method.",
 		"Skip mode creates the jail first; use b in jail detail to retry bootstrap later.",
 	}
+	if linuxBootstrapUsesLocalSource(prereqs.BootstrapMethod, prereqs.MirrorHost, prereqs.PreflightURL) {
+		lines = append(lines, "Local archive sources skip route, DNS, and fetch preflight checks.")
+	}
+	if prereqs.BootstrapMethod == "debootstrap" {
+		lines = append(lines, fmt.Sprintf("Host debootstrap installed: %s", yesNoText(prereqs.Debootstrap.Installed)))
+	}
+	switch prereqs.ReleaseSupport {
+	case "supported":
+		lines = append(lines, "Bootstrap release support: verified")
+	case "unsupported":
+		lines = append(lines, "Warning: bootstrap release is not supported by host debootstrap")
+	case "unknown":
+		lines = append(lines, "Warning: bootstrap release support could not be verified early")
+	}
+	if prereqs.ReleaseSupportMsg != "" && prereqs.ReleaseSupport != "not_applicable" {
+		lines = append(lines, prereqs.ReleaseSupportMsg)
+	}
 	if prereqs.ResolveError != "" {
-		lines = append(lines, "Mirror resolution: "+prereqs.ResolveError)
+		lines = append(lines, "Bootstrap source resolution: "+prereqs.ResolveError)
 	}
 	if prereqs.Host.EnableReadError != "" {
 		lines = append(lines, "Host linux_enable check: "+prereqs.Host.EnableReadError)
@@ -4096,6 +4390,12 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 	}
 	if prereqs.Host.ServicePresent && prereqs.Host.ServiceStatusErr != "" && !prereqs.Host.ServiceRunning {
 		lines = append(lines, "Linux service status: "+prereqs.Host.ServiceStatusErr)
+	}
+	if !prereqs.Capabilities.Linux64Available || !prereqs.Capabilities.FdescfsAvailable || !prereqs.Capabilities.LinprocfsAvailable || !prereqs.Capabilities.LinsysfsAvailable || !prereqs.Capabilities.TmpfsAvailable {
+		lines = append(lines, "Warning: required Linux host support is missing")
+	}
+	for _, err := range prereqs.Capabilities.Errors {
+		lines = append(lines, err)
 	}
 	return lines
 }
@@ -4217,6 +4517,9 @@ func (m model) detailLines(width int) []string {
 		if len(m.detail.NetworkSummary.Validation) > 0 {
 			for _, line := range m.detail.NetworkSummary.Validation {
 				if looksLikeWarningText(line) {
+					lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
+					continue
+				} else if looksLikeErrorText(line) {
 					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 					continue
 				}
@@ -4246,10 +4549,10 @@ func (m model) detailLines(width int) []string {
 	if m.detail.RctlConfig != nil {
 		lines = append(lines, renderKeyValueLines(width,
 			[2]string{"Limit mode", valueOrDash(m.detail.RctlConfig.Mode)},
-			[2]string{"Configured CPU %", valueOrDash(m.detail.RctlConfig.CPUPercent)},
-			[2]string{"Configured memory", valueOrDash(m.detail.RctlConfig.MemoryLimit)},
-			[2]string{"Configured max processes", valueOrDash(m.detail.RctlConfig.ProcessLimit)},
-			[2]string{"Persistent block in /etc/rctl.conf", yesNoText(m.detail.RctlConfig.Persistent)},
+			[2]string{"Max CPU %", valueOrDash(m.detail.RctlConfig.CPUPercent)},
+			[2]string{"Max memory", valueOrDash(m.detail.RctlConfig.MemoryLimit)},
+			[2]string{"Max processes", valueOrDash(m.detail.RctlConfig.ProcessLimit)},
+			[2]string{"rctl.conf block", yesNoText(m.detail.RctlConfig.Persistent)},
 		)...)
 		if m.detail.RctlConfig.PersistentErr != "" {
 			lines = append(lines, wizardErrorStyle.Render(truncate("rctl.conf check: "+m.detail.RctlConfig.PersistentErr, width)))
@@ -4264,26 +4567,34 @@ func (m model) detailLines(width int) []string {
 			lines = append(lines, wizardErrorStyle.Render(truncate("racct check: "+m.detail.RacctStatus.ReadError, width)))
 		}
 	}
+	displayRules := visibleRctlRules(m.detail.Name, m.detail.RctlRules, m.detail.RctlConfig)
 	if len(m.detail.RctlRules) == 0 {
 		if m.detail.RctlConfig != nil && m.detail.RctlConfig.Mode == "runtime" {
 			lines = append(lines, truncate("No live rctl rules. Runtime-only limits apply only while the jail is running.", width))
 		} else {
 			lines = append(lines, truncate("No matching rctl rules.", width))
 		}
-	} else {
-		for _, rule := range m.detail.RctlRules {
-			lines = append(lines, truncate(rule, width))
+	} else if len(displayRules) > 0 {
+		for idx, rule := range displayRules {
+			lines = append(lines, renderKeyValueLines(width, [2]string{fmt.Sprintf("Active rule %d", idx+1), rule})...)
 		}
 	}
 
 	if m.detail.LinuxReadiness != nil {
 		appendSectionWithStyle(&lines, width, detailSectionStyle, "Linux readiness")
+		linuxLabelWidth := 24
+		if width < 72 {
+			linuxLabelWidth = 20
+		}
 		for _, line := range m.linuxReadinessLines() {
-			if looksLikeWarningText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
+			if looksLikeWarningText(line) {
+				lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
+				continue
+			} else if looksLikeErrorText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
 				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
 				continue
 			}
-			lines = append(lines, truncate(line, width))
+			lines = append(lines, renderInformationalKeyValueWithLabelWidth(width, linuxLabelWidth, line)...)
 		}
 	}
 
@@ -4344,26 +4655,65 @@ func (m model) linuxReadinessLines() []string {
 	}
 	readiness := m.detail.LinuxReadiness
 	lines := []string{
-		fmt.Sprintf("Host linux_enable: %s", valueOrDash(readiness.Host.EnableValue)),
+		fmt.Sprintf("Host linux_enable: %s", normalizedBoolishValue(readiness.Host.EnableValue)),
 		fmt.Sprintf("Host ABI configured: %s", yesNoText(readiness.Host.EnableConfigured)),
 		fmt.Sprintf("Linux service present: %s", yesNoText(readiness.Host.ServicePresent)),
 		fmt.Sprintf("Linux service running: %s", yesNoText(readiness.Host.ServiceRunning)),
+		fmt.Sprintf("Bootstrap preset: %s", valueOrDash(readiness.BootstrapPreset)),
 		fmt.Sprintf("Bootstrap family: %s", valueOrDash(readiness.BootstrapFamily)),
+		fmt.Sprintf("Bootstrap method: %s", valueOrDash(readiness.BootstrapMethod)),
 		fmt.Sprintf("Compat root: %s", valueOrDash(readiness.CompatRoot)),
 		fmt.Sprintf("Bootstrap mode: %s", valueOrDash(readiness.BootstrapMode)),
-		fmt.Sprintf("Mirror URL: %s", valueOrDash(readiness.MirrorURL)),
-		fmt.Sprintf("Mirror host: %s", valueOrDash(readiness.MirrorHost)),
-		fmt.Sprintf("Preflight URL: %s", valueOrDash(readiness.PreflightURL)),
+		fmt.Sprintf("Bootstrap source: %s", valueOrDash(readiness.MirrorURL)),
 		fmt.Sprintf("Linux userland present: %s", yesNoText(readiness.UserlandPresent)),
 	}
+	if len(readiness.CompatMountedPaths) > 0 {
+		lines = append(lines, "Warning: active compat mounts are present.")
+		for idx, path := range readiness.CompatMountedPaths {
+			lines = append(lines, fmt.Sprintf("Active compat mount %d: %s", idx+1, path))
+		}
+	}
+	if linuxBootstrapUsesLocalSource(readiness.BootstrapMethod, readiness.MirrorHost, readiness.PreflightURL) {
+		lines = append(lines, "Local archive source: runtime route, DNS, and fetch checks are skipped.")
+	}
+	if readiness.BootstrapMethod == "debootstrap" {
+		lines = append(lines,
+			fmt.Sprintf("debootstrap scripts: %s", presentMissingText(readiness.Debootstrap.ScriptsPresent)),
+			fmt.Sprintf("Bootstrap release: %s", valueOrDash(readiness.BootstrapRelease)),
+		)
+	}
+	switch readiness.ReleaseSupport {
+	case "supported":
+		lines = append(lines, "Bootstrap release support: verified")
+	case "unsupported":
+		lines = append(lines, "Warning: bootstrap release support: unsupported")
+	case "unknown":
+		lines = append(lines, "Warning: bootstrap release support could not be verified early")
+	}
+	if readiness.ReleaseSupportDetail != "" && readiness.ReleaseSupport != "not_applicable" {
+		lines = append(lines, readiness.ReleaseSupportDetail)
+	}
 	if readiness.MirrorResolveError != "" {
-		lines = append(lines, "Warning: mirror resolution failed: "+readiness.MirrorResolveError)
+		lines = append(lines, "Warning: bootstrap source resolution failed: "+readiness.MirrorResolveError)
 	}
 	if readiness.Host.EnableReadError != "" {
 		lines = append(lines, "Warning: host ABI check failed: "+readiness.Host.EnableReadError)
 	}
+	if readiness.BootstrapMethod == "debootstrap" && strings.TrimSpace(readiness.Debootstrap.CheckError) != "" {
+		lines = append(lines, "Warning: host debootstrap check failed: "+readiness.Debootstrap.CheckError)
+	}
 	for _, reason := range readiness.Host.EnableDrift {
 		lines = append(lines, "Warning: linux_enable drift: "+reason)
+	}
+	lines = append(lines,
+		fmt.Sprintf("linux64 support: %s", yesNoText(readiness.Capabilities.Linux64Available)),
+		fmt.Sprintf("fdescfs support: %s", yesNoText(readiness.Capabilities.FdescfsAvailable)),
+		fmt.Sprintf("linprocfs support: %s", yesNoText(readiness.Capabilities.LinprocfsAvailable)),
+		fmt.Sprintf("linsysfs support: %s", yesNoText(readiness.Capabilities.LinsysfsAvailable)),
+		fmt.Sprintf("tmpfs support: %s", yesNoText(readiness.Capabilities.TmpfsAvailable)),
+	)
+	for _, err := range readiness.Capabilities.Errors {
+		lines = append(lines, "Warning: "+err)
 	}
 	if readiness.RuntimeChecked && readiness.Host.ServicePresent && readiness.Host.ServiceStatusErr != "" && !readiness.Host.ServiceRunning {
 		lines = append(lines, "Warning: linux service status check failed: "+readiness.Host.ServiceStatusErr)
@@ -4837,8 +5187,9 @@ func (m model) renderFooterWithMessage(hint, message string, footerRenderer lipg
 	message = strings.TrimSpace(message)
 	if message != "" {
 		prefixed := ">> " + message
+		renderLine := wizardMessageRenderer(message)
 		for _, line := range wrapText(prefixed, max(8, width-2)) {
-			lines = append(lines, styleWizardMessage(line))
+			lines = append(lines, renderLine(line))
 		}
 	}
 
@@ -5016,7 +5367,7 @@ func statusBadge(running bool) string {
 	return stoppedBadgeStyle.Render("[-]")
 }
 
-func styleWizardMessage(message string) string {
+func wizardMessageRenderer(message string) func(string) string {
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "applying") ||
 		strings.Contains(lower, "creating") ||
@@ -5024,12 +5375,12 @@ func styleWizardMessage(message string) string {
 		strings.Contains(lower, "retrying") ||
 		strings.Contains(lower, "rolling back") ||
 		strings.Contains(lower, "loading detail") {
-		return wizardActionStyle.Render(message)
+		return func(text string) string { return wizardActionStyle.Render(text) }
 	}
 	if looksLikeWarningText(message) {
-		return wizardErrorStyle.Render(message)
+		return func(text string) string { return wizardWarningStyle.Render(text) }
 	}
-	return summaryStyle.Render(message)
+	return func(text string) string { return summaryStyle.Render(text) }
 }
 
 func summarizeCreationWarning(message string) string {
@@ -5037,9 +5388,23 @@ func summarizeCreationWarning(message string) string {
 	lower := strings.ToLower(trimmed)
 	switch {
 	case strings.HasPrefix(lower, "linux bootstrap skipped"):
+		if strings.Contains(lower, "while the jail is stopped") {
+			return "linux archive bootstrap skipped; stop the jail and use detail view action 'b' when ready"
+		}
 		return "linux bootstrap skipped; use detail view action 'b' after networking is ready"
 	case strings.Contains(lower, "linux bootstrap preflight failed"):
 		return "linux bootstrap preflight failed; use detail view action 'b' after fixing networking"
+	case strings.Contains(lower, "requires the jail to be stopped"):
+		return "linux archive bootstrap requires a stopped jail; stop the jail and retry with detail view action 'b'"
+	case strings.Contains(lower, "does not support release"):
+		if release := firstQuotedValue(trimmed); release != "" {
+			return fmt.Sprintf("linux bootstrap failed; debootstrap does not support release %q on this host", release)
+		}
+		return "linux bootstrap failed; debootstrap on this host does not support the selected release"
+	case strings.Contains(lower, "failed to fetch archive bootstrap") || strings.Contains(lower, "failed to extract archive bootstrap"):
+		return "linux bootstrap failed; use detail view action 'b' after fixing networking or archive access"
+	case strings.Contains(lower, "failed to bootstrap") && strings.Contains(lower, " from ") && strings.Contains(lower, "inside linux jail"):
+		return "linux archive bootstrap failed; check debug log and use detail view action 'b' after fixing archive access or filesystem state"
 	case strings.Contains(lower, "failed to bootstrap") || strings.Contains(lower, "failed to install debootstrap"):
 		return "linux bootstrap failed; use detail view action 'b' after fixing package access"
 	default:
@@ -5047,10 +5412,27 @@ func summarizeCreationWarning(message string) string {
 	}
 }
 
+func firstQuotedValue(text string) string {
+	start := strings.IndexByte(text, '"')
+	if start < 0 {
+		return ""
+	}
+	rest := text[start+1:]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
 func looksLikeWarningText(message string) bool {
 	lower := strings.ToLower(message)
-	return strings.Contains(lower, "warning") ||
-		strings.Contains(lower, "failed") ||
+	return strings.Contains(lower, "warning")
+}
+
+func looksLikeErrorText(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "failed") ||
 		strings.Contains(lower, "required") ||
 		strings.Contains(lower, "invalid") ||
 		strings.Contains(lower, "must") ||
@@ -5124,10 +5506,6 @@ func renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth int, blankFa
 	return lines
 }
 
-func renderKeyValue(width, labelWidth int, label, value string) []string {
-	return renderKeyValueWithFallback(width, labelWidth, label, value, "-")
-}
-
 func renderKeyValueWithFallback(width, labelWidth int, label, value, blankFallback string) []string {
 	label = strings.TrimSpace(label)
 	if label == "" {
@@ -5151,14 +5529,6 @@ func renderKeyValueWithFallback(width, labelWidth int, label, value, blankFallba
 	return lines
 }
 
-func renderInformationalKeyValue(width int, line string) []string {
-	labelWidth := 25
-	if width < 72 {
-		labelWidth = 20
-	}
-	return renderInformationalKeyValueWithLabelWidth(width, labelWidth, line)
-}
-
 func renderInformationalKeyValueWithLabelWidth(width, labelWidth int, line string) []string {
 	left, right, ok := strings.Cut(strings.TrimSpace(line), ":")
 	if !ok {
@@ -5177,6 +5547,19 @@ func valueOrDash(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func normalizedBoolishValue(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "":
+		return "-"
+	case "YES", "TRUE", "ON", "1":
+		return "yes"
+	case "NO", "FALSE", "OFF", "0":
+		return "no"
+	default:
+		return strings.TrimSpace(value)
+	}
 }
 
 func sortedKeys(values map[string]string) []string {
@@ -5270,6 +5653,93 @@ func yesNoText(value bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func presentMissingText(value bool) string {
+	if value {
+		return "present"
+	}
+	return "missing"
+}
+
+func visibleRctlRules(jailName string, rules []string, config *JailRctlConfig) []string {
+	if len(rules) == 0 {
+		return nil
+	}
+	if config == nil {
+		return append([]string(nil), rules...)
+	}
+	visible := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		if !rctlRuleMatchesConfiguredLimit(jailName, rule, config) {
+			visible = append(visible, rule)
+		}
+	}
+	return visible
+}
+
+func rctlRuleMatchesConfiguredLimit(jailName, rule string, config *JailRctlConfig) bool {
+	parts := strings.SplitN(strings.TrimSpace(rule), ":", 4)
+	if len(parts) != 4 || parts[0] != "jail" || parts[1] != strings.TrimSpace(jailName) {
+		return false
+	}
+	decision, value, ok := strings.Cut(parts[3], "=")
+	if !ok || strings.TrimSpace(decision) != "deny" {
+		return false
+	}
+	switch strings.TrimSpace(parts[2]) {
+	case "pcpu":
+		return strings.TrimSpace(config.CPUPercent) != "" && strings.TrimSpace(value) == strings.TrimSpace(config.CPUPercent)
+	case "maxproc":
+		return strings.TrimSpace(config.ProcessLimit) != "" && strings.TrimSpace(value) == strings.TrimSpace(config.ProcessLimit)
+	case "memoryuse":
+		if strings.TrimSpace(config.MemoryLimit) == "" {
+			return false
+		}
+		return rctlMemoryValuesEqual(value, config.MemoryLimit)
+	default:
+		return false
+	}
+}
+
+func rctlMemoryValuesEqual(a, b string) bool {
+	left, leftOK := normalizedRctlMemoryValue(a)
+	right, rightOK := normalizedRctlMemoryValue(b)
+	if leftOK && rightOK {
+		return left == right
+	}
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+func normalizedRctlMemoryValue(value string) (string, bool) {
+	trimmed := strings.ToUpper(strings.TrimSpace(value))
+	if trimmed == "" {
+		return "", false
+	}
+	if numeric, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return strconv.FormatInt(numeric, 10), true
+	}
+	multipliers := map[byte]int64{
+		'K': 1 << 10,
+		'M': 1 << 20,
+		'G': 1 << 30,
+		'T': 1 << 40,
+		'P': 1 << 50,
+	}
+	suffix := trimmed[len(trimmed)-1]
+	multiplier, ok := multipliers[suffix]
+	if !ok {
+		return "", false
+	}
+	base := strings.TrimSpace(trimmed[:len(trimmed)-1])
+	if base == "" {
+		return "", false
+	}
+	numeric, err := strconv.ParseInt(base, 10, 64)
+	if err != nil {
+		return "", false
+	}
+	return strconv.FormatInt(numeric*multiplier, 10), true
 }
 
 func min(a, b int) int {
