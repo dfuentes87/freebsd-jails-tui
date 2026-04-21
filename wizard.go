@@ -735,11 +735,6 @@ func (w jailCreationWizard) valueByID(id string) string {
 	}
 }
 
-func (w jailCreationWizard) validateCurrentStep() error {
-	_, err := w.validateCurrentStepDetailed()
-	return err
-}
-
 func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 	if w.isConfirmationStep() {
 		return "", nil
@@ -960,24 +955,6 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 		}
 	}
 	return "", nil
-}
-
-func requiresDownload(input string) bool {
-	input = strings.TrimSpace(input)
-	if strings.HasPrefix(strings.ToLower(input), "http://") || strings.HasPrefix(strings.ToLower(input), "https://") {
-		return true
-	}
-	if releaseValuePattern.MatchString(strings.ToUpper(input)) {
-		localBaseArchive := "/usr/freebsd-dist/base.txz"
-		if _, err := os.Stat(localBaseArchive); err == nil {
-			return false
-		}
-		if _, ok := findReleaseArchiveInUserland(defaultUserlandDir, input); ok {
-			return false
-		}
-		return true
-	}
-	return false
 }
 
 func validateTemplateReleaseInput(values jailWizardValues) error {
@@ -1281,143 +1258,6 @@ func (w jailCreationWizard) jailConfPreviewLines() []string {
 	return buildJailConfBlock(w.values, jailPath, fstabPath)
 }
 
-func (w jailCreationWizard) commandPlanLines() []string {
-	destination := strings.TrimSpace(w.values.Dataset)
-	jailType := normalizedJailType(w.values.JailType)
-	lines := []string{}
-	step := 1
-	addStep := func(title string) {
-		lines = append(lines, fmt.Sprintf("%d. %s", step, title))
-		step++
-	}
-	addDetail := func(text string) {
-		lines = append(lines, text)
-	}
-	switch jailType {
-	case "thin":
-		addStep("Prepare thin-jail destination from a ZFS template dataset:")
-		addDetail(fmt.Sprintf("   # source template: %s", w.values.TemplateRelease))
-		addDetail(fmt.Sprintf("   # destination: %s", destination))
-		addDetail("   zfs snapshot <template-dataset>@freebsd-jails-tui-base")
-		addDetail(fmt.Sprintf("   zfs clone <template-dataset>@freebsd-jails-tui-base <parent-dataset>/%s", strings.TrimSpace(w.values.Name)))
-	case "linux":
-		addStep("Ensure Linux ABI is enabled on the host:")
-		addDetail("   sysrc linux_enable=YES")
-		addDetail("   service linux start")
-		addStep("Ensure destination path exists:")
-		addDetail(fmt.Sprintf("   mkdir -p %s", destination))
-		addStep("Provision jail root from selected template/release:")
-		addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
-	default:
-		addStep("Ensure destination path exists:")
-		addDetail(fmt.Sprintf("   mkdir -p %s", destination))
-		addStep("Provision jail root from selected template/release:")
-		if requiresDownload(w.values.TemplateRelease) {
-			addDetail(fmt.Sprintf("   # source: %s (not found locally, will download)", w.values.TemplateRelease))
-		} else {
-			addDetail(fmt.Sprintf("   # source: %s", w.values.TemplateRelease))
-		}
-	}
-	if normalizedJailType(w.values.JailType) != "thin" {
-		patchDecision := resolveFreeBSDPatchDecision(w.values.TemplateRelease, w.values.PatchBase)
-		if patchDecision.Effective {
-			addStep("Patch extracted FreeBSD base to latest level:")
-			addDetail(fmt.Sprintf("   env PAGER=cat freebsd-update --not-running-from-cron -b %s fetch install", destination))
-		}
-	}
-
-	switch jailType {
-	case "vnet":
-		addStep("Ensure VNET host bridge setup is ready:")
-		addDetail(fmt.Sprintf("   # bridge policy: %s", effectiveBridgePolicy(w.values)))
-		addDetail(fmt.Sprintf("   # host setup: %s", effectiveVNETHostSetup(w.values)))
-		if effectiveVNETHostSetup(w.values) == "persistent" {
-			addStep("Persist VNET host networking in rc.conf:")
-			addDetail(fmt.Sprintf("   sysrc cloned_interfaces+=\" %s\"", strings.TrimSpace(w.values.Bridge)))
-			bridgeConfig := "up"
-			if strings.TrimSpace(w.values.Uplink) != "" {
-				bridgeConfig = fmt.Sprintf("addm %s up", strings.TrimSpace(w.values.Uplink))
-			}
-			addDetail(fmt.Sprintf("   sysrc ifconfig_%s=%q", strings.TrimSpace(w.values.Bridge), bridgeConfig))
-			if strings.TrimSpace(w.values.Uplink) != "" {
-				addDetail(fmt.Sprintf("   sysrc ifconfig_%s=up", strings.TrimSpace(w.values.Uplink)))
-			}
-		}
-		if w.networkPrereqs.BridgeCreateNeeded {
-			addDetail(fmt.Sprintf("   ifconfig %s create", strings.TrimSpace(w.values.Bridge)))
-		}
-		addDetail(fmt.Sprintf("   ifconfig %s up", strings.TrimSpace(w.values.Bridge)))
-		if w.networkPrereqs.UplinkAttachNeeded && strings.TrimSpace(w.values.Uplink) != "" {
-			addDetail(fmt.Sprintf("   ifconfig %s addm %s up", strings.TrimSpace(w.values.Bridge), strings.TrimSpace(w.values.Uplink)))
-		}
-		addStep(fmt.Sprintf("VNET jail hooks: create %s and attach it to %s", vnetEpairName(w.values.Name), strings.TrimSpace(w.values.Bridge)))
-		addStep(fmt.Sprintf("VNET start config: assign %s inside the jail", strings.TrimSpace(w.values.IP4)))
-	case "linux":
-		addStep(fmt.Sprintf("Linux compatibility mounts are configured under %s", linuxCompatRoot(destination, w.values)))
-		if effectiveLinuxBootstrapMode(w.values) == "skip" {
-			addStep("Skip Linux bootstrap for now.")
-			if effectiveLinuxBootstrapMethod(w.values) == "archive" {
-				addDetail("   # use detail view action 'b' later while the jail is stopped")
-			} else {
-				addDetail("   # use detail view action 'b' later after networking is ready")
-			}
-		} else {
-			addStep("Bootstrap Linux userland inside the jail:")
-			if effectiveLinuxBootstrapMethod(w.values) == "archive" {
-				addDetail("   # archive bootstrap runs host-side before the jail starts")
-				if linuxBootstrapSourceIsLocal(w.values) {
-					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s -C %s.bootstrap-stage", linuxBootstrapSourceURL(w.values), linuxCompatRoot(destination, w.values)))
-				} else {
-					addDetail(fmt.Sprintf("   fetch -o %s/tmp/%s %s", destination, linuxArchiveDownloadName(w.values), linuxBootstrapSourceURL(w.values)))
-					addDetail(fmt.Sprintf("   tar --no-xattrs -xf %s/tmp/%s -C %s.bootstrap-stage", destination, linuxArchiveDownloadName(w.values), linuxCompatRoot(destination, w.values)))
-				}
-				addDetail(fmt.Sprintf("   # validate extracted layout, install under %s, and recreate mount paths", linuxCompatRoot(destination, w.values)))
-			} else {
-				addStep("Preflight Linux bootstrap networking inside the jail:")
-				addDetail("   jexec <jail> route -n get -inet default || route -n get -inet6 default")
-				addDetail(fmt.Sprintf("   jexec <jail> getent hosts %s  # confirm A/AAAA answers for usable route families", linuxBootstrapSourceHost(w.values)))
-				addDetail(fmt.Sprintf("   jexec <jail> fetch -4/-6 -qo /dev/null %s", linuxBootstrapPreflightURL(w.values)))
-				addStep("Run debootstrap inside the jail:")
-				addDetail("   jexec <jail> pkg bootstrap -f")
-				addDetail("   jexec <jail> pkg install -y debootstrap")
-				addDetail(fmt.Sprintf("   jexec <jail> debootstrap %s /compat/%s %s", effectiveLinuxRelease(w.values), effectiveLinuxDistro(w.values), linuxBootstrapSourceURL(w.values)))
-			}
-		}
-	}
-
-	addStep("Write jail config: " + jailConfigPathForName(w.values.Name))
-	jailListAction := startupOrderPlanLine(w.values)
-	if jailListAction != "" {
-		addStep("Update rc.conf jail_list for startup order:")
-		addDetail("   " + jailListAction)
-	}
-	addStep(fmt.Sprintf("Start jail: service jail start %s", w.values.Name))
-
-	if strings.TrimSpace(w.values.CPUPercent) != "" ||
-		strings.TrimSpace(w.values.MemoryLimit) != "" ||
-		strings.TrimSpace(w.values.ProcessLimit) != "" {
-		addStep("Write managed jail limits to /etc/rctl.conf and apply them immediately:")
-		if strings.TrimSpace(w.values.CPUPercent) != "" {
-			addDetail(fmt.Sprintf("   rctl -a jail:%s:pcpu:deny=%s", w.values.Name, w.values.CPUPercent))
-		}
-		if strings.TrimSpace(w.values.MemoryLimit) != "" {
-			addDetail(fmt.Sprintf("   rctl -a jail:%s:memoryuse:deny=%s", w.values.Name, strings.ToUpper(w.values.MemoryLimit)))
-		}
-		if strings.TrimSpace(w.values.ProcessLimit) != "" {
-			addDetail(fmt.Sprintf("   rctl -a jail:%s:maxproc:deny=%s", w.values.Name, w.values.ProcessLimit))
-		}
-	}
-
-	mounts := w.mountPointList()
-	if len(mounts) > 0 {
-		addStep("Configure mount points:")
-		for _, mount := range mounts {
-			addDetail("   mountpoint: " + mount)
-		}
-	}
-	return lines
-}
-
 func (w jailCreationWizard) mountPointList() []string {
 	specs := parseMountPointSpecs(w.values.MountPoints)
 	var mounts []string
@@ -1483,14 +1323,6 @@ func parseMountPointSpecs(raw string) []mountPointSpec {
 		specs = append(specs, mountPointSpec{Target: target})
 	}
 	return specs
-}
-
-func normalizeMountTarget(target string) string {
-	clean, err := validateMountTarget(target)
-	if err != nil {
-		return ""
-	}
-	return clean
 }
 
 func jailConfigPathForName(name string) string {
@@ -1811,14 +1643,6 @@ func dependencySummary(raw string) string {
 	return strings.Join(deps, " ")
 }
 
-func startupOrderPlanLine(values jailWizardValues) string {
-	position, _ := parseStartupOrderValue(values.StartupOrder)
-	if position <= 0 {
-		return fmt.Sprintf("if jail_list is already set: append %s; otherwise keep implicit 'start all configured jails' behavior", strings.TrimSpace(values.Name))
-	}
-	return fmt.Sprintf("sysrc jail_list=\"... %s ...\"  # place %s at position %d", strings.TrimSpace(values.Name), strings.TrimSpace(values.Name), position)
-}
-
 func effectiveLinuxRelease(values jailWizardValues) string {
 	release := strings.TrimSpace(values.LinuxRelease)
 	if release != "" {
@@ -1877,17 +1701,6 @@ type linuxBootstrapSourceInfo struct {
 	PreflightURL string
 	LocalPath    string
 	IsLocal      bool
-}
-
-func validateLinuxArchiveURL(raw string) error {
-	info, err := resolveLinuxArchiveSource(raw)
-	if err != nil {
-		return err
-	}
-	if info.URL == "" {
-		return fmt.Errorf("archive source is required")
-	}
-	return nil
 }
 
 func resolveLinuxMirror(values jailWizardValues) (linuxMirrorInfo, error) {
@@ -2138,28 +1951,8 @@ func effectiveLinuxSourceSummary(values jailWizardValues) string {
 	return info.URL
 }
 
-func linuxBootstrapSourceURL(values jailWizardValues) string {
-	source, _ := resolveLinuxBootstrapSource(values)
-	return source.URL
-}
-
-func linuxBootstrapSourceIsLocal(values jailWizardValues) bool {
-	source, err := resolveLinuxBootstrapSource(values)
-	return err == nil && source.IsLocal
-}
-
 func linuxBootstrapUsesLocalSource(method, host, preflight string) bool {
 	return strings.TrimSpace(method) == "archive" && strings.TrimSpace(host) == "" && strings.TrimSpace(preflight) == ""
-}
-
-func linuxBootstrapSourceHost(values jailWizardValues) string {
-	source, _ := resolveLinuxBootstrapSource(values)
-	return source.Host
-}
-
-func linuxBootstrapPreflightURL(values jailWizardValues) string {
-	source, _ := resolveLinuxBootstrapSource(values)
-	return source.PreflightURL
 }
 
 func linuxArchiveDownloadName(values jailWizardValues) string {

@@ -1151,19 +1151,6 @@ func removePathAllLogged(path string, logs *[]string) error {
 	return nil
 }
 
-func renamePathLogged(oldPath, newPath string, logs *[]string) error {
-	oldPath = strings.TrimSpace(oldPath)
-	newPath = strings.TrimSpace(newPath)
-	if oldPath == "" || newPath == "" {
-		return fmt.Errorf("both source and destination paths are required for rename")
-	}
-	*logs = append(*logs, "$ mv "+oldPath+" "+newPath)
-	if err := os.Rename(oldPath, newPath); err != nil {
-		return fmt.Errorf("failed to move %q to %q: %w", oldPath, newPath, err)
-	}
-	return nil
-}
-
 func checkLinuxRouteFamily(ctx context.Context, jailName, family string, logs *[]string) bool {
 	args := []string{"jexec", jailName, "route", "-n", "get"}
 	switch family {
@@ -1246,10 +1233,6 @@ func hostArch() string {
 		return "amd64"
 	}
 	return arch
-}
-
-func ExecuteTemplateDatasetCreate(ctx context.Context, sourceInput string) TemplateDatasetResult {
-	return ExecuteTemplateDatasetCreateWithParent(ctx, sourceInput, nil, "auto")
 }
 
 func ExecuteTemplateDatasetCreateWithParent(ctx context.Context, sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetResult {
@@ -1345,10 +1328,6 @@ func ExecuteTemplateDatasetCreateWithParent(ctx context.Context, sourceInput str
 	success = true
 	result.Logs = logs
 	return result
-}
-
-func InspectTemplateDatasetCreate(sourceInput string) TemplateDatasetPreview {
-	return InspectTemplateDatasetCreateWithParent(sourceInput, nil, "auto")
 }
 
 func InspectTemplateDatasetCreateWithParent(sourceInput string, parentOverride *templateDatasetParent, patchPreference string) TemplateDatasetPreview {
@@ -1989,14 +1968,6 @@ func configureMountPoints(ctx context.Context, name, jailPath string, specs []mo
 		return "", fmt.Errorf("failed to write %q: %w", fstabPath, err)
 	}
 	return fstabPath, nil
-}
-
-func resolveMountTargetPath(jailPath, target string) (string, error) {
-	_, targetPath, err := validateMountTargetPath(jailPath, target)
-	if err != nil {
-		return "", err
-	}
-	return targetPath, nil
 }
 
 func clearDirectoryContents(path string, logs *[]string) error {

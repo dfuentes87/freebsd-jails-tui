@@ -427,16 +427,6 @@ func destroyResultMessage(result JailDestroyResult) string {
 	return fmt.Sprintf("Jail %s destroyed successfully.", result.Name)
 }
 
-func destroyTargetFromDetail(detail JailDetail) Jail {
-	return Jail{
-		Name:     detail.Name,
-		JID:      detail.JID,
-		Path:     detail.Path,
-		Hostname: detail.Hostname,
-		Running:  detail.JID > 0,
-	}
-}
-
 func buildDestroyTarget(target Jail) Jail {
 	target.Name = strings.TrimSpace(target.Name)
 	target.Path = strings.TrimSpace(target.Path)

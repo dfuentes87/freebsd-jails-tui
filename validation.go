@@ -14,14 +14,6 @@ var (
 	networkInterfacePattern    = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
 )
 
-func normalizeAbsolutePath(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	return filepath.Clean(value)
-}
-
 func containsControlOrNewline(value string) bool {
 	for _, r := range value {
 		if r == '\n' || r == '\r' || unicode.IsControl(r) {
@@ -49,14 +41,6 @@ func validateAbsolutePath(value, field string) (string, error) {
 	return clean, nil
 }
 
-func validateOptionalAbsolutePath(value, field string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", nil
-	}
-	return validateAbsolutePath(value, field)
-}
-
 func validateJailDestinationPath(destination, jailName string) (string, error) {
 	clean, err := validateAbsolutePath(destination, "destination")
 	if err != nil {
@@ -66,11 +50,6 @@ func validateJailDestinationPath(destination, jailName string) (string, error) {
 		return "", fmt.Errorf("destination must end with /%s", jailName)
 	}
 	return clean, nil
-}
-
-func validateAccessibleAbsolutePath(value, field string) (string, error) {
-	clean, _, err := validateAccessibleAbsolutePathInfo(value, field)
-	return clean, err
 }
 
 func validateAccessibleAbsoluteDirectory(value, field string) (string, error) {

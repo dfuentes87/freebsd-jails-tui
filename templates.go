@@ -140,31 +140,6 @@ func writeWizardTemplates(templates []wizardTemplate) error {
 	return nil
 }
 
-func findWizardTemplateReleaseReferences(mountpoint string) ([]string, error) {
-	templates, err := loadWizardTemplates()
-	if err != nil {
-		return nil, err
-	}
-	target := filepath.Clean(strings.TrimSpace(mountpoint))
-	if target == "." || target == "" {
-		return nil, nil
-	}
-	refs := make([]string, 0)
-	for _, tmpl := range templates {
-		value := strings.TrimSpace(tmpl.Values.TemplateRelease)
-		if value == "" || !strings.HasPrefix(value, "/") {
-			continue
-		}
-		if filepath.Clean(value) == target {
-			refs = append(refs, tmpl.Name)
-		}
-	}
-	sort.Slice(refs, func(i, j int) bool {
-		return strings.ToLower(refs[i]) < strings.ToLower(refs[j])
-	})
-	return refs, nil
-}
-
 func rewriteWizardTemplateReleaseReferences(oldMountpoint, newMountpoint string) ([]string, error) {
 	templates, err := loadWizardTemplates()
 	if err != nil {

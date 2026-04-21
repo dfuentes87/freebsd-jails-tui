@@ -5366,10 +5366,6 @@ func statusBadge(running bool) string {
 	return stoppedBadgeStyle.Render("[-]")
 }
 
-func styleWizardMessage(message string) string {
-	return wizardMessageRenderer(message)(message)
-}
-
 func wizardMessageRenderer(message string) func(string) string {
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "applying") ||
@@ -5509,10 +5505,6 @@ func renderKeyValueLinesWithLabelWidthAndFallback(width, labelWidth int, blankFa
 	return lines
 }
 
-func renderKeyValue(width, labelWidth int, label, value string) []string {
-	return renderKeyValueWithFallback(width, labelWidth, label, value, "-")
-}
-
 func renderKeyValueWithFallback(width, labelWidth int, label, value, blankFallback string) []string {
 	label = strings.TrimSpace(label)
 	if label == "" {
@@ -5534,14 +5526,6 @@ func renderKeyValueWithFallback(width, labelWidth int, label, value, blankFallba
 		lines = append(lines, continuation+" "+part)
 	}
 	return lines
-}
-
-func renderInformationalKeyValue(width int, line string) []string {
-	labelWidth := 25
-	if width < 72 {
-		labelWidth = 20
-	}
-	return renderInformationalKeyValueWithLabelWidth(width, labelWidth, line)
 }
 
 func renderInformationalKeyValueWithLabelWidth(width, labelWidth int, line string) []string {

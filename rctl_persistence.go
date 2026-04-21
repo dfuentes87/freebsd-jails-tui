@@ -51,10 +51,6 @@ func hasAnyRctlLimits(values jailWizardValues) bool {
 		strings.TrimSpace(values.ProcessLimit) != ""
 }
 
-func effectiveRctlLimitMode(values jailWizardValues) string {
-	return "persistent"
-}
-
 func collectRacctStatus() RacctStatus {
 	status := RacctStatus{}
 	out, err := exec.Command("sysctl", "-n", "kern.racct.enable").CombinedOutput()

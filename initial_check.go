@@ -368,23 +368,6 @@ func (state *initialCheckState) datasetFieldRef() *string {
 	}
 }
 
-func (state *initialCheckState) datasetFieldLabel() string {
-	switch state.customDatasetField {
-	case 0:
-		return "Base dataset"
-	case 1:
-		return "Mountpoint path"
-	case 2:
-		return "Media dataset (optional)"
-	case 3:
-		return "Templates dataset (optional)"
-	case 4:
-		return "Containers dataset (optional)"
-	default:
-		return ""
-	}
-}
-
 func collectInitialConfigCmd() tea.Cmd {
 	return func() tea.Msg {
 		status, err := collectInitialConfigStatus(time.Now())
