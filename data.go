@@ -15,16 +15,18 @@ import (
 )
 
 type Jail struct {
-	Name       string
-	JID        int
-	Path       string
-	Hostname   string
-	Note       string
-	Type       string
-	QuotaUsage string
-	Running    bool
-	CPUPercent float64
-	MemoryMB   int
+	Name         string
+	JID          int
+	Path         string
+	Hostname     string
+	Note         string
+	Type         string
+	ConfigPath   string
+	QuotaUsage   string
+	Running      bool
+	CPUPercent   float64
+	MemoryMB     int
+	StartupOrder int
 }
 
 type DashboardSnapshot struct {
@@ -98,6 +100,7 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 		snapshot  DashboardSnapshot
 		nameSet   = map[string]struct{}{}
 		runningBy = map[string]runningJail{}
+		startupBy = map[string]int{}
 	)
 
 	configured := discoverConfiguredJails()
@@ -122,6 +125,14 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 	if zfsErr != nil {
 		errs = append(errs, zfsErr)
 	}
+	jailListValue, jailListErr := readRCConfValue("jail_list")
+	if jailListErr != nil {
+		errs = append(errs, jailListErr)
+	} else {
+		for idx, name := range parseJailListValue(jailListValue) {
+			startupBy[name] = idx + 1
+		}
+	}
 
 	names := make([]string, 0, len(nameSet))
 	for name := range nameSet {
@@ -138,6 +149,7 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 			j.Hostname = run.Hostname
 		}
 		if conf, err := discoverJailConf(name); err == nil {
+			j.ConfigPath = conf.SourcePath
 			if j.Path == "" {
 				j.Path = strings.TrimSpace(conf.Values["path"])
 			}
@@ -159,6 +171,9 @@ func CollectSnapshot(now time.Time) (DashboardSnapshot, error) {
 		if metric, ok := metrics[j.JID]; ok {
 			j.CPUPercent = metric.CPUPercent
 			j.MemoryMB = metric.RSSKB / 1024
+		}
+		if position, ok := startupBy[name]; ok {
+			j.StartupOrder = position
 		}
 		if j.Running {
 			snapshot.RunningCount++
