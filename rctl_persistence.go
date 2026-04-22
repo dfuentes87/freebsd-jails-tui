@@ -201,6 +201,7 @@ func writeRctlConfLines(lines []string, logs *[]string) error {
 	return nil
 }
 
+// Only rewrite the managed block and reject malformed markers so manual rctl.conf content is not clobbered.
 func replaceManagedRctlBlock(lines []string, jailName string, rules []string) ([]string, bool, error) {
 	begin := fmt.Sprintf("# freebsd-jails-tui: rctl=%s begin", jailName)
 	end := fmt.Sprintf("# freebsd-jails-tui: rctl=%s end", jailName)

@@ -242,6 +242,7 @@ func validateDestroyPath(path string) error {
 	return nil
 }
 
+// Prefix-matched datasets still need strict path checks before falling back to destructive path removal.
 func validateFallbackDestroyPlan(plan jailDestroyPlan) error {
 	if plan.JailPath == "" || plan.ZFSDataset != "" || !strings.EqualFold(plan.ZFSMatch, "prefix") {
 		return nil

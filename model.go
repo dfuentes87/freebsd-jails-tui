@@ -1705,7 +1705,6 @@ func (m model) updateWizardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// otherwise allow typing 'c' in text fields? Wait, if it's KeyRunes it was already handled above.
 	case "esc":
 		if m.wizardApplying {
 			return m, nil
@@ -3574,7 +3573,6 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
-// ... skipping to wizardLines
 func (m model) wizardLines(width int) []string {
 	step := m.wizard.currentStep()
 	lines := []string{sectionStyle.Render(step.Title)}

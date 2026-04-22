@@ -712,6 +712,7 @@ func findJailBlockBounds(lines []string, jailName string) (start, end int, found
 	return start, end, true
 }
 
+// Minimal jail.conf brace counting that ignores quoted braces and # comments when matching raw blocks.
 func braceDeltaIgnoringQuotesAndComments(line string) int {
 	delta := 0
 	inQuotes := false
