@@ -111,6 +111,10 @@ type jailNoteApplyMsg struct {
 	result JailNoteUpdateResult
 }
 
+type jailRctlApplyMsg struct {
+	result JailRctlUpdateResult
+}
+
 type templateDatasetApplyMsg struct {
 	result TemplateDatasetResult
 }
@@ -293,6 +297,10 @@ type model struct {
 	detailNoteMode     bool
 	detailNoteSaving   bool
 	detailNoteInput    string
+	detailRctlMode     bool
+	detailRctlSaving   bool
+	detailRctlField    int
+	detailRctlValues   jailWizardValues
 	detailNotice       string
 	wizardScroll       int
 	zfsPanel           zfsPanelState
@@ -354,6 +362,13 @@ func jailNoteUpdateCmd(detail JailDetail, note string) tea.Cmd {
 	return func() tea.Msg {
 		result := ExecuteJailNoteUpdate(detail, note)
 		return jailNoteApplyMsg{result: result}
+	}
+}
+
+func jailRctlUpdateCmd(detail JailDetail, values jailWizardValues) tea.Cmd {
+	return func() tea.Msg {
+		result := ExecuteJailRctlUpdate(detail, values)
+		return jailRctlApplyMsg{result: result}
 	}
 }
 
@@ -562,6 +577,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail = msg.detail
 		if !m.detailNoteMode {
 			m.detailNoteInput = msg.detail.Note
+		}
+		if !m.detailRctlMode {
+			m.detailRctlValues = detailRctlValuesFromDetail(msg.detail)
 		}
 		m.detailErr = msg.err
 		m.detailLoading = false
@@ -772,6 +790,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.detailNotice = "Jail note updated."
 		}
+		jail, ok := m.detailJail()
+		if !ok {
+			return m, pollCmd()
+		}
+		return m, tea.Batch(pollCmd(), detailCmd(jail))
+	case jailRctlApplyMsg:
+		m.detailRctlSaving = false
+		if msg.result.Err != nil {
+			m.detailErr = msg.result.Err
+			m.detailNotice = ""
+			m.detailRctlMode = true
+			return m, nil
+		}
+		m.detailErr = nil
+		m.detailRctlMode = false
+		m.detailRctlValues = detailRctlValuesFromConfig(msg.result.Config)
+		m.detailNotice = "Resource limits updated."
 		jail, ok := m.detailJail()
 		if !ok {
 			return m, pollCmd()
@@ -1029,7 +1064,7 @@ func (m model) isTextEntryMode() bool {
 	case screenZFSPanel:
 		return m.zfsPanel.inputMode || m.zfsPanel.cloneMode
 	case screenJailDetail:
-		return m.detailNoteMode && !m.detailNoteSaving
+		return (m.detailNoteMode && !m.detailNoteSaving) || (m.detailRctlMode && !m.detailRctlSaving)
 	default:
 		return false
 	}
@@ -1159,6 +1194,10 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNoteMode = false
 		m.detailNoteSaving = false
 		m.detailNoteInput = ""
+		m.detailRctlMode = false
+		m.detailRctlSaving = false
+		m.detailRctlField = 0
+		m.detailRctlValues = jailWizardValues{}
 		m.detailErr = nil
 		m.detailNotice = ""
 		m.detail = JailDetail{
@@ -1181,21 +1220,37 @@ func (m model) updateDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.detailRctlMode && !m.detailRctlSaving && msg.Type == tea.KeyRunes {
+		m.appendDetailRctlInput(string(msg.Runes))
+		return m, nil
+	}
 	if m.detailNoteMode && !m.detailNoteSaving && msg.Type == tea.KeyRunes {
 		m.appendDetailNoteInput(string(msg.Runes))
 		return m, nil
 	}
-	if m.detailNoteSaving {
+	if m.detailNoteSaving || m.detailRctlSaving {
 		return m, nil
 	}
 
 	switch msg.String() {
 	case "space", " ":
+		if m.detailRctlMode {
+			return m, nil
+		}
 		if m.detailNoteMode {
 			m.appendDetailNoteInput(" ")
 			return m, nil
 		}
 	case "esc", "left":
+		if m.detailRctlMode {
+			m.detailRctlMode = false
+			m.detailRctlSaving = false
+			m.detailRctlField = 0
+			m.detailRctlValues = detailRctlValuesFromDetail(m.detail)
+			m.detailNotice = "Resource limit edit canceled."
+			m.detailErr = nil
+			return m, nil
+		}
 		if m.detailNoteMode {
 			m.detailNoteMode = false
 			m.detailNoteInput = ""
@@ -1206,7 +1261,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenDashboard
 		return m, nil
 	case "n", "N":
-		if m.detailNoteSaving {
+		if m.detailNoteSaving || m.detailRctlMode {
 			return m, nil
 		}
 		if m.detailNoteMode {
@@ -1218,6 +1273,19 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailErr = nil
 		return m, nil
 	case "enter":
+		if m.detailRctlMode {
+			normalized, _, err := normalizeRctlLimitValues(m.detailRctlValues)
+			if err != nil {
+				m.detailErr = err
+				m.detailNotice = ""
+				return m, nil
+			}
+			m.detailRctlValues = normalized
+			m.detailRctlSaving = true
+			m.detailErr = nil
+			m.detailNotice = "Saving resource limits..."
+			return m, jailRctlUpdateCmd(m.detail, normalized)
+		}
 		if !m.detailNoteMode || m.detailNoteSaving {
 			return m, nil
 		}
@@ -1233,16 +1301,28 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = "Saving jail note..."
 		return m, jailNoteUpdateCmd(m.detail, note)
 	case "delete":
+		if m.detailRctlMode && !m.detailRctlSaving {
+			m.backspaceDetailRctlInput()
+			return m, nil
+		}
 		if m.detailNoteMode && !m.detailNoteSaving {
 			m.backspaceDetailNoteInput()
 			return m, nil
 		}
 	case "j", "down":
+		if m.detailRctlMode {
+			m.nextDetailRctlField()
+			return m, nil
+		}
 		if m.detailNoteMode {
 			return m, nil
 		}
 		m.detailScroll++
 	case "k", "up":
+		if m.detailRctlMode {
+			m.prevDetailRctlField()
+			return m, nil
+		}
 		if m.detailNoteMode {
 			return m, nil
 		}
@@ -1268,12 +1348,26 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.detailScroll -= m.detailBodyHeight()
 	case "backspace":
+		if m.detailRctlMode && !m.detailRctlSaving {
+			m.backspaceDetailRctlInput()
+			return m, nil
+		}
 		if m.detailNoteMode && !m.detailNoteSaving {
 			m.backspaceDetailNoteInput()
 			return m, nil
 		}
+	case "tab":
+		if m.detailRctlMode {
+			m.nextDetailRctlField()
+			return m, nil
+		}
+	case "shift+tab":
+		if m.detailRctlMode {
+			m.prevDetailRctlField()
+			return m, nil
+		}
 	case "r":
-		if m.detailNoteMode || m.detailNoteSaving {
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlMode || m.detailRctlSaving {
 			return m, nil
 		}
 		jail, ok := m.detailJail()
@@ -1285,15 +1379,28 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = ""
 		return m, detailCmd(jail)
 	case "a", "A":
-		if m.detailNoteMode || m.detailNoteSaving {
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlMode || m.detailRctlSaving {
 			return m, nil
 		}
 		m.detailShowAdvanced = !m.detailShowAdvanced
 		m.detailNotice = ""
 		m.detailErr = nil
 		return m, nil
+	case "l", "L":
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlSaving {
+			return m, nil
+		}
+		if m.detailRctlMode {
+			return m, nil
+		}
+		m.detailRctlMode = true
+		m.detailRctlField = 0
+		m.detailRctlValues = detailRctlValuesFromDetail(m.detail)
+		m.detailNotice = ""
+		m.detailErr = nil
+		return m, nil
 	case "b", "B":
-		if m.detailNoteMode || m.detailNoteSaving {
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlMode || m.detailRctlSaving {
 			return m, nil
 		}
 		if !detailLooksLikeLinuxJail(m.detail) {
@@ -1322,7 +1429,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = "Retrying Linux bootstrap..."
 		return m, linuxBootstrapCmd(m.detail)
 	case "z":
-		if m.detailNoteMode || m.detailNoteSaving {
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlMode || m.detailRctlSaving {
 			return m, nil
 		}
 		if m.detail.ZFS == nil || strings.TrimSpace(m.detail.ZFS.Name) == "" {
@@ -1333,7 +1440,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.zfsPanel = newZFSPanelState(m.detail.ZFS.Name, screenJailDetail, m.detail)
 		return m, tea.Batch(listZFSSnapshotsCmd(m.zfsPanel.dataset), zfsPropertyStateCmd(m.zfsPanel.dataset))
 	case "R":
-		if m.detailNoteMode || m.detailNoteSaving {
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlMode || m.detailRctlSaving {
 			return m, nil
 		}
 		jail, ok := m.detailJail()
@@ -1344,7 +1451,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailNotice = "Restarting jail..."
 		return m, jailServiceCmd(jail, "restart")
 	case "u", "U":
-		if m.detailNoteMode || m.detailNoteSaving {
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlMode || m.detailRctlSaving {
 			return m, nil
 		}
 		jail, ok := m.detailJail()
@@ -1355,7 +1462,7 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = screenUpgradeWizard
 		return m, nil
 	case "x", "X":
-		if m.detailNoteMode || m.detailNoteSaving {
+		if m.detailNoteMode || m.detailNoteSaving || m.detailRctlMode || m.detailRctlSaving {
 			return m, nil
 		}
 		jail, ok := m.detailJail()
@@ -2577,6 +2684,7 @@ func helpTabs() []helpTabContent {
 					Shortcuts: []helpShortcut{
 						{Keys: "j/k, pgup/pgdown, g/G", Action: "scroll the detail pane"},
 						{Keys: "a", Action: "toggle advanced runtime and default parameter sections"},
+						{Keys: "l", Action: "add, edit, or clear managed resource limits"},
 						{Keys: "n", Action: "edit the short dashboard note stored for this jail"},
 						{Keys: "r", Action: "refresh selected jail details"},
 						{Keys: "R", Action: "restart this jail"},
@@ -2853,11 +2961,13 @@ func (m model) renderJailDetailView() string {
 	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
 	if m.detailNoteMode {
 		hint = "type to edit note | enter: save | backspace: delete | esc: cancel | ctrl+c: quit"
+	} else if m.detailRctlMode {
+		hint = "type to edit limit | tab or j/k: switch field | enter: save | backspace: delete | esc: cancel | ctrl+c: quit"
 	} else {
 		if detailLooksLikeLinuxJail(m.detail) {
 			hint += " | b: retry linux bootstrap"
 		}
-		hint += " | n: edit note | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
+		hint += " | l: edit resource limits | n: edit note | z: ZFS panel | x: destroy | h: help | esc: back | q: quit"
 	}
 	message := ""
 	if m.detailErr != nil {
@@ -4442,6 +4552,32 @@ func (m model) detailLines(width int) []string {
 		lines = append(lines, truncate("Press enter to save, esc to cancel, and leave the field blank to clear the note.", width))
 	}
 
+	if m.detailRctlMode || m.detailRctlSaving {
+		appendSectionWithStyle(&lines, width, detailSectionStyle, "Resource limit editor")
+		fieldPairs := make([][2]string, 0, 3)
+		for idx, field := range detailRctlFieldSpecs() {
+			label := field.label
+			if idx == m.detailRctlField {
+				label = "> " + label
+			}
+			fieldPairs = append(fieldPairs, [2]string{label, valueOrDash(*m.detailRctlFieldValuePtr(idx))})
+		}
+		lines = append(lines, renderKeyValueLines(width, fieldPairs...)...)
+		for _, line := range racctWizardPrereqLines(collectRacctWizardPrereqs(m.detailRctlValues)) {
+			if looksLikeWarningText(line) {
+				lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
+				continue
+			}
+			lines = append(lines, truncate(line, width))
+		}
+		lines = append(lines, truncate("Managed edits update jail metadata and /etc/rctl.conf. Leave a field blank to remove that limit.", width))
+		if m.detail.JID > 0 {
+			lines = append(lines, truncate("The jail is running, so live rctl rules will be refreshed after save when kern.racct.enable is active.", width))
+		} else {
+			lines = append(lines, truncate("The jail is stopped, so only persistent configuration will be updated right now.", width))
+		}
+	}
+
 	appendSectionWithStyle(&lines, width, detailSectionStyle, "Configured state")
 	lines = append(lines, renderKeyValueLines(width, [2]string{"Source", m.detail.JailConfSource})...)
 	if len(m.detail.JailConfValues) == 0 && len(m.detail.JailConfFlags) == 0 {
@@ -4557,6 +4693,9 @@ func (m model) detailLines(width int) []string {
 		if m.detail.RctlConfig.PersistentErr != "" {
 			lines = append(lines, wizardErrorStyle.Render(truncate("rctl.conf check: "+m.detail.RctlConfig.PersistentErr, width)))
 		}
+	}
+	if !m.detailRctlMode && !m.detailRctlSaving {
+		lines = append(lines, truncate("Press l to add, change, or remove managed resource limits.", width))
 	}
 	if m.detail.RacctStatus != nil {
 		lines = append(lines, renderKeyValueLines(width,
@@ -5319,6 +5458,96 @@ func (m *model) backspaceDetailNoteInput() {
 		return
 	}
 	m.detailNoteInput = string(runes[:len(runes)-1])
+	m.detailErr = nil
+	m.detailNotice = ""
+}
+
+type detailRctlFieldSpec struct {
+	label string
+}
+
+func detailRctlFieldSpecs() []detailRctlFieldSpec {
+	return []detailRctlFieldSpec{
+		{label: "CPU %"},
+		{label: "Memory"},
+		{label: "Max processes"},
+	}
+}
+
+func detailRctlValuesFromDetail(detail JailDetail) jailWizardValues {
+	return detailRctlValuesFromConfig(detail.RctlConfig)
+}
+
+func detailRctlValuesFromConfig(config *JailRctlConfig) jailWizardValues {
+	values := jailWizardValues{}
+	if config == nil {
+		return values
+	}
+	values.CPUPercent = strings.TrimSpace(config.CPUPercent)
+	values.MemoryLimit = strings.TrimSpace(config.MemoryLimit)
+	values.ProcessLimit = strings.TrimSpace(config.ProcessLimit)
+	return values
+}
+
+func (m *model) detailRctlFieldValuePtr(idx int) *string {
+	switch idx {
+	case 0:
+		return &m.detailRctlValues.CPUPercent
+	case 1:
+		return &m.detailRctlValues.MemoryLimit
+	default:
+		return &m.detailRctlValues.ProcessLimit
+	}
+}
+
+func (m *model) appendDetailRctlInput(text string) {
+	if text == "" {
+		return
+	}
+	field := m.detailRctlFieldValuePtr(m.detailRctlField)
+	for _, r := range text {
+		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+			continue
+		}
+		*field += string(r)
+	}
+	m.detailErr = nil
+	m.detailNotice = ""
+}
+
+func (m *model) backspaceDetailRctlInput() {
+	field := m.detailRctlFieldValuePtr(m.detailRctlField)
+	runes := []rune(*field)
+	if len(runes) == 0 {
+		return
+	}
+	*field = string(runes[:len(runes)-1])
+	m.detailErr = nil
+	m.detailNotice = ""
+}
+
+func (m *model) nextDetailRctlField() {
+	fields := detailRctlFieldSpecs()
+	if len(fields) == 0 {
+		return
+	}
+	m.detailRctlField++
+	if m.detailRctlField >= len(fields) {
+		m.detailRctlField = 0
+	}
+	m.detailErr = nil
+	m.detailNotice = ""
+}
+
+func (m *model) prevDetailRctlField() {
+	fields := detailRctlFieldSpecs()
+	if len(fields) == 0 {
+		return
+	}
+	m.detailRctlField--
+	if m.detailRctlField < 0 {
+		m.detailRctlField = len(fields) - 1
+	}
 	m.detailErr = nil
 	m.detailNotice = ""
 }

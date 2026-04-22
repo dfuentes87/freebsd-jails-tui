@@ -869,23 +869,13 @@ func (w jailCreationWizard) validateCurrentStepDetailed() (string, error) {
 			return "dependencies", err
 		}
 		w.values.Dependencies = strings.Join(dependencies, " ")
-		if value := strings.TrimSpace(w.values.CPUPercent); value != "" {
-			cpu, err := strconv.Atoi(value)
-			if err != nil || cpu <= 0 || cpu > 100 {
-				return "cpu_percent", fmt.Errorf("CPU %% must be between 1 and 100")
-			}
+		normalized, fieldID, err := normalizeRctlLimitValues(w.values)
+		if err != nil {
+			return fieldID, err
 		}
-		if value := strings.TrimSpace(w.values.MemoryLimit); value != "" {
-			if !memoryLimitPattern.MatchString(strings.ToUpper(value)) {
-				return "memory_limit", fmt.Errorf("memory must look like 512M or 2G")
-			}
-		}
-		if value := strings.TrimSpace(w.values.ProcessLimit); value != "" {
-			procs, err := strconv.Atoi(value)
-			if err != nil || procs <= 0 {
-				return "process_limit", fmt.Errorf("max processes must be a positive integer")
-			}
-		}
+		w.values.CPUPercent = normalized.CPUPercent
+		w.values.MemoryLimit = normalized.MemoryLimit
+		w.values.ProcessLimit = normalized.ProcessLimit
 		if err := validateMountPointInput(w.values.MountPoints); err != nil {
 			return "mount_points", err
 		}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -200,4 +201,29 @@ func validateMountTargetPath(jailPath, target string) (string, string, error) {
 		return "", "", fmt.Errorf("mount target %q escapes jail root %q", target, cleanJailPath)
 	}
 	return cleanTarget, targetPath, nil
+}
+
+func normalizeRctlLimitValues(values jailWizardValues) (jailWizardValues, string, error) {
+	values.CPUPercent = strings.TrimSpace(values.CPUPercent)
+	values.MemoryLimit = strings.ToUpper(strings.TrimSpace(values.MemoryLimit))
+	values.ProcessLimit = strings.TrimSpace(values.ProcessLimit)
+
+	if values.CPUPercent != "" {
+		cpu, err := strconv.Atoi(values.CPUPercent)
+		if err != nil || cpu <= 0 || cpu > 100 {
+			return values, "cpu_percent", fmt.Errorf("CPU %% must be between 1 and 100")
+		}
+	}
+	if values.MemoryLimit != "" {
+		if !memoryLimitPattern.MatchString(values.MemoryLimit) {
+			return values, "memory_limit", fmt.Errorf("memory must look like 512M or 2G")
+		}
+	}
+	if values.ProcessLimit != "" {
+		procs, err := strconv.Atoi(values.ProcessLimit)
+		if err != nil || procs <= 0 {
+			return values, "process_limit", fmt.Errorf("max processes must be a positive integer")
+		}
+	}
+	return values, "", nil
 }
