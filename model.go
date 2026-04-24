@@ -302,6 +302,7 @@ type model struct {
 	detailErr          error
 	detailLoading      bool
 	detailScroll       int
+	detailTab          detailTab
 	detailShowAdvanced bool
 	detailEdit         detailEditState
 	detailNotice       string
@@ -719,13 +720,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			status = activityStatusError
 			message = msg.result.Err.Error()
 		}
-		m.addActivityEntry("create", msg.result.Name, message, status, msg.result.Logs)
+		m.addActivityEntryDetailed("create", msg.result.Name, message, status, msg.result.Logs, msg.result.NextActions)
 		if msg.result.Err == nil {
 			m.mode = screenDashboard
 			if len(msg.result.Warnings) > 0 {
 				m.notice = fmt.Sprintf("Jail %s created and started with warnings: %s", msg.result.Name, summarizeCreationWarning(msg.result.Warnings[0]))
 			} else {
 				m.notice = fmt.Sprintf("Jail %s created and started.", msg.result.Name)
+			}
+			if len(msg.result.NextActions) > 0 {
+				m.notice += " See Activity Log (A) for next required actions."
 			}
 			m.wizard = newJailCreationWizard(initialWizardDestination(m.initCheck.status))
 			return m, pollCmd()
@@ -1426,9 +1430,6 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case ":", "ctrl+p":
-		m.commandPalette = commandPaletteState{active: true}
-		return m, nil
 	case "space", " ":
 		if m.detailEdit.active() && detailEditFieldSpecs(m.detailEdit.kind)[m.detailEdit.field].allowSpaces {
 			m.detailEdit.appendInput(" ")
@@ -1488,6 +1489,22 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.detailScroll = 0
+	case "tab", "]":
+		if m.detailEdit.active() && len(detailEditFieldSpecs(m.detailEdit.kind)) > 1 {
+			m.detailEdit.nextField()
+			return m, nil
+		}
+		m.detailTab = m.detailTab.next()
+		m.detailScroll = 0
+		return m, nil
+	case "shift+tab", "[":
+		if m.detailEdit.active() && len(detailEditFieldSpecs(m.detailEdit.kind)) > 1 {
+			m.detailEdit.prevField()
+			return m, nil
+		}
+		m.detailTab = m.detailTab.prev()
+		m.detailScroll = 0
+		return m, nil
 	case "G", "end":
 		if m.detailEdit.active() {
 			return m, nil
@@ -1508,16 +1525,6 @@ func (m model) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailEdit.backspace()
 			m.detailErr = nil
 			m.detailNotice = ""
-			return m, nil
-		}
-	case "tab":
-		if m.detailEdit.active() && len(detailEditFieldSpecs(m.detailEdit.kind)) > 1 {
-			m.detailEdit.nextField()
-			return m, nil
-		}
-	case "shift+tab":
-		if m.detailEdit.active() && len(detailEditFieldSpecs(m.detailEdit.kind)) > 1 {
-			m.detailEdit.prevField()
 			return m, nil
 		}
 	case "r":
@@ -2835,6 +2842,7 @@ func helpTabs() []helpTabContent {
 					Summary: "Inspect the selected jail, refresh runtime state, and branch into service, upgrade, or ZFS actions.",
 					Shortcuts: []helpShortcut{
 						{Keys: "j/k, pgup/pgdown, g/G", Action: "scroll the detail pane"},
+						{Keys: "tab, shift+tab, [, ]", Action: "switch detail tabs including the dedicated drift view"},
 						{Keys: "a", Action: "toggle advanced runtime and default parameter sections"},
 						{Keys: "l", Action: "add, edit, or clear managed resource limits"},
 						{Keys: "n", Action: "edit the short dashboard note stored for this jail"},
@@ -2853,6 +2861,7 @@ func helpTabs() []helpTabContent {
 						"Startup policy shows jail_list order and configured depend values.",
 						"Notes are stored in managed jail.conf metadata and shown on the dashboard quick-details panel.",
 						"Network summary combines configured values, runtime state, and host-side validation results.",
+						"The Summary and Drift tabs include a single \"Why blocked?\" panel when prerequisites or managed features are currently blocked.",
 					},
 				},
 				{
@@ -2885,6 +2894,7 @@ func helpTabs() []helpTabContent {
 						"Startup order updates rc.conf jail_list; dependency settings write depend in jail.conf.",
 						"Linux setup supports debootstrap mirrors or archive sources, and retry reuses the saved bootstrap settings.",
 						"VNET preflight checks bridge and uplink state, running-jail IP conflicts, subnet overlap warnings, and bridge policy before create.",
+						"The wizard field guide and confirmation step now include a combined \"Why blocked?\" view when current prerequisites would stop progress or later runtime actions.",
 					},
 				},
 				{
@@ -2902,6 +2912,7 @@ func helpTabs() []helpTabContent {
 					},
 					Notes: []string{
 						"When the templates parent dataset is missing, enter creates the proposed parent and ctrl+e lets you edit the parent dataset and mountpoint first.",
+						"Browse, rename, and destroy previews include template lineage: dependent clone datasets, jails using those clones, and saved wizard templates that still reference the template mountpoint.",
 					},
 				},
 				{
@@ -3110,7 +3121,7 @@ func (m model) renderJailDetailView() string {
 	if !m.detail.LastUpdated.IsZero() {
 		lastUpdated = m.detail.LastUpdated.Format("15:04:05")
 	}
-	meta := summaryStyle.Render(fmt.Sprintf("Jail:%s  Updated:%s", name, lastUpdated))
+	meta := summaryStyle.Render(fmt.Sprintf("Jail:%s  Tab:%s  Updated:%s", name, m.detailTab.label(), lastUpdated))
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 
 	hint := "j/k or up/down: scroll | pgup/pgdown | g/G | a: advanced runtime | r: refresh detail"
@@ -3120,7 +3131,7 @@ func (m model) renderJailDetailView() string {
 		if detailLooksLikeLinuxJail(m.detail) {
 			hint += " | b: retry linux bootstrap"
 		}
-		hint += " | n/l/H/O/D/M: edit | z: ZFS panel | x: destroy | : palette | h: help | esc: back | q: quit"
+		hint += " | tab/shift+tab or [/]: tabs | n/l/H/O/D/M: edit | z: ZFS panel | x: destroy | : palette | h: help | esc: back | q: quit"
 	}
 	message := ""
 	if m.detailErr != nil {
@@ -3131,7 +3142,11 @@ func (m model) renderJailDetailView() string {
 		message = "loading detail..."
 	}
 	footer := m.renderFooterWithMessage(hint, message, footerStyle)
-	bodyHeight := m.pageBodyHeight(header, footer, 0)
+	tabBar := m.renderDetailTabBar(max(12, m.width-2))
+	bodyHeight := m.pageBodyHeight(header, footer, 0) - lipgloss.Height(tabBar) - 1
+	if bodyHeight < 1 {
+		bodyHeight = 1
+	}
 	contentWidth := max(12, m.width-2)
 	lines := m.detailLines(contentWidth)
 	maxOffset := max(0, len(lines)-bodyHeight)
@@ -3149,7 +3164,7 @@ func (m model) renderJailDetailView() string {
 		Padding(0, 1).
 		Render(strings.Join(lines[offset:end], "\n"))
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, "", lipgloss.NewStyle().Padding(0, 1).Render(tabBar), body, footer)
 }
 
 func (m model) renderWizardView() string {
@@ -3519,6 +3534,15 @@ func (m model) templateManagerDetailLines(width int) []string {
 			if !current.Readonly {
 				appendWrappedStyledText(&lines, width, wizardErrorStyle, "Warning: current template dataset is writable; handbook-style templates should be readonly.")
 			}
+			if len(current.JailRefs) > 0 || len(current.CloneDependents) > 0 || len(current.WizardTemplateRefs) > 0 {
+				appendSection(&lines, width, "Lineage / references")
+			}
+			if len(current.JailRefs) > 0 {
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependent jails", strings.Join(current.JailRefs, ", ")})...)
+			}
+			if len(current.CloneDependents) > 0 {
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Clone datasets", strings.Join(current.CloneDependents, ", ")})...)
+			}
 			if len(preview.UpdatedWizardTemplates) > 0 {
 				lines = append(lines, renderKeyValueLines(width, [2]string{"Saved wizard templates updated on rename", strings.Join(preview.UpdatedWizardTemplates, ", ")})...)
 			}
@@ -3547,6 +3571,9 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 			if len(current.CloneDependents) > 0 {
 				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependents", strings.Join(current.CloneDependents, ", ")})...)
+			}
+			if len(current.JailRefs) > 0 {
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependent jails", strings.Join(current.JailRefs, ", ")})...)
 			}
 			if len(preview.ReferencedTemplates) > 0 {
 				lines = append(lines, renderKeyValueLines(width, [2]string{"Referenced by", strings.Join(preview.ReferencedTemplates, ", ")})...)
@@ -3663,6 +3690,7 @@ func (m model) templateManagerDetailLines(width int) []string {
 				[2]string{"Snapshots", fmt.Sprintf("%d", item.SnapshotCount)},
 				[2]string{"Child datasets", fmt.Sprintf("%d", len(item.ChildDatasets))},
 				[2]string{"Clone dependents", fmt.Sprintf("%d", len(item.CloneDependents))},
+				[2]string{"Dependent jails", fmt.Sprintf("%d", len(item.JailRefs))},
 				[2]string{"Saved wizard template refs", fmt.Sprintf("%d", len(item.WizardTemplateRefs))},
 			)...)
 			appendSection(&lines, width, "Safety")
@@ -3681,6 +3709,9 @@ func (m model) templateManagerDetailLines(width int) []string {
 			}
 			if len(item.CloneDependents) > 0 {
 				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependents", strings.Join(item.CloneDependents, ", ")})...)
+			}
+			if len(item.JailRefs) > 0 {
+				lines = append(lines, renderKeyValueLines(width, [2]string{"Dependent jails", strings.Join(item.JailRefs, ", ")})...)
 			}
 			if len(item.ChildDatasets) > 0 {
 				lines = append(lines, renderKeyValueLines(width, [2]string{"Child datasets", strings.Join(item.ChildDatasets, ", ")})...)
@@ -3805,6 +3836,13 @@ func (m model) wizardLines(width int) []string {
 		for _, line := range m.wizard.summaryLines() {
 			lines = append(lines, truncate(line, width))
 		}
+		if blockers := wizardBlockerSummaryLines(m.wizard); len(blockers) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Why blocked?"))
+			for _, line := range blockers {
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, line)
+			}
+		}
 		if m.wizardApplying {
 			lines = append(lines, "")
 			lines = append(lines, sectionStyle.Render("Status"))
@@ -3875,6 +3913,15 @@ func (m model) wizardLines(width int) []string {
 			lines = append(lines, sectionStyle.Render("Execution output"))
 			for _, line := range m.wizard.executionLogs {
 				appendWrappedLiteralLine(&lines, line, width)
+			}
+		}
+		if len(m.wizard.executionNextActions) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Next required actions"))
+			for _, item := range m.wizard.executionNextActions {
+				for _, line := range wrapText("- "+item, max(1, width)) {
+					lines = append(lines, truncate(line, width))
+				}
 			}
 		}
 		if m.wizard.executionError != "" {
@@ -3989,12 +4036,27 @@ func (m model) wizardFieldEntryLayout(width int, inlineHelp bool) ([]string, int
 			appendStyledWizardLine(&lines, line, width)
 		}
 	}
+	if inlineHelp {
+		if blockers := wizardBlockerSummaryLines(m.wizard); len(blockers) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, sectionStyle.Render("Why blocked?"))
+			for _, line := range blockers {
+				appendWrappedStyledText(&lines, width, wizardErrorStyle, line)
+			}
+		}
+	}
 
 	return lines, activeLine
 }
 
 func (m model) wizardFieldContextLines(width int) []string {
 	lines := []string{panelTitleStyle.Render("Field Guide")}
+	if blockers := wizardBlockerSummaryLines(m.wizard); len(blockers) > 0 {
+		appendSection(&lines, width, "Why blocked?")
+		for _, line := range blockers {
+			appendWrappedStyledText(&lines, width, wizardErrorStyle, line)
+		}
+	}
 	field, ok := m.wizard.activeField()
 	if !ok {
 		lines = append(lines, "Select a field to see accepted values and examples.")
@@ -4662,263 +4724,6 @@ func linuxWizardContextLines(prereqs LinuxWizardPrereqs) []string {
 	return lines
 }
 
-func (m model) detailLines(width int) []string {
-	lines := make([]string, 0, 64)
-
-	jail, hasJail := m.detailJail()
-	state := "STOPPED"
-	jidText := "-"
-	cpuText := "0.00%"
-	memText := "0MB"
-	if hasJail {
-		if jail.Running || jail.JID > 0 {
-			state = "RUNNING"
-		}
-		if jail.JID > 0 {
-			jidText = strconv.Itoa(jail.JID)
-		}
-		cpuText = fmt.Sprintf("%.2f%%", jail.CPUPercent)
-		memText = fmt.Sprintf("%dMB", jail.MemoryMB)
-	}
-
-	appendRenderedSectionWithStyle(&lines, detailSectionStyle, "Overview", renderKeyValueLines(width,
-		[2]string{"Name", m.detail.Name},
-		[2]string{"State", state},
-		[2]string{"Type", valueOrDash(jail.Type)},
-		[2]string{"JID", jidText},
-		[2]string{"CPU", cpuText},
-		[2]string{"Memory", memText},
-		[2]string{"Path", m.detail.Path},
-		[2]string{"Hostname", m.detail.Hostname},
-	))
-	lines = append(lines, renderKeyValueLinesWithValueFallback(width, "",
-		[2]string{"Note", m.detail.Note},
-	)...)
-
-	if m.detailEdit.active() {
-		appendSectionWithStyle(&lines, width, detailSectionStyle, m.detailEdit.title())
-		fieldPairs := make([][2]string, 0, len(detailEditFieldSpecs(m.detailEdit.kind))+1)
-		for idx, field := range detailEditFieldSpecs(m.detailEdit.kind) {
-			label := field.label
-			if idx == m.detailEdit.field {
-				label = "> " + label
-			}
-			value := ""
-			if ref := m.detailEdit.valuePtr(idx); ref != nil {
-				value = *ref
-			}
-			fieldPairs = append(fieldPairs, [2]string{label, valueOrDash(value)})
-		}
-		if m.detailEdit.kind == detailEditNote {
-			fieldPairs = append(fieldPairs, [2]string{"Length", fmt.Sprintf("%d/%d", jailNoteLength(m.detailEdit.values.Note), maxJailNoteLen)})
-			lines = append(lines, renderKeyValueLinesWithValueFallback(width, "", fieldPairs...)...)
-		} else {
-			lines = append(lines, renderKeyValueLines(width, fieldPairs...)...)
-		}
-		if m.detailEdit.kind == detailEditRctl {
-			for _, line := range racctWizardPrereqLines(collectRacctWizardPrereqs(m.detailEdit.values)) {
-				if looksLikeWarningText(line) {
-					lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
-					continue
-				}
-				lines = append(lines, truncate(line, width))
-			}
-			lines = append(lines, truncate("Managed edits update jail metadata and /etc/rctl.conf. Leave a field blank to remove that limit.", width))
-			if m.detail.JID > 0 {
-				lines = append(lines, truncate("The jail is running, so live rctl rules will be refreshed after save when kern.racct.enable is active.", width))
-			} else {
-				lines = append(lines, truncate("The jail is stopped, so only persistent configuration will be updated right now.", width))
-			}
-		} else if m.detailEdit.kind == detailEditLinuxMetadata {
-			lines = append(lines, truncate("These managed metadata fields guide future Linux bootstrap/retry behavior without mutating the jail root immediately.", width))
-		}
-		lines = append(lines, truncate("Press enter to save, esc to cancel, and leave supported fields blank to clear them.", width))
-	}
-
-	appendSectionWithStyle(&lines, width, detailSectionStyle, "Configured state")
-	lines = append(lines, renderKeyValueLines(width, [2]string{"Source", m.detail.JailConfSource})...)
-	if len(m.detail.JailConfValues) == 0 && len(m.detail.JailConfFlags) == 0 {
-		lines = append(lines, truncate("No matching jail block found.", width))
-	} else {
-		for _, key := range sortedKeys(m.detail.JailConfValues) {
-			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detailDisplayConfigValue(m.detail.JailConfValues[key])})...)
-		}
-		for _, flag := range m.detail.JailConfFlags {
-			lines = append(lines, renderKeyValueLines(width, [2]string{flag, "enabled"})...)
-		}
-	}
-
-	appendSectionWithStyle(&lines, width, detailSectionStyle, "Startup policy")
-	if m.detail.StartupConfig == nil {
-		lines = append(lines, truncate("Startup policy unavailable.", width))
-	} else {
-		if m.detail.StartupConfig.InJailList {
-			lines = append(lines, renderKeyValueLines(width,
-				[2]string{"jail_list position", fmt.Sprintf("%d of %d", m.detail.StartupConfig.Position, len(m.detail.StartupConfig.JailList))},
-			)...)
-		} else if len(m.detail.StartupConfig.JailList) == 0 {
-			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "empty"})...)
-		} else {
-			lines = append(lines, renderKeyValueLines(width, [2]string{"jail_list", "not present (manual start required when jail_list is used)"})...)
-		}
-		lines = append(lines, renderKeyValueLines(width, [2]string{"Dependencies", dependencySummary(strings.Join(m.detail.StartupConfig.Dependencies, " "))})...)
-		if len(m.detail.StartupConfig.JailList) > 0 {
-			lines = append(lines, renderKeyValueLines(width, [2]string{"Effective jail_list", strings.Join(m.detail.StartupConfig.JailList, " ")})...)
-		}
-		if m.detail.StartupConfig.ReadError != "" {
-			lines = append(lines, wizardErrorStyle.Render(truncate("jail_list read error: "+m.detail.StartupConfig.ReadError, max(1, width))))
-		}
-	}
-
-	appendRenderedSectionWithStyle(&lines, detailSectionStyle, "Runtime state", renderKeyValueLines(width,
-		[2]string{"State", state},
-		[2]string{"CPU", cpuText},
-		[2]string{"Memory", memText},
-	))
-	runtimeNotes := []string{
-		"Runtime values come from the running jail and may differ from jail.conf defaults or the configured state shown above.",
-	}
-	if len(m.detail.RuntimeValues) == 0 {
-		runtimeNotes = append(runtimeNotes, "No running runtime record is available for this jail.")
-	} else {
-		for _, key := range orderedRuntimeKeys(m.detail.RuntimeValues) {
-			lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.RuntimeValues[key]})...)
-		}
-	}
-	if m.detailShowAdvanced {
-		runtimeNotes = append(runtimeNotes, "Advanced runtime/default parameters are shown below; press a to hide them.")
-	} else {
-		runtimeNotes = append(runtimeNotes, "Advanced runtime/default parameters are hidden; press a to show them.")
-	}
-
-	if m.detail.NetworkSummary != nil {
-		appendSectionWithStyle(&lines, width, detailSectionStyle, "Network summary")
-		networkLabelWidth := 25
-		if width < 72 {
-			networkLabelWidth = 20
-		}
-		networkPairs := make([][2]string, 0, len(m.detail.NetworkSummary.Configured)+len(m.detail.NetworkSummary.Runtime))
-		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Configured) {
-			networkPairs = append(networkPairs, [2]string{key, m.detail.NetworkSummary.Configured[key]})
-		}
-		for _, key := range orderedNetworkSummaryKeys(m.detail.NetworkSummary.Runtime) {
-			networkPairs = append(networkPairs, [2]string{key, m.detail.NetworkSummary.Runtime[key]})
-		}
-		if len(networkPairs) > 0 {
-			lines = append(lines, renderKeyValueLinesWithLabelWidth(width, networkLabelWidth, networkPairs...)...)
-		}
-		if len(m.detail.NetworkSummary.Validation) > 0 {
-			for _, line := range m.detail.NetworkSummary.Validation {
-				if looksLikeWarningText(line) {
-					lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
-					continue
-				} else if looksLikeErrorText(line) {
-					lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
-					continue
-				}
-				lines = append(lines, renderInformationalKeyValueWithLabelWidth(width, networkLabelWidth, line)...)
-			}
-		}
-	}
-
-	appendSectionWithStyle(&lines, width, detailSectionStyle, "ZFS dataset")
-	if m.detail.ZFS == nil {
-		lines = append(lines, truncate("No dataset matched the jail path.", width))
-	} else {
-		lines = append(lines, renderKeyValueLines(width,
-			[2]string{"Dataset", m.detail.ZFS.Name},
-			[2]string{"Mountpoint", m.detail.ZFS.Mountpoint},
-			[2]string{"Match", m.detail.ZFS.MatchType},
-			[2]string{"Used", m.detail.ZFS.Used},
-			[2]string{"Avail", m.detail.ZFS.Avail},
-			[2]string{"Refer", m.detail.ZFS.Refer},
-			[2]string{"Compression", m.detail.ZFS.Compression},
-			[2]string{"Quota", m.detail.ZFS.Quota},
-			[2]string{"Reservation", m.detail.ZFS.Reservation},
-		)...)
-	}
-
-	appendSectionWithStyle(&lines, width, detailSectionStyle, "rctl")
-	if m.detail.RctlConfig != nil {
-		lines = append(lines, renderKeyValueLines(width,
-			[2]string{"Limit mode", valueOrDash(m.detail.RctlConfig.Mode)},
-			[2]string{"Max CPU %", valueOrDash(m.detail.RctlConfig.CPUPercent)},
-			[2]string{"Max memory", valueOrDash(m.detail.RctlConfig.MemoryLimit)},
-			[2]string{"Max processes", valueOrDash(m.detail.RctlConfig.ProcessLimit)},
-			[2]string{"rctl.conf block", yesNoText(m.detail.RctlConfig.Persistent)},
-		)...)
-		if m.detail.RctlConfig.PersistentErr != "" {
-			lines = append(lines, wizardErrorStyle.Render(truncate("rctl.conf check: "+m.detail.RctlConfig.PersistentErr, width)))
-		}
-	}
-	if !(m.detailEdit.active() && m.detailEdit.kind == detailEditRctl) {
-		lines = append(lines, truncate("Press l to add, change, or remove managed resource limits.", width))
-	}
-	if m.detail.RacctStatus != nil {
-		lines = append(lines, renderKeyValueLines(width,
-			[2]string{"kern.racct.enable", valueOrDash(m.detail.RacctStatus.EffectiveValue)},
-			[2]string{"loader.conf configured", yesNoText(m.detail.RacctStatus.LoaderConfigured)},
-		)...)
-		if m.detail.RacctStatus.ReadError != "" {
-			lines = append(lines, wizardErrorStyle.Render(truncate("racct check: "+m.detail.RacctStatus.ReadError, width)))
-		}
-	}
-	displayRules := visibleRctlRules(m.detail.Name, m.detail.RctlRules, m.detail.RctlConfig)
-	if len(m.detail.RctlRules) == 0 {
-		if m.detail.RctlConfig != nil && m.detail.RctlConfig.Mode == "runtime" {
-			lines = append(lines, truncate("No live rctl rules. Runtime-only limits apply only while the jail is running.", width))
-		} else {
-			lines = append(lines, truncate("No matching rctl rules.", width))
-		}
-	} else if len(displayRules) > 0 {
-		for idx, rule := range displayRules {
-			lines = append(lines, renderKeyValueLines(width, [2]string{fmt.Sprintf("Active rule %d", idx+1), rule})...)
-		}
-	}
-
-	if m.detail.LinuxReadiness != nil {
-		appendSectionWithStyle(&lines, width, detailSectionStyle, "Linux readiness")
-		linuxLabelWidth := 24
-		if width < 72 {
-			linuxLabelWidth = 20
-		}
-		for _, line := range m.linuxReadinessLines() {
-			if looksLikeWarningText(line) {
-				lines = append(lines, wizardWarningStyle.Render(truncate(line, max(1, width))))
-				continue
-			} else if looksLikeErrorText(line) || strings.HasPrefix(strings.ToLower(line), "readiness issue:") {
-				lines = append(lines, wizardErrorStyle.Render(truncate(line, max(1, width))))
-				continue
-			}
-			lines = append(lines, renderInformationalKeyValueWithLabelWidth(width, linuxLabelWidth, line)...)
-		}
-	}
-
-	if len(m.detail.SourceErrors) > 0 {
-		appendSectionWithStyle(&lines, width, detailSectionStyle, "Source errors")
-		for _, source := range sortedKeys(m.detail.SourceErrors) {
-			lines = append(lines, wizardErrorStyle.Render(truncate(fmt.Sprintf("%s: %s", source, m.detail.SourceErrors[source]), width)))
-		}
-	}
-	if len(runtimeNotes) > 0 {
-		appendSectionWithStyle(&lines, width, detailSectionStyle, "Runtime notes")
-		for _, line := range runtimeNotes {
-			lines = append(lines, truncate(line, width))
-		}
-	}
-	if m.detailShowAdvanced {
-		appendSectionWithStyle(&lines, width, detailSectionStyle, "Advanced runtime parameters")
-		if len(m.detail.AdvancedRuntimeFields) == 0 {
-			lines = append(lines, truncate("No additional runtime/default parameters.", width))
-		} else {
-			for _, key := range sortedKeys(m.detail.AdvancedRuntimeFields) {
-				lines = append(lines, renderKeyValueLines(width, [2]string{key, m.detail.AdvancedRuntimeFields[key]})...)
-			}
-		}
-	}
-	return lines
-}
-
 func orderedRuntimeKeys(values map[string]string) []string {
 	order := []string{
 		"JID",
@@ -5171,7 +4976,7 @@ func (m *model) ensureWizardFieldVisible() {
 }
 
 func (m model) detailBodyHeight() int {
-	return max(3, m.height-3)
+	return max(3, m.height-5)
 }
 
 func (m model) selectedJail() (Jail, bool) {

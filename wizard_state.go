@@ -167,6 +167,7 @@ type jailCreationWizard struct {
 	message              string
 	executionLogs        []string
 	executionError       string
+	executionNextActions []string
 }
 
 func (w jailCreationWizard) currentStepHasField(id string) bool {
@@ -874,10 +875,12 @@ func (w jailCreationWizard) mountPointList() []string {
 func (w *jailCreationWizard) clearExecutionResult() {
 	w.executionLogs = nil
 	w.executionError = ""
+	w.executionNextActions = nil
 }
 
 func (w *jailCreationWizard) setExecutionResult(result JailCreationResult) {
 	w.executionLogs = append([]string(nil), result.Logs...)
+	w.executionNextActions = append([]string(nil), result.NextActions...)
 	if result.Err != nil {
 		w.executionError = result.Err.Error()
 		w.message = "Creation failed. Review execution output and adjust values."

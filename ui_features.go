@@ -486,12 +486,13 @@ const (
 )
 
 type activityEntry struct {
-	At      time.Time
-	Action  string
-	Target  string
-	Status  activityStatus
-	Message string
-	Logs    []string
+	At        time.Time
+	Action    string
+	Target    string
+	Status    activityStatus
+	Message   string
+	Checklist []string
+	Logs      []string
 }
 
 type activityLogState struct {
@@ -640,20 +641,25 @@ func (m *model) boundActivityCursor() {
 }
 
 func (m *model) addActivityEntry(action, target, message string, status activityStatus, logs []string) {
+	m.addActivityEntryDetailed(action, target, message, status, logs, nil)
+}
+
+func (m *model) addActivityEntryDetailed(action, target, message string, status activityStatus, logs []string, checklist []string) {
 	entry := activityEntry{
-		At:      time.Now(),
-		Action:  strings.TrimSpace(action),
-		Target:  strings.TrimSpace(target),
-		Status:  status,
-		Message: strings.TrimSpace(message),
-		Logs:    append([]string(nil), logs...),
+		At:        time.Now(),
+		Action:    strings.TrimSpace(action),
+		Target:    strings.TrimSpace(target),
+		Status:    status,
+		Message:   strings.TrimSpace(message),
+		Checklist: append([]string(nil), checklist...),
+		Logs:      append([]string(nil), logs...),
 	}
 	m.activityEntries = append([]activityEntry{entry}, m.activityEntries...)
 	m.boundActivityCursor()
 }
 
 func (m model) renderActivityLogView() string {
-	title := titleStyle.Render("Activity Log")
+	title := titleStyle.Render("Activity / History")
 	meta := summaryStyle.Render(fmt.Sprintf("Entries:%d", len(m.activityEntries)))
 	header := headerBarStyle.Width(m.width).Render(title + "  " + meta)
 	hint := "j/k: select | enter/right: view details | esc/left: back | A: close | ctrl+c: quit"
@@ -697,11 +703,15 @@ func (m model) renderActivityLogView() string {
 		detailLines = append(detailLines, "Select an entry once activity exists.")
 	} else {
 		entry := m.activityEntries[m.activity.cursor]
+		summary := summarizeActivityLogs(entry.Logs)
 		detailLines = append(detailLines, renderKeyValueLines(max(12, rightWidth-2),
 			[2]string{"Time", entry.At.Format(time.RFC3339)},
 			[2]string{"Action", entry.Action},
 			[2]string{"Target", valueOrDash(entry.Target)},
 			[2]string{"Status", valueOrDash(activityStatusLabel(entry.Status))},
+			[2]string{"Commands", fmt.Sprintf("%d", len(summary.Commands))},
+			[2]string{"Files touched", fmt.Sprintf("%d", len(summary.FilesTouched))},
+			[2]string{"Rollback warnings", fmt.Sprintf("%d", len(summary.RollbackWarnings))},
 		)...)
 		if entry.Message != "" {
 			appendSection(&detailLines, max(12, rightWidth-2), "Message")
@@ -709,8 +719,34 @@ func (m model) renderActivityLogView() string {
 				detailLines = append(detailLines, truncate(line, max(12, rightWidth-2)))
 			}
 		}
+		if len(entry.Checklist) > 0 {
+			appendSection(&detailLines, max(12, rightWidth-2), "Next required actions")
+			for _, item := range entry.Checklist {
+				for _, line := range wrapText("- "+item, max(12, rightWidth-2)) {
+					detailLines = append(detailLines, truncate(line, max(12, rightWidth-2)))
+				}
+			}
+		}
+		if len(summary.Commands) > 0 {
+			appendSection(&detailLines, max(12, rightWidth-2), "Commands run")
+			for _, line := range summary.Commands {
+				detailLines = append(detailLines, truncate(line, max(12, rightWidth-2)))
+			}
+		}
+		if len(summary.FilesTouched) > 0 {
+			appendSection(&detailLines, max(12, rightWidth-2), "Files touched")
+			for _, line := range summary.FilesTouched {
+				detailLines = append(detailLines, truncate(line, max(12, rightWidth-2)))
+			}
+		}
+		if len(summary.RollbackWarnings) > 0 {
+			appendSection(&detailLines, max(12, rightWidth-2), "Rollback warnings")
+			for _, line := range summary.RollbackWarnings {
+				detailLines = append(detailLines, truncate(line, max(12, rightWidth-2)))
+			}
+		}
 		if len(entry.Logs) > 0 {
-			appendSection(&detailLines, max(12, rightWidth-2), "Logs")
+			appendSection(&detailLines, max(12, rightWidth-2), "Full logs")
 			for _, line := range entry.Logs {
 				detailLines = append(detailLines, truncate(line, max(12, rightWidth-2)))
 			}
@@ -1024,6 +1060,7 @@ func (m *model) openDetailView(jail Jail) {
 	m.mode = screenJailDetail
 	m.detailLoading = true
 	m.detailScroll = 0
+	m.detailTab = detailTabSummary
 	m.detailShowAdvanced = false
 	m.detailErr = nil
 	m.detailNotice = ""

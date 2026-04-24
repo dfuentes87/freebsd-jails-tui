@@ -46,13 +46,14 @@ const (
 type createProgressContextKey struct{}
 
 type JailCreationResult struct {
-	Name       string
-	ConfigPath string
-	FstabPath  string
-	JailPath   string
-	Logs       []string
-	Warnings   []string
-	Err        error
+	Name        string
+	ConfigPath  string
+	FstabPath   string
+	JailPath    string
+	Logs        []string
+	Warnings    []string
+	NextActions []string
+	Err         error
 }
 
 func withCreateProgress(ctx context.Context, ch chan<- downloadProgressMsg) context.Context {
@@ -130,6 +131,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 		}
 		result.Logs = logs
 		result.Warnings = warnings
+		result.NextActions = buildPostCreateChecklist(values, warnings, err == nil)
 		result.Err = err
 		return result
 	}
@@ -362,6 +364,7 @@ func ExecuteJailCreation(ctx context.Context, values jailWizardValues, progressC
 	}
 	result.Logs = logs
 	result.Warnings = warnings
+	result.NextActions = buildPostCreateChecklist(values, warnings, true)
 	return result
 }
 
