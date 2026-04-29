@@ -41,8 +41,8 @@ The TUI reads standard FreeBSD jail configuration locations, including:
 
 User-specific TUI state is stored under the app config directory:
 
-- `$XDG_CONFIG_HOME/freebsd-jails-tui`
-- or `~/.config/freebsd-jails-tui`
+- `$XDG_CONFIG_HOME/freebsd-jails-tui` or
+- `~/.config/freebsd-jails-tui`
 
 ## License
 

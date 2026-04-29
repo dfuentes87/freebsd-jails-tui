@@ -29,6 +29,7 @@ type TemplateDatasetInfo struct {
 	SnapshotCount      int
 	ChildDatasets      []string
 	CloneDependents    []string
+	JailRefs           []string
 	WizardTemplateRefs []string
 	SafeLeaf           bool
 	RenameAllowed      bool
@@ -99,6 +100,11 @@ func ListTemplateDatasets(parentOverride *templateDatasetParent) ([]TemplateData
 	if err != nil {
 		return nil, parent, err
 	}
+	jailRefMap := collectConfiguredJailPathReferenceMap()
+	mountpointByDataset := map[string]string{}
+	for _, row := range rows {
+		mountpointByDataset[row.Name] = filepath.Clean(strings.TrimSpace(row.Mountpoint))
+	}
 
 	items := make([]TemplateDatasetInfo, 0)
 	for _, row := range rows {
@@ -122,9 +128,11 @@ func ListTemplateDatasets(parentOverride *templateDatasetParent) ([]TemplateData
 		}
 		item.ChildDatasets = childDatasetsFor(row.Name, rows)
 		item.CloneDependents = cloneDependentsFor(row.Name, rows)
+		item.JailRefs = templateDatasetJailRefs(row.Mountpoint, item.CloneDependents, mountpointByDataset, jailRefMap)
 		item.WizardTemplateRefs = append(item.WizardTemplateRefs, refMap[filepath.Clean(row.Mountpoint)]...)
 		sort.Strings(item.ChildDatasets)
 		sort.Strings(item.CloneDependents)
+		sort.Strings(item.JailRefs)
 		sort.Slice(item.WizardTemplateRefs, func(i, j int) bool {
 			return strings.ToLower(item.WizardTemplateRefs[i]) < strings.ToLower(item.WizardTemplateRefs[j])
 		})
@@ -372,6 +380,53 @@ func collectWizardTemplateReferenceMap() (map[string][]string, error) {
 		refs[clean] = append(refs[clean], tmpl.Name)
 	}
 	return refs, nil
+}
+
+func collectConfiguredJailPathReferenceMap() map[string][]string {
+	refs := map[string][]string{}
+	for _, name := range discoverConfiguredJails() {
+		conf, err := discoverJailConf(name)
+		if err != nil {
+			continue
+		}
+		path := filepath.Clean(strings.TrimSpace(conf.Values["path"]))
+		if path == "" {
+			continue
+		}
+		refs[path] = append(refs[path], name)
+	}
+	for path := range refs {
+		sort.Slice(refs[path], func(i, j int) bool {
+			return strings.ToLower(refs[path][i]) < strings.ToLower(refs[path][j])
+		})
+	}
+	return refs
+}
+
+func templateDatasetJailRefs(mountpoint string, cloneDependents []string, mountpointByDataset map[string]string, jailRefMap map[string][]string) []string {
+	seen := map[string]struct{}{}
+	appendRefs := func(path string) {
+		for _, name := range jailRefMap[filepath.Clean(strings.TrimSpace(path))] {
+			if name == "" {
+				continue
+			}
+			seen[name] = struct{}{}
+		}
+	}
+
+	appendRefs(mountpoint)
+	for _, dependent := range cloneDependents {
+		appendRefs(mountpointByDataset[dependent])
+	}
+
+	refs := make([]string, 0, len(seen))
+	for name := range seen {
+		refs = append(refs, name)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return strings.ToLower(refs[i]) < strings.ToLower(refs[j])
+	})
+	return refs
 }
 
 func isDirectChildDataset(parent, child string) bool {
